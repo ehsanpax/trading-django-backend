@@ -61,8 +61,6 @@ class CalculateLotSizeView(APIView):
                 "stop_loss_distance": result["stop_loss_distance"]
             }, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-<<<<<<< HEAD
-=======
     
 
 
@@ -99,4 +97,3 @@ class RiskManagementDetailView(generics.RetrieveUpdateAPIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
         return super().update(request, *args, **kwargs)
->>>>>>> 1beac62
