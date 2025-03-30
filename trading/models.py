@@ -19,6 +19,11 @@ class Trade(models.Model):
     Represents a trade execution.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    order_id = models.BigIntegerField(null=True, blank=True)
+    deal_id = models.BigIntegerField(null=True, blank=True)
+    position_id = models.BigIntegerField(null=True, blank=True)
+    swap = models.FloatField(null=True, blank=True)         
+    commission = models.FloatField(null=True, blank=True)
     account = models.ForeignKey(
         Account,
         on_delete=models.CASCADE,
@@ -55,48 +60,6 @@ class Trade(models.Model):
         return f"Trade {self.id} on {self.instrument}"
 
 
-class RiskManagement(models.Model):
-    """
-    Stores risk management settings for a trading account.
-    """
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    account = models.ForeignKey(
-        Account,
-        on_delete=models.CASCADE,
-        related_name="risk_settings"
-    )
-    max_daily_loss = models.DecimalField(max_digits=10, decimal_places=2)
-    last_updated = models.DateTimeField(auto_now=True)
-    max_trade_risk = models.DecimalField(max_digits=5, decimal_places=2, default=1.0)
-    max_open_positions = models.IntegerField(default=3)
-    enforce_cooldowns = models.BooleanField(default=True)
-    consecutive_loss_limit = models.IntegerField(default=3)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    def __str__(self):
-        return f"Risk Settings for {self.account}"
-
-
-class TradeJournal(models.Model):
-    """
-    Keeps a log of actions related to a trade.
-    """
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    trade = models.ForeignKey(
-        Trade,
-        on_delete=models.CASCADE,
-        related_name="journals"
-    )
-    action = models.CharField(max_length=50)  # e.g., 'Trade Opened', 'SL Modified'
-    trade_timeframe = models.CharField(max_length=10)  # e.g., '1H', '4H', 'Daily'
-    reason = models.TextField(null=True, blank=True)  # Detailed user notes
-    chart_snapshot = models.CharField(max_length=255, null=True, blank=True)  # URL or file path
-    # JSONField requires Django 3.1+. If older, you may need django-jsonfield or another approach.
-    details = models.JSONField(null=True, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    def __str__(self):
-        return f"Journal for Trade {self.trade.id}"
 
 
 class Watchlist(models.Model):

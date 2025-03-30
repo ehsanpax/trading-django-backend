@@ -1,5 +1,9 @@
 # mt5/services.py
 import MetaTrader5 as mt5
+from trading.models import Trade
+from datetime import datetime, timedelta, timezone
+import time
+
 
 class MT5Connector:
     """
@@ -85,10 +89,12 @@ class MT5Connector:
         return {
             "message": "Trade executed successfully",
             "order_id": result.order,
+            "deal_id" : result.deal,
             "volume": lot_size,
             "symbol": symbol,
             "direction": direction.upper(),
             "price": price
+            
         }
 
     def get_position_by_ticket(self, ticket: int) -> dict:
@@ -150,7 +156,14 @@ class MT5Connector:
 
         open_positions = []
         for pos in positions:
+            try:
+                trade = Trade.objects.get(order_id=pos.ticket)
+                trade_id = str(trade.id)
+            except Trade.DoesNotExist:
+                trade_id = None
+
             open_positions.append({
+                "trade_id": trade_id,
                 "ticket": pos.ticket,
                 "symbol": pos.symbol,
                 "volume": pos.volume,
@@ -160,6 +173,8 @@ class MT5Connector:
             })
 
         return {"open_positions": open_positions}
+
+
 
     def get_live_price(self, symbol: str) -> dict:
         """Fetch real-time price for a symbol from MT5."""
@@ -179,3 +194,110 @@ class MT5Connector:
             "tick_size": symbol_info.point,
             "contract_size": symbol_info.trade_contract_size
         }
+    def close_trade(self, ticket: int, volume: float, symbol: str) -> dict:
+        if mt5.terminal_info() is None:
+            return {"error": "MT5 terminal is not running"}
+
+        account_info = mt5.account_info()
+        if not account_info or account_info.login != self.account_id:
+            return {"error": "Not logged in to the correct MT5 account"}
+
+        price_info = mt5.symbol_info_tick(symbol)
+        if not price_info:
+            return {"error": f"Price not available for {symbol}"}
+
+        # Determine close price and order type
+        position = mt5.positions_get(ticket=ticket)
+        if not position:
+            return {"error": f"No position found for ticket {ticket}"}
+
+        pos = position[0]
+        direction = "SELL" if pos.type == mt5.POSITION_TYPE_BUY else "BUY"
+        close_price = price_info.bid if direction == "SELL" else price_info.ask
+        order_type = mt5.ORDER_TYPE_SELL if direction == "SELL" else mt5.ORDER_TYPE_BUY
+
+        close_request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "position": ticket,
+            "symbol": symbol,
+            "volume": volume,
+            "type": order_type,
+            "price": close_price,
+            "deviation": 10,
+            "magic": 0,
+            "comment": "Trade closed via API",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_IOC,
+        }
+
+        result = mt5.order_send(close_request)
+
+        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            return {"error": f"Failed to close trade: {result.comment if result else 'no result'}"}
+
+        return {"message": "Trade closed in MT5", "close_price": close_price}
+    
+
+
+    def get_closed_deal_profit(self, ticket: int, max_retries=5, delay=2) -> dict:
+        for attempt in range(max_retries):
+            utc_from = datetime.now(timezone.utc) - timedelta(days=1)
+            utc_to = datetime.now(timezone.utc)
+            deals = mt5.history_deals_get(utc_from, utc_to)
+
+            if deals:
+                for deal in deals:
+                    if deal.position_id == ticket:
+                        print(f"✅ Profit found on retry {attempt+1}: {deal.profit}")
+                        return {"profit": deal.profit}
+
+            print(f"⏳ Retry {attempt+1}/{max_retries} — waiting for closed deal...")
+            time.sleep(delay)
+
+        return {"error": f"No closed deal found for ticket {ticket} after {max_retries} retries"}
+
+    def get_latest_deal_ticket(self, order_ticket: int, max_retries=10, delay=1) -> int:
+        """
+        Attempts to retrieve the deal ticket corresponding to the given order ticket.
+        It polls MT5's deal history for a matching deal (by order field) and returns its ticket.
+        """
+        from datetime import datetime, timedelta, timezone
+        import time
+
+        for attempt in range(max_retries):
+            utc_from = datetime.now(timezone.utc) - timedelta(minutes=1)
+            utc_to = datetime.now(timezone.utc)
+            deals = mt5.history_deals_get(utc_from, utc_to)
+            if deals:
+                for d in deals:
+                    if d.order == order_ticket:
+                        print(f"✅ Found deal ticket {d.ticket} for order {order_ticket} on retry {attempt+1}")
+                        return d.ticket
+            print(f"⏳ Retry {attempt+1}/{max_retries} — waiting for deal ticket for order {order_ticket}...")
+            time.sleep(delay)
+        return None
+    
+    def get_closed_trade_profit(self, order_ticket: int, max_retries=10, delay=2) -> dict:
+        """
+        Polls MT5 history deals for all deals related to the given order_ticket (using the order filter)
+        and sums up the profit, commission, and swap fields.
+        """
+        from datetime import datetime, timedelta, timezone
+        import time
+
+        for attempt in range(max_retries):
+            utc_from = datetime.now(timezone.utc) - timedelta(days=1)
+            utc_to = datetime.now(timezone.utc)
+            # Use the order parameter to filter deals directly:
+            deals = mt5.history_deals_get(utc_from, utc_to, order=order_ticket)
+            if deals:
+                total_profit = sum(deal.profit + deal.commission + deal.swap for deal in deals)
+                print(f"✅ Total net profit for order {order_ticket} on attempt {attempt+1}: {total_profit}")
+                return {"profit": total_profit}
+            print(f"⏳ Retry {attempt+1}/{max_retries} — waiting for closed deals...")
+            time.sleep(delay)
+        return {"error": f"No closed deals found for order {order_ticket} after {max_retries} retries"}
+
+
+
+

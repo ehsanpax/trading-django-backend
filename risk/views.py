@@ -4,11 +4,15 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from django.shortcuts import get_object_or_404
-
+from .serializers import RiskManagementSerializer
 from .serializers import LotSizeRequestSerializer
 from .management import calculate_position_size
 from accounts.models import Account  # Adjust path as needed
-
+from rest_framework import generics, permissions
+from .models import RiskManagement
+from rest_framework.exceptions import NotFound
+from datetime import timedelta
+from django.utils import timezone
 class CalculateLotSizeView(APIView):
     """
     Calculates lot size based on provided equity, risk percent, and stop-loss distance.
@@ -57,3 +61,42 @@ class CalculateLotSizeView(APIView):
                 "stop_loss_distance": result["stop_loss_distance"]
             }, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+<<<<<<< HEAD
+=======
+    
+
+
+class RiskManagementDetailView(generics.RetrieveUpdateAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = RiskManagementSerializer
+
+    def get_object(self):
+        account = self.request.user.accounts.first()
+        if not account:
+            raise NotFound("No account found for the current user.")
+        risk_settings, created = RiskManagement.objects.get_or_create(
+            account=account,
+            defaults={
+                "max_daily_loss": 5,
+                "max_trade_risk": 1,
+                "max_open_positions": 3,
+                "enforce_cooldowns": True,
+                "consecutive_loss_limit": 3,
+                "cooldown_period": timedelta(minutes=30),
+                "max_lot_size": 2,
+                "max_open_trades_same_symbol": 1,
+            }
+        )
+        return risk_settings
+
+    def update(self, request, *args, **kwargs):
+        instance = self.get_object()
+        now = timezone.now()
+        # Only allow update if at least 30 days have passed since the last update.
+        if now - instance.last_updated < timedelta(days=30):
+            return Response(
+                {"detail": "Risk settings can only be updated once a month."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        return super().update(request, *args, **kwargs)
+>>>>>>> 1beac62

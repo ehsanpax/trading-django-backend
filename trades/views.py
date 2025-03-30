@@ -19,28 +19,18 @@ from risk.management import validate_trade_request, fetch_risk_settings
 
 # Import the MT5Connector service from the mt5 app
 from mt5.services import MT5Connector
-
+from risk.models import RiskManagement
+from risk.management import (
+    validate_trade_request,  # existing function that calculates final lot size, etc.
+    perform_risk_checks      # our new guard rail checks
+)
 # ----- Trade Execution -----
 class ExecuteTradeView(APIView):
     """
     Executes a trade with risk validation.
-    Expected JSON:
-    {
-        "account_id": "<account_id>",
-        "symbol": "EURUSD",
-        "direction": "BUY",
-        "lot_size": 0.1,
-        "entry_price": 1.2050,
-        "stop_loss_distance": 50,
-        "take_profit": 1.2100,
-        "risk_percent": 0.5,
-        "projected_profit": 0.0,
-        "projected_loss": 0.0,
-        "rr_ratio": null
-    }
     """
     permission_classes = [IsAuthenticated]
-
+    
     def post(self, request):
         data = request.data
         account_id = data.get("account_id")
@@ -54,21 +44,25 @@ class ExecuteTradeView(APIView):
         projected_profit = data.get("projected_profit", 0.0)
         projected_loss = data.get("projected_loss", 0.0)
         rr_ratio = data.get("rr_ratio")
-
-        # Validate account ownership
+        reason = data.get("reason")
+    
         account = get_object_or_404(Account, id=account_id)
         if account.user != request.user:
             return Response({"detail": "Unauthorized to trade on this account"}, status=status.HTTP_403_FORBIDDEN)
-
-        # Fetch account details locally (assume a service function; see next section)
+    
         account_info = get_account_details(account_id, request.user)
         if "error" in account_info:
             return Response({"detail": account_info["error"]}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Fetch risk settings and validate trade parameters
+    # 1️⃣ Fetch risk settings
+        try:
+            risk_settings = RiskManagement.objects.get(account=account)
+        except RiskManagement.DoesNotExist:
+            return Response({"detail": "No risk settings found for this account"}, status=status.HTTP_400_BAD_REQUEST)
+        
         risk_settings = fetch_risk_settings(account_id)
         validation_response = validate_trade_request(
             account_id=account_id,
+            user=request.user,
             symbol=symbol,
             trade_direction=direction,
             stop_loss_distance=stop_loss_distance,
@@ -77,25 +71,32 @@ class ExecuteTradeView(APIView):
         )
         if "error" in validation_response:
             return Response({"detail": validation_response["error"]}, status=status.HTTP_400_BAD_REQUEST)
-
+    
         final_lot_size = validation_response.get("lot_size")
         stop_loss_price = validation_response.get("stop_loss_price")
         take_profit_price = validation_response.get("take_profit_price")
 
+         # 3️⃣ Perform new guard-rail checks
+        risk_check_result = perform_risk_checks(risk_settings, final_lot_size, symbol)
+        if "error" in risk_check_result:
+            return Response({"detail": risk_check_result["error"]}, status=status.HTTP_400_BAD_REQUEST)
+
         execution_result = None
         position_info = {}
-
+        order_ticket = None
+        deal_ticket = None
+    
         if account.platform == "MT5":
             try:
                 mt5_account = MT5Account.objects.get(account=account)
             except MT5Account.DoesNotExist:
                 return Response({"detail": "No linked MT5 account found"}, status=status.HTTP_400_BAD_REQUEST)
-
+    
             connector = MT5Connector(mt5_account.account_number, mt5_account.broker_server)
             login_result = connector.connect(mt5_account.encrypted_password)
             if "error" in login_result:
                 return Response({"detail": login_result["error"]}, status=status.HTTP_400_BAD_REQUEST)
-
+    
             trade_result = connector.place_trade(
                 symbol=symbol,
                 lot_size=final_lot_size,
@@ -105,21 +106,26 @@ class ExecuteTradeView(APIView):
             )
             if "error" in trade_result:
                 return Response({"detail": trade_result["error"]}, status=status.HTTP_400_BAD_REQUEST)
+    
+            # Capture the order ticket and the opening deal ticket.
+            order_ticket = trade_result.get("order_id")
+            deal_ticket = trade_result.get("deal")  # Assuming place_trade returns result.deal as "deal"
+            if not deal_ticket:
+                # Fallback: If not present, use the order ticket.
+                deal_ticket = order_ticket
+    
             execution_result = trade_result
-
-            order_id = execution_result.get("order_id")
-            if order_id:
-                position_info = connector.get_position_by_ticket(order_id)
-
+            execution_result["order_ticket"] = order_ticket
+            execution_result["deal_ticket"] = deal_ticket
+            position_info = connector.get_position_by_ticket(order_ticket)
+    
         elif account.platform == "cTrader":
-            # Implement cTrader integration here if needed
             return Response({"detail": "cTrader integration not implemented yet"}, status=status.HTTP_400_BAD_REQUEST)
         else:
             return Response({"detail": "Unsupported trading platform"}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Save trade to the database
+        
+        position_ticket = position_info.get("ticket")
         new_trade = Trade.objects.create(
-            id=uuid.uuid4(),
             account=account,
             instrument=symbol,
             direction=direction,
@@ -132,14 +138,19 @@ class ExecuteTradeView(APIView):
             trade_status="open",
             projected_profit=Decimal(projected_profit),
             projected_loss=Decimal(projected_loss),
-            rr_ratio=rr_ratio
+            rr_ratio=rr_ratio,
+            order_id=order_ticket,  # Save original order ticket
+            deal_id=deal_ticket,     # Save opening deal ticket
+            position_id=position_ticket,
+            reason=reason
         )
-
+    
         return Response({
             "message": "Trade executed successfully",
             "trade_id": str(new_trade.id),
             "platform": account.platform,
-            "order_id": execution_result.get("order_id"),
+            "order_ticket": order_ticket,
+            "deal_ticket": deal_ticket,
             "real_fill_data": position_info,
         }, status=status.HTTP_200_OK)
 
@@ -183,21 +194,71 @@ class UpdateTradeView(APIView):
 
 # ----- Close Trade -----
 class CloseTradeView(APIView):
-    """
-    Closes an open trade.
-    """
     permission_classes = [IsAuthenticated]
 
     def delete(self, request, trade_id):
         trade = get_object_or_404(Trade, id=trade_id)
+
         if trade.account.user != request.user:
             return Response({"detail": "Unauthorized to close this trade"}, status=status.HTTP_403_FORBIDDEN)
+
         if trade.trade_status != "open":
             return Response({"detail": "Trade is already closed"}, status=status.HTTP_400_BAD_REQUEST)
+
+        profit = None
+
+        if trade.account.platform == "MT5":
+            try:
+                mt5_account = trade.account.mt5_account
+            except MT5Account.DoesNotExist:
+                return Response({"detail": "No linked MT5 account found."}, status=status.HTTP_400_BAD_REQUEST)
+
+            connector = MT5Connector(mt5_account.account_number, mt5_account.broker_server)
+            login_result = connector.connect(mt5_account.encrypted_password)
+            if "error" in login_result:
+                return Response({"detail": login_result["error"]}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Capture the current profit, commission, and swap BEFORE closing
+            position_data = connector.get_position_by_ticket(trade.order_id)
+            if position_data:
+                profit = (
+                    position_data.get("profit", 0)
+                    + position_data.get("commission", 0)
+                    + position_data.get("swap", 0)
+                )
+                print(f"Captured P&L before closing: {profit}")
+            else:
+                print("No position data found; defaulting profit to 0")
+                profit = 0
+
+            # Now close the trade in MT5
+            close_result = connector.close_trade(
+                ticket=trade.order_id,
+                volume=float(trade.remaining_size),
+                symbol=trade.instrument
+            )
+
+            if "error" in close_result:
+                return Response({"detail": close_result["error"]}, status=status.HTTP_400_BAD_REQUEST)
+
+        elif trade.account.platform == "cTrader":
+            return Response({"detail": "cTrader close not implemented yet."}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            return Response({"detail": "Unsupported trading platform."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Update the trade record with the captured profit
         trade.trade_status = "closed"
         trade.closed_at = timezone.now()
+        if profit is not None:
+            trade.actual_profit_loss = Decimal(profit)
         trade.save()
-        return Response({"message": "Trade closed successfully", "trade_id": str(trade.id)}, status=status.HTTP_200_OK)
+
+        return Response({
+            "message": "Trade closed successfully",
+            "trade_id": str(trade.id),
+            "actual_profit_loss": float(trade.actual_profit_loss or 0)
+        }, status=status.HTTP_200_OK)
+
 
 # ----- Retrieve Symbol Info -----
 class TradeSymbolInfoView(APIView):
@@ -230,3 +291,45 @@ class MarketPriceView(APIView):
             return Response({"detail": price_data["error"]}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response(price_data, status=status.HTTP_200_OK)
+    
+class OpenPositionsLiveView(APIView):
+    """
+    Retrieves live open positions from the appropriate trading platform.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, account_id):
+        account = get_object_or_404(Account, id=account_id, user=request.user)
+
+        if account.platform == "MT5":
+            try:
+                mt5_account = account.mt5_account
+            except MT5Account.DoesNotExist:
+                return Response({"detail": "No linked MT5 account found."}, status=status.HTTP_400_BAD_REQUEST)
+
+            connector = MT5Connector(mt5_account.account_number, mt5_account.broker_server)
+            login_result = connector.connect(mt5_account.encrypted_password)
+            if "error" in login_result:
+                return Response({"detail": login_result["error"]}, status=status.HTTP_400_BAD_REQUEST)
+
+            mt5_positions = connector.get_open_positions()
+            if "error" in mt5_positions:
+                return Response({"detail": mt5_positions["error"]}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Enhance MT5 positions with UUIDs
+            enriched_positions = []
+            for pos in mt5_positions["open_positions"]:
+                ticket = pos["ticket"]
+                try:
+                    trade = Trade.objects.get(order_id=ticket)
+                    pos["trade_id"] = str(trade.id)
+                except Trade.DoesNotExist:
+                    pos["trade_id"] = None
+                enriched_positions.append(pos)
+
+            return Response({"open_positions": enriched_positions}, status=status.HTTP_200_OK)
+
+        elif account.platform == "cTrader":
+            return Response({"detail": "cTrader integration not implemented yet."}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({"detail": "Unsupported trading platform."}, status=status.HTTP_400_BAD_REQUEST)

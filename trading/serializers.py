@@ -1,6 +1,7 @@
 # trading/serializers.py
 from rest_framework import serializers
-from .models import Account, Trade, RiskManagement
+from .models import Account, Trade
+from risk.models import RiskManagement
 
 class AccountSerializer(serializers.ModelSerializer):
     class Meta:

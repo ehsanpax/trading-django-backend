@@ -1,6 +1,6 @@
 # trades/serializers.py
-from rest_framework import serializers
-from accounts.models import Trade  # adjust import based on your project structure
+from rest_framework import serializers# adjust import based on your project structure
+from trading.models import Trade
 
 class TradeSerializer(serializers.ModelSerializer):
     class Meta:

@@ -2,7 +2,7 @@
 from django.urls import path
 from .views import (
     ExecuteTradeView, OpenTradesView, UpdateTradeView,
-    CloseTradeView, TradeSymbolInfoView, MarketPriceView
+    CloseTradeView, TradeSymbolInfoView, MarketPriceView, OpenPositionsLiveView
 )
 
 urlpatterns = [
@@ -12,4 +12,6 @@ urlpatterns = [
     path('close/<str:trade_id>/', CloseTradeView.as_view(), name='close-trade'),
     path('symbol-info/<str:account_id>/<str:symbol>/', TradeSymbolInfoView.as_view(), name='trade-symbol-info'),
     path('market-price/<str:account_id>/<str:symbol>/', MarketPriceView.as_view(), name='market-price'),
+    path('open-positions/<uuid:account_id>/', OpenPositionsLiveView.as_view(), name="open_positions_live"),
+
 ]
