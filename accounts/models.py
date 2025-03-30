@@ -16,6 +16,11 @@ class Account(models.Model):
     balance = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
     equity = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
     created_at = models.DateTimeField(auto_now_add=True)
+    shared_with = models.ManyToManyField(
+        settings.AUTH_USER_MODEL,
+        related_name="shared_accounts",
+        blank=True
+    )
 
     def __str__(self):
         return f"{self.name} ({self.platform})"
