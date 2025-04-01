@@ -77,7 +77,7 @@ class ExecuteTradeView(APIView):
         take_profit_price = validation_response.get("take_profit_price")
 
          # 3️⃣ Perform new guard-rail checks
-        risk_check_result = perform_risk_checks(risk_settings, final_lot_size, symbol)
+        risk_check_result = perform_risk_checks(risk_settings, final_lot_size, symbol,Decimal(risk_percent))
         if "error" in risk_check_result:
             return Response({"detail": risk_check_result["error"]}, status=status.HTTP_400_BAD_REQUEST)
 

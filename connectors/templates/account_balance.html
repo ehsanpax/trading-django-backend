@@ -1,0 +1,26 @@
+<!-- ctrader_app/templates/account_balance.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>cTrader Account Balance</title>
+</head>
+<body>
+    <h1>Fetch cTrader Account Balance</h1>
+
+    <form method="POST">
+        {% csrf_token %}
+        <label for="token">cTrader Access Token:</label>
+        <input type="text" id="token" name="token" required>
+        <button type="submit">Get Balance</button>
+    </form>
+
+    {% if balance %}
+        <h2>Your Account Balance: {{ balance }}</h2>
+    {% endif %}
+
+    {% if error %}
+        <p style="color:red;">{{ error }}</p>
+    {% endif %}
+</body>
+</html>

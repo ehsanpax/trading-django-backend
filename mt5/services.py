@@ -161,7 +161,7 @@ class MT5Connector:
                 trade_id = str(trade.id)
             except Trade.DoesNotExist:
                 trade_id = None
-
+            
             open_positions.append({
                 "trade_id": trade_id,
                 "ticket": pos.ticket,
@@ -169,7 +169,8 @@ class MT5Connector:
                 "volume": pos.volume,
                 "price_open": pos.price_open,
                 "profit": pos.profit,
-                "time": pos.time
+                "time": pos.time,
+                "direction": "SELL" if pos.type == 1 else "BUY"
             })
 
         return {"open_positions": open_positions}

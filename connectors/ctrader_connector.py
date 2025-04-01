@@ -22,16 +22,13 @@ from google.protobuf.json_format import MessageToDict
 logger = logging.getLogger(__name__)
 
 
-def start_twisted_reactor():
-    """
-    Starts the Twisted reactor in a separate thread if it is not already running.
-    """
+"""def start_twisted_reactor():
     if not reactor.running:
         reactor_thread = threading.Thread(
             target=reactor.run, kwargs={'installSignalHandlers': 0}, daemon=True
         )
         reactor_thread.start()
-        logger.info("Twisted reactor started in a separate thread.")
+        logger.info("Twisted reactor started in a separate thread.")"""
 
 
 class CTraderConnector:
@@ -44,31 +41,28 @@ class CTraderConnector:
         self.is_live = is_live
         self.client = None
 
-    def start_service(self):
-        """
-        Initializes the client and starts the Twisted service.
-        """
+    """"def start_service(self):
+    
+        #Initializes the client and starts the Twisted service. 
         # Ensure the Twisted reactor is running.
         start_twisted_reactor()
-
         host = EndPoints.PROTOBUF_LIVE_HOST if self.is_live else EndPoints.PROTOBUF_DEMO_HOST
         port = EndPoints.PROTOBUF_PORT
-
         self.client = Client(host, port, TcpProtocol)
         self.client.setConnectedCallback(self.on_connected)
         self.client.setDisconnectedCallback(self.on_disconnected)
         self.client.setMessageReceivedCallback(self.on_message_received)
 
         self.client.startService()
-        logger.info("cTrader client service started on %s:%s", host, port)
+        logger.info("cTrader client service started on %s:%s", host, port)"""
 
     # --------------------
     # Callbacks / Handlers
     # --------------------
 
-    def on_connected(self, client):
-        logger.info("Connected to cTrader API.")
-        self.send_application_auth("13641_QqAQIxv5R7wUGHoSjbKTalzNMPbyDEt6b9I8VxgwUO3rs3qN0P", "tFzXEFQi2fYtaIWm7xdz54n6jhnT5dQHGT82Jf5Z3J6DSUwV1i")
+    #def on_connected(self, client):
+    #    logger.info("Connected to cTrader API.")
+    #    self.send_application_auth("13641_QqAQIxv5R7wUGHoSjbKTalzNMPbyDEt6b9I8VxgwUO3rs3qN0P", "tFzXEFQi2fYtaIWm7xdz54n6jhnT5dQHGT82Jf5Z3J6DSUwV1i")
 
     def on_disconnected(self, client, reason):
         logger.error("Disconnected from cTrader API: %s", reason)

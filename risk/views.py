@@ -91,7 +91,7 @@ class RiskManagementDetailView(generics.RetrieveUpdateAPIView):
         instance = self.get_object()
         now = timezone.now()
         # Only allow update if at least 30 days have passed since the last update.
-        if now - instance.last_updated < timedelta(days=30):
+        if now - instance.last_updated < timedelta(days=0.1):
             return Response(
                 {"detail": "Risk settings can only be updated once a month."},
                 status=status.HTTP_400_BAD_REQUEST

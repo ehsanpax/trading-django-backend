@@ -247,7 +247,22 @@ def exceeds_max_trades_same_symbol(risk_settings: RiskManagement, symbol: str) -
         return True
     return False
 
-def perform_risk_checks(risk_settings: RiskManagement, proposed_lot: Decimal, symbol: str) -> dict:
+def validate_trade_risk(trade_risk_percent, risk_settings):
+    """
+    Validates that the trade's risk percentage does not exceed the maximum allowed risk percent.
+    trade_risk_percent: Decimal representing risk percent for the trade (e.g., 1.5 for 1.5%)
+    risk_settings: instance of RiskManagement with a max_trade_risk field.
+    Returns: None if valid, or an error dict if invalid.
+    """
+    # Convert both values to Decimal to ensure precision.
+    trade_risk = Decimal(trade_risk_percent)
+    max_allowed_risk = Decimal(risk_settings.max_trade_risk)
+    
+    if trade_risk > max_allowed_risk:
+        return {"error": f"Trade risk {trade_risk}% exceeds the allowed maximum of {max_allowed_risk}%."}
+    return {}
+
+def perform_risk_checks(risk_settings: RiskManagement, proposed_lot: Decimal, symbol: str, trade_risk_percent: Decimal) -> dict:
     """
     Calls the guard-rail checks in sequence. If any fail, returns an error dict.
     Otherwise returns an empty dict indicating all checks passed.
@@ -267,6 +282,11 @@ def perform_risk_checks(risk_settings: RiskManagement, proposed_lot: Decimal, sy
     # 4️⃣ Check open trades for the same symbol
     if exceeds_max_trades_same_symbol(risk_settings, symbol):
         return {"error": "Too many open trades on the same symbol."}
+    
+    # 5️⃣ Check trade risk percentage against max_trade_risk.
+    trade_risk_percent=Decimal(trade_risk_percent).quantize(Decimal("0.01"))
+    if Decimal(trade_risk_percent) > Decimal(risk_settings.max_trade_risk):
+        return {"error": f"Trade risk {trade_risk_percent}% exceeds the allowed maximum of {risk_settings.max_trade_risk}%."}
 
     # If all checks pass, return an empty dict
     return {}

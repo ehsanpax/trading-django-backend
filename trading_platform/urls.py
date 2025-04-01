@@ -37,6 +37,7 @@ urlpatterns = [
     path('mt5/', include('mt5.urls')),
     path('risk/', include('risk.urls')),
     path('trade_journal/', include('trade_journal.urls')),
+    path('connectors/', include('connectors.urls')),
 ]
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

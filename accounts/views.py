@@ -18,7 +18,6 @@ from rest_framework import status, permissions
 from .serializers import AccountSerializer
 import os, logging
 from asgiref.sync import async_to_sync
-from connectors.ctrader_connector import ctrader_connector
 from twisted.internet import defer
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
@@ -63,30 +62,7 @@ class CreateAccountView(APIView):
                     broker_server=data["broker_server"],
                     encrypted_password=data["password"],  # You can add proper encryption here if needed
                 )
-            elif data["platform"] == "cTrader":
-                # For cTrader, load tokens from a file (adjust token storage path as needed)
-                token_storage = getattr(settings, "CTRADER_TOKEN_STORAGE", "ctrader_tokens.json")
-                try:
-                    with open(token_storage, "r") as file:
-                        tokens = json.load(file)
-                except Exception as e:
-                    print(e)
-                    return Response(
-                        {"detail": "Failed to load cTrader tokens."},
-                        status=status.HTTP_500_INTERNAL_SERVER_ERROR
-                    )
-                CTraderAccount.objects.create(
-                    account=new_account,
-                    user=user,
-                    access_token=tokens.get("access_token"),
-                    refresh_token=tokens.get("refresh_token"),
-                    is_sandbox=True,
-                )
-
-            return Response(
-                {"message": "Account created successfully", "account_id": str(new_account.id)},
-                status=status.HTTP_201_CREATED
-            )
+            
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     
 
