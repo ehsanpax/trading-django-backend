@@ -53,6 +53,7 @@ INSTALLED_APPS = [
     'price',
     'channels',
     'trade_journal',
+    "utils"
 ]
 
 
@@ -177,7 +178,7 @@ LOGGING = {
     'loggers': {
         '': {
             'handlers': ['console'],
-            'level': 'DEBUG',
+            'level': 'INFO',
         },
     },
 }
