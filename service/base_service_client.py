@@ -1,6 +1,6 @@
 from .dataclasses import (
     TradeOutputData, 
-    PostitionOutputData, 
+    PositionOutputData, 
     AccountInfoOutputData, 
     CurrentPriceOutputData, 
     SymbolInfoOutputData, 
@@ -9,22 +9,23 @@ from .dataclasses import (
     PositionsOutputData
 )
 from typing import List
+from accounts.models import Account
 
 class BaseServiceClient:
     """
     Handles connection, login, and trade execution for MT5.
     """
-    def __init__(self, account_id: int):
-        self.account_id = account_id
+    def __init__(self, account: Account):
+        self.account: Account = account
 
 
-    def connect(self, password: str) -> MessageOutputData:
+    def connect(self) -> MessageOutputData:
         pass
 
     def place_trade(self, symbol: str, lot_size: float, direction: str, stop_loss: float, take_profit: float) -> TradeOutputData:
         pass
 
-    def get_position_by_ticket(self, ticket: int) -> PostitionOutputData:
+    def get_position_by_ticket(self, ticket: int) -> PositionOutputData:
         pass
 
     def get_account_info(self) -> AccountInfoOutputData:

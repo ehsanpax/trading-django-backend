@@ -19,7 +19,7 @@ class TradeOutputData(BaseDataclass):
 
 
 @dataclass
-class PostitionOutputData(BaseDataclass):
+class PositionOutputData(BaseDataclass):
     trade_id: str = None
     ticket: str = None
     symbol: str = None
@@ -66,4 +66,4 @@ class TradeDealProfitOutputData(BaseDataclass):
 
 @dataclass
 class PositionsOutputData(BaseDataclass):
-    positions: List[PostitionOutputData]
+    positions: List[PositionOutputData]

@@ -4,10 +4,10 @@ from trading.models import Trade
 from datetime import datetime, timedelta, timezone
 import time
 from accounts.models import MT5Account
-from utils.service_client import BaseServiceClient
-from utils.dataclasses import (
+from service.base_service_client import BaseServiceClient
+from service.dataclasses import (
     TradeOutputData, 
-    PostitionOutputData, 
+    PositionOutputData, 
     AccountInfoOutputData, 
     CurrentPriceOutputData, 
     SymbolInfoOutputData, 
@@ -16,14 +16,16 @@ from utils.dataclasses import (
     PositionsOutputData
 )
 from typing import List
+from accounts.models import Account
 
 class MT5Connector(BaseServiceClient):
     """
     Handles connection, login, and trade execution for MT5.
     """
-    def __init__(self, account_id: int):
-        super().__init__(account_id)
-        self.mt5_account = MT5Account.objects.get(account_number=self.account_id)
+    def __init__(self, account: Account):
+        super().__init__(account)
+
+        self.mt5_account = MT5Account.objects.get(account=self.account)
         self.broker_server = self.mt5_account.broker_server
 
         if not mt5.initialize():
@@ -31,7 +33,7 @@ class MT5Connector(BaseServiceClient):
         else:
             print("MT5 Initialized Successfully.")
 
-    def connect(self, password: str) -> MessageOutputData:
+    def connect(self) -> MessageOutputData:
         """Log into MT5 if not already logged in."""
         terminal_info = mt5.terminal_info()
         if terminal_info is None:
@@ -49,7 +51,7 @@ class MT5Connector(BaseServiceClient):
             )
 
         print(f"Attempting login for account: {self.account_id}")
-        login_status = mt5.login(self.account_id, password, self.broker_server)
+        login_status = mt5.login(self.account_id, self.mt5_account.encrypted_password, self.broker_server)
         if not login_status:
             error_code, error_message = mt5.last_error()
             return MessageOutputData(
@@ -121,34 +123,34 @@ class MT5Connector(BaseServiceClient):
             price=price
         )
 
-    def get_position_by_ticket(self, ticket: int) -> PostitionOutputData:
+    def get_position_by_ticket(self, ticket: int) -> PositionOutputData:
         """Fetch an open position by ticket (order ID)."""
         if mt5.terminal_info() is None:
-            return PostitionOutputData(
+            return PositionOutputData(
                 message_type="error", message="MT5 terminal is not running"
             )
 
         account_info = mt5.account_info()
         if not account_info or account_info.login != self.account_id:
-            return PostitionOutputData(
+            return PositionOutputData(
                 message_type="error", message="Not logged in to the correct MT5 account"
             )
 
         positions = mt5.positions_get(ticket=ticket)
         if positions is None:
             err_code, err_msg = mt5.last_error()
-            return PostitionOutputData(
+            return PositionOutputData(
                 message_type="error", message=f"positions_get() failed: {err_code} - {err_msg}"
             )
 
         if not positions:
-            return PostitionOutputData(
+            return PositionOutputData(
                 message_type="error", message=f"No open position found for ticket {ticket}"
             )
 
         pos = positions[0]
 
-        return PostitionOutputData(
+        return PositionOutputData(
             ticket=pos.ticket,
             symbol=pos.symbol,
             volume=pos.volume,
@@ -201,7 +203,7 @@ class MT5Connector(BaseServiceClient):
                 trade_id = None
             
             open_positions.append(
-                PostitionOutputData(
+                PositionOutputData(
                     trade_id=trade_id,
                     ticket=pos.ticket,
                     symbol=pos.symbol,

@@ -1,9 +1,9 @@
 from .choices import ServiceTypeChoices
-from .service_client import BaseServiceClient
+from .base_service_client import BaseServiceClient
 from .service_adapter_mapping import MAPPING
 from .dataclasses import (
     TradeOutputData, 
-    PostitionOutputData, 
+    PositionOutputData, 
     AccountInfoOutputData, 
     CurrentPriceOutputData, 
     SymbolInfoOutputData, 
@@ -12,24 +12,25 @@ from .dataclasses import (
     PositionsOutputData
 )
 from typing import List
+from accounts.models import Account
 
 class ServiceAdapter:
-    def __init__(self, account_id: str, service_type: str):
-        self.account_id: str = account_id
+    def __init__(self, account: Account, service_type: str):
+        self.account: Account = account
         self.service_type: str = service_type
-        self.client: BaseServiceClient = self.client_class(self.account_id)
+        self.client: BaseServiceClient = self.client_class(self.account)
 
     @property
     def client_class(self) -> BaseServiceClient:
         return MAPPING[self.service_type]
     
-    def connect(self, password: str) -> MessageOutputData:
-        return self.client.connect(password=password)
+    def connect(self) -> MessageOutputData:
+        return self.client.connect()
 
     def place_trade(self, symbol: str, lot_size: float, direction: str, stop_loss: float, take_profit: float) -> TradeOutputData:
         return self.client.place_trade(symbol=symbol, lot_size=lot_size, direction=direction, stop_loss=stop_loss, take_profit=take_profit)
 
-    def get_position_by_ticket(self, ticket: int) -> PostitionOutputData:
+    def get_position_by_ticket(self, ticket: int) -> PositionOutputData:
         return self.client.get_position_by_ticket(ticket=ticket)
 
     def get_account_info(self) -> AccountInfoOutputData:
