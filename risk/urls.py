@@ -5,5 +5,5 @@ from .views import RiskManagementDetailView
 
 urlpatterns = [
     path('calculate_lot_size/', CalculateLotSizeView.as_view(), name='calculate-lot-size'),
-    path('settings/', RiskManagementDetailView.as_view(), name='risk-settings'),
+    path('settings/<uuid:account_id>/', RiskManagementDetailView.as_view(), name='risk-settings'),
 ]

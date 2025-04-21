@@ -5,10 +5,12 @@ from rest_framework import status
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from decimal import Decimal
-import uuid
+import uuid, requests
+from django.conf import settings
 from accounts.services import get_account_details
 # Import models from your accounts app (or wherever they reside)
 from accounts.models import Account, MT5Account, CTraderAccount
+from connectors.ctrader_client import CTraderClient
 from trading.models import Trade
 from accounts.views import FetchAccountDetailsView
 # DRF permissions
@@ -16,10 +18,11 @@ from rest_framework.permissions import IsAuthenticated
 from .helpers import fetch_symbol_info_for_platform, fetch_live_price_for_platform
 # Import risk management functions (assumed refactored for Django)
 from risk.management import validate_trade_request, fetch_risk_settings
-
+from asgiref.sync import async_to_sync
 # Import the MT5Connector service from the mt5 app
 from mt5.services import MT5Connector
 from risk.models import RiskManagement
+from rest_framework.authentication import TokenAuthentication, SessionAuthentication
 from risk.management import (
     validate_trade_request,  # existing function that calculates final lot size, etc.
     perform_risk_checks      # our new guard rail checks
@@ -29,6 +32,7 @@ class ExecuteTradeView(APIView):
     """
     Executes a trade with risk validation.
     """
+    authentication_classes = [TokenAuthentication, SessionAuthentication]
     permission_classes = [IsAuthenticated]
     
     def post(self, request):
@@ -40,11 +44,13 @@ class ExecuteTradeView(APIView):
         entry_price = data.get("entry_price")
         stop_loss_distance = data.get("stop_loss_distance")
         take_profit = data.get("take_profit")
+        take_profit_distance = data.get("take_profit_distance")
         risk_percent = data.get("risk_percent", 0.5)
         projected_profit = data.get("projected_profit", 0.0)
         projected_loss = data.get("projected_loss", 0.0)
         rr_ratio = data.get("rr_ratio")
         reason = data.get("reason")
+        trader = data.get("trader", "")
     
         account = get_object_or_404(Account, id=account_id)
         if account.user != request.user:
@@ -120,7 +126,50 @@ class ExecuteTradeView(APIView):
             position_info = connector.get_position_by_ticket(order_ticket)
     
         elif account.platform == "cTrader":
-            return Response({"detail": "cTrader integration not implemented yet"}, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                ctrader_account = CTraderAccount.objects.get(account=account)
+            except CTraderAccount.DoesNotExist:
+                return Response({"detail": "No linked cTrader account found."}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Build the payload using details from the account and trade inputs.
+            payload = {
+                "access_token": ctrader_account.access_token,
+                "ctid_trader_account_id": ctrader_account.ctid_trader_account_id,
+                "symbol": symbol,
+                "order_type": "MARKET",  # For LIMIT orders, include "limit_price" in payload
+                "trade_side": direction.upper(),
+                "volume": final_lot_size,
+                "stop_loss": stop_loss_distance,
+                "take_profit": take_profit_distance
+            }
+            print("cTrader Payload:", payload)
+            base_url = settings.CTRADER_API_BASE_URL  # e.g., "http://localhost:8080"
+            order_url = f"{base_url}/ctrader/order/place"
+            
+            try:
+                order_resp = requests.post(order_url, json=payload, timeout=10)
+            except requests.RequestException as e:
+                return Response({"detail": f"Error calling cTrader order placement endpoint: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
+            
+            if order_resp.status_code != 200:
+                return Response({"detail": f"cTrader order placement failed with status: {order_resp.status_code}"}, status=status.HTTP_400_BAD_REQUEST)
+            
+            order_data = order_resp.json()
+            if "error" in order_data:
+                return Response({"detail": order_data["error"]}, status=status.HTTP_400_BAD_REQUEST)
+            
+            order_ticket = order_data.get("orderId")
+            deal_ticket = order_data.get("deal") or order_ticket
+    
+            execution_result = order_data
+            # Build a minimal position_info dictionary based on the order placement response.
+            position_info = {
+                "ticket": order_data.get("positionId"),
+                "price_open": order_data.get("entry_price"),
+                "volume": order_data.get("lot_size"),
+                "sl": stop_loss_price,
+                "tp": take_profit_price,
+            }
         else:
             return Response({"detail": "Unsupported trading platform"}, status=status.HTTP_400_BAD_REQUEST)
         
@@ -142,7 +191,8 @@ class ExecuteTradeView(APIView):
             order_id=order_ticket,  # Save original order ticket
             deal_id=deal_ticket,     # Save opening deal ticket
             position_id=position_ticket,
-            reason=reason
+            reason=reason,
+            trader=trader
         )
     
         return Response({
@@ -330,6 +380,87 @@ class OpenPositionsLiveView(APIView):
             return Response({"open_positions": enriched_positions}, status=status.HTTP_200_OK)
 
         elif account.platform == "cTrader":
-            return Response({"detail": "cTrader integration not implemented yet."}, status=status.HTTP_400_BAD_REQUEST)
+                    try:
+                        ctrader_account = CTraderAccount.objects.get(account=account)
+                    except CTraderAccount.DoesNotExist:
+                        return Response({"detail": "No linked cTrader account found."}, status=400)
 
-        return Response({"detail": "Unsupported trading platform."}, status=status.HTTP_400_BAD_REQUEST)
+                    payload = {
+                        "access_token": ctrader_account.access_token,
+                        "ctid_trader_account_id": ctrader_account.ctid_trader_account_id,
+                    }
+                    base_url = settings.CTRADER_API_BASE_URL  # e.g. "http://localhost:8080"
+                    positions_url = f"{base_url}/ctrader/positions"
+
+                    try:
+                        pos_resp = requests.post(positions_url, json=payload, timeout=10)
+                    except requests.RequestException as e:
+                        return Response({"detail": f"Error calling cTrader positions endpoint: {str(e)}"}, status=400)
+
+                    if pos_resp.status_code != 200:
+                        return Response({"detail": f"cTrader positions endpoint returned status: {pos_resp.status_code}"}, status=400)
+
+                    pos_data = pos_resp.json()
+                    if "error" in pos_data:
+                        return Response({"detail": pos_data["error"]}, status=400)
+
+                    raw_positions = pos_data.get("positions", [])
+                    transformed_positions = []
+                    for pos in raw_positions:
+                        # Ticket from positionId (converted to int)
+                        try:
+                            ticket = int(pos.get("positionId"))
+                        except (ValueError, TypeError):
+                            ticket = None
+
+                        trade_data = pos.get("tradeData", {})
+                        # Convert volume from string (in micro units) to lots.
+                        try:
+                            volume = float(trade_data.get("volume", "0")) / 100
+                        except (ValueError, TypeError):
+                            volume = 0.0
+
+                        # Determine the trade side/direction.
+                        direction = trade_data.get("tradeSide", "").upper()
+
+                        # Use 'price_open' if available; otherwise, fallback to 'price'.
+                        price_open = pos.get("price_open", pos.get("price", 0))
+                        try:
+                            price_open = float(price_open)
+                        except (ValueError, TypeError):
+                            price_open = 0.0
+
+                        # Use unrealized_pnl as profit.
+                        try:
+                            profit = float(pos.get("unrealized_pnl", 0))
+                        except (ValueError, TypeError):
+                            profit = 0.0
+
+                        # Use openTimestamp if available, else utcLastUpdateTimestamp; convert from ms to s.
+                        timestamp_raw = trade_data.get("openTimestamp") or pos.get("utcLastUpdateTimestamp")
+                        try:
+                            time_val = int(float(timestamp_raw) / 1000)
+                        except (ValueError, TypeError):
+                            time_val = 0
+
+                        # Use the 'symbol' field directly as provided.
+                        symbol_str = pos.get("symbol")
+                        if not symbol_str:
+                            # Fallback if, for some reason, symbol is not provided.
+                            symbol_id = trade_data.get("symbolId")
+                            symbol_str = f"Unknown-{symbol_id}" if symbol_id else "Unknown"
+
+                        transformed_positions.append({
+                            "trade_id": None,      # Not assigned until linked to a trade.
+                            "ticket": ticket,
+                            "symbol": symbol_str,
+                            "volume": volume,
+                            "price_open": price_open,
+                            "profit": profit,
+                            "time": time_val,
+                            "direction": direction,
+                        })
+
+                    return Response({"open_positions": transformed_positions}, status=200)
+
+        return Response({"detail": "Unsupported trading platform."}, status=400)

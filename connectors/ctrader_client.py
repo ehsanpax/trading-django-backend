@@ -5,6 +5,7 @@ from ctrader_open_api.tcpProtocol import TcpProtocol
 from ctrader_open_api.protobuf import Protobuf
 from twisted.internet.asyncioreactor import install
 from .utils import deferred_to_future
+from .ctrader_service import ctrader_client
 
 try:
     install()
@@ -22,7 +23,8 @@ class CTraderClient:
         self.account_id = account_id
         self.client_id = client_id
         self.client_secret = client_secret
-        self.client = Client(host=self.host, port=self.port, protocol=TcpProtocol)
+        
+        self.client = ctrader_client
 
     async def authenticate_application(self):
         auth_req = Protobuf.get("ProtoOAApplicationAuthReq")
@@ -65,11 +67,36 @@ class CTraderClient:
 
     async def connect(self):
         if not self.client.running:
-            self.client.startService()
+            ctrader_client.startService()
             logger.info(f"[Connecting] Host: {self.host}, Port: {self.port}")
             conn = self.client.whenConnected()
             if hasattr(conn, "addCallbacks"):
                 await deferred_to_future(conn)
             else:
                 await conn
-            logger.info("[Connected to cTrader API!]")
+        logger.info("[Connected to cTrader API!]")
+
+
+    async def get_open_positions(self):
+        logger.info("[Fetching Open Positions]")
+        # Make sure we’re connected and authenticated first
+        await self.connect()
+        await self.authenticate_application()
+        await self.authenticate_account()
+
+        # Prepare the request
+        positions_req = Protobuf.get("ProtoOAGetAccountPositionsReq")
+        positions_req.ctidTraderAccountId = self.account_id
+
+        logger.info(f"[Positions Request] ctidTraderAccountId: {self.account_id}")
+        response = await deferred_to_future(self.client.send(positions_req))
+        
+        # Parse the response
+        positions_data = Protobuf.extract(response)
+        # Typically this is a repeated field called `position`
+        open_positions = getattr(positions_data, "position", [])
+
+        logger.info(f"[Open Positions] Count: {len(open_positions)}")
+
+        # Return in your preferred format
+        return {"open_positions": open_positions}

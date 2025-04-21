@@ -62,6 +62,20 @@ class CreateAccountView(APIView):
                     broker_server=data["broker_server"],
                     encrypted_password=data["password"],  # You can add proper encryption here if needed
                 )
+            elif data["platform"] == "cTrader":
+                CTraderAccount.objects.create(
+                    account=new_account,
+                    user=user,
+                    # Add other required cTrader-specific fields here, for example:
+                    # account_number=data.get("account_number"),
+                    # access_token=data.get("access_token"),
+                    # refresh_token=data.get("refresh_token"),
+                )
+
+            return Response(
+                {"message": "Account created successfully", "account_id": str(new_account.id)},
+                status=status.HTTP_201_CREATED
+            )
             
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     

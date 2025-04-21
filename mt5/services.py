@@ -30,9 +30,19 @@ class MT5Connector:
             return {"message": f"Already logged into MT5 account {self.account_id}"}
 
         print(f"Attempting login for account: {self.account_id}")
+        mt5.shutdown()  # Ensure any previous session is closed
+        time.sleep(1)   # Wait one second for the shutdown to complete
+        if not mt5.initialize():
+            print("Reinitialization failed:", mt5.last_error())
+            return {"error": "MT5 reinitialization failed after shutdown."}
+        else:
+            print("MT5 reinitialized successfully")
+
+        print("🔹 Logging into MT5...", self.account_id, password, self.broker_server)
         login_status = mt5.login(self.account_id, password, self.broker_server)
         if not login_status:
             error_code, error_message = mt5.last_error()
+            print("Login failed.", f"Failed to log in to MT5: {error_code} - {error_message}")
             return {"error": f"Failed to log in to MT5: {error_code} - {error_message}"}
 
         print("Successfully Logged into MT5")

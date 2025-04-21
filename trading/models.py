@@ -56,6 +56,13 @@ class Trade(models.Model):
     closed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
+    trader = models.CharField(
+    max_length=100,
+    null=True,
+    blank=True,
+    help_text="The identifier or name of the user executing the trade."
+    )
+
     def __str__(self):
         return f"Trade {self.id} on {self.instrument}"
 

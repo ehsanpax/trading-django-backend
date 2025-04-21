@@ -16,7 +16,7 @@ from datetime import timedelta
 BASE_DIR = Path(__file__).resolve().parent.parent
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
-
+CTRADER_API_BASE_URL = "http://localhost:8080"
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.1/howto/deployment/checklist/
 
@@ -26,7 +26,7 @@ SECRET_KEY = 'django-insecure-$u3ceh^n!)-++(v@#0%zku#)p0djp0)z5v4v53&(ensmztfd$)
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ["*"]
 
 
 # Application definition
@@ -53,6 +53,7 @@ INSTALLED_APPS = [
     'price',
     'channels',
     'trade_journal',
+    'automations'
 ]
 
 

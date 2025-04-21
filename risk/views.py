@@ -69,9 +69,8 @@ class RiskManagementDetailView(generics.RetrieveUpdateAPIView):
     serializer_class = RiskManagementSerializer
 
     def get_object(self):
-        account = self.request.user.accounts.first()
-        if not account:
-            raise NotFound("No account found for the current user.")
+        account_id = self.kwargs.get("account_id")
+        account = get_object_or_404(Account, id=account_id, user=self.request.user)
         risk_settings, created = RiskManagement.objects.get_or_create(
             account=account,
             defaults={
