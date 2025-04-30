@@ -53,7 +53,8 @@ INSTALLED_APPS = [
     'price',
     'channels',
     'trade_journal',
-    'automations'
+    'automations',
+    'indicators',
 ]
 
 
@@ -183,3 +184,36 @@ LOGGING = {
     },
 }
 
+
+# ─── TradingView login ─────────────────────────────
+TV_USERNAME = "your_tv_username"
+TV_PASSWORD = "your_tv_password"
+
+# ─── Which symbols & where to fetch them ───────────
+INDICATOR_SYMBOLS = ["EURUSD", "GBPUSD", "XAUUSD"]
+SYMBOL_EXCHANGE_MAP = {
+    "EURUSD": "OANDA",
+    "GBPUSD": "FX_IDC",
+    "XAUUSD": "OANDA",
+}
+
+# ─── Which timeframes to compute ────────────────────
+from tvDatafeed import Interval
+INDICATOR_TIMEFRAMES = {
+    "M1":  Interval.in_1_minute,
+    "M5":  Interval.in_5_minute,
+    # add more as needed…
+}
+
+# ─── Celery broker & beat ───────────────────────────
+CELERY_BROKER_URL = "redis://localhost:6379/0"
+CELERY_BEAT_SCHEDULE = {
+    "refresh-indicators-every-minute": {
+        "task": "indicators.tasks.update_indicator_cache",
+        "schedule": 60.0,   # every 60s
+    },
+        "scan-profit-targets-every-15s": {
+        "task": "trades.tasks.scan_profit_targets",
+        "schedule": 15.0,
+    },
+}

@@ -6,12 +6,13 @@ from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from decimal import Decimal
 import uuid, requests
+from uuid import uuid4
 from django.conf import settings
 from accounts.services import get_account_details
 # Import models from your accounts app (or wherever they reside)
 from accounts.models import Account, MT5Account, CTraderAccount
 from connectors.ctrader_client import CTraderClient
-from trading.models import Trade
+from trading.models import Trade, Order, ProfitTarget
 from accounts.views import FetchAccountDetailsView
 # DRF permissions
 from rest_framework.permissions import IsAuthenticated
@@ -27,182 +28,38 @@ from risk.management import (
     validate_trade_request,  # existing function that calculates final lot size, etc.
     perform_risk_checks      # our new guard rail checks
 )
-# ----- Trade Execution -----
-class ExecuteTradeView(APIView):
-    """
-    Executes a trade with risk validation.
-    """
-    authentication_classes = [TokenAuthentication, SessionAuthentication]
+from .targets import derive_target_price
+from .services import TradeService
+from .serializers import (
+    OrderSerializer,
+    ExecuteTradeInputSerializer,
+    ExecuteTradeOutputSerializer
+)
+from rest_framework.generics import GenericAPIView
+# ----- Trade / Order Execution --------------------------------------------
+
+class ExecuteTradeView(GenericAPIView):
     permission_classes = [IsAuthenticated]
-    
-    def post(self, request):
-        data = request.data
-        account_id = data.get("account_id")
-        symbol = data.get("symbol")
-        direction = data.get("direction")
-        lot_size_input = data.get("lot_size")
-        entry_price = data.get("entry_price")
-        stop_loss_distance = data.get("stop_loss_distance")
-        take_profit = data.get("take_profit")
-        take_profit_distance = data.get("take_profit_distance")
-        risk_percent = data.get("risk_percent", 0.5)
-        projected_profit = data.get("projected_profit", 0.0)
-        projected_loss = data.get("projected_loss", 0.0)
-        rr_ratio = data.get("rr_ratio")
-        reason = data.get("reason")
-        trader = data.get("trader", "")
-    
-        account = get_object_or_404(Account, id=account_id)
-        if account.user != request.user:
-            return Response({"detail": "Unauthorized to trade on this account"}, status=status.HTTP_403_FORBIDDEN)
-    
-        account_info = get_account_details(account_id, request.user)
-        if "error" in account_info:
-            return Response({"detail": account_info["error"]}, status=status.HTTP_400_BAD_REQUEST)
-    # 1️⃣ Fetch risk settings
-        try:
-            risk_settings = RiskManagement.objects.get(account=account)
-        except RiskManagement.DoesNotExist:
-            return Response({"detail": "No risk settings found for this account"}, status=status.HTTP_400_BAD_REQUEST)
-        
-        risk_settings = fetch_risk_settings(account_id)
-        validation_response = validate_trade_request(
-            account_id=account_id,
-            user=request.user,
-            symbol=symbol,
-            trade_direction=direction,
-            stop_loss_distance=stop_loss_distance,
-            take_profit_price=take_profit,
-            risk_percent=risk_percent
-        )
-        if "error" in validation_response:
-            return Response({"detail": validation_response["error"]}, status=status.HTTP_400_BAD_REQUEST)
-    
-        final_lot_size = validation_response.get("lot_size")
-        stop_loss_price = validation_response.get("stop_loss_price")
-        take_profit_price = validation_response.get("take_profit_price")
+    serializer_class   = ExecuteTradeInputSerializer
+    response_serializer_class = ExecuteTradeOutputSerializer
 
-         # 3️⃣ Perform new guard-rail checks
-        risk_check_result = perform_risk_checks(risk_settings, final_lot_size, symbol,Decimal(risk_percent))
-        if "error" in risk_check_result:
-            return Response({"detail": risk_check_result["error"]}, status=status.HTTP_400_BAD_REQUEST)
+    def post(self, request, *args, **kwargs):
+        # 1️⃣ validate input
+        in_ser = self.get_serializer(data=request.data)
+        in_ser.is_valid(raise_exception=True)
 
-        execution_result = None
-        position_info = {}
-        order_ticket = None
-        deal_ticket = None
-    
-        if account.platform == "MT5":
-            try:
-                mt5_account = MT5Account.objects.get(account=account)
-            except MT5Account.DoesNotExist:
-                return Response({"detail": "No linked MT5 account found"}, status=status.HTTP_400_BAD_REQUEST)
-    
-            connector = MT5Connector(mt5_account.account_number, mt5_account.broker_server)
-            login_result = connector.connect(mt5_account.encrypted_password)
-            if "error" in login_result:
-                return Response({"detail": login_result["error"]}, status=status.HTTP_400_BAD_REQUEST)
-    
-            trade_result = connector.place_trade(
-                symbol=symbol,
-                lot_size=final_lot_size,
-                direction=direction,
-                stop_loss=stop_loss_price,
-                take_profit=take_profit_price
-            )
-            if "error" in trade_result:
-                return Response({"detail": trade_result["error"]}, status=status.HTTP_400_BAD_REQUEST)
-    
-            # Capture the order ticket and the opening deal ticket.
-            order_ticket = trade_result.get("order_id")
-            deal_ticket = trade_result.get("deal")  # Assuming place_trade returns result.deal as "deal"
-            if not deal_ticket:
-                # Fallback: If not present, use the order ticket.
-                deal_ticket = order_ticket
-    
-            execution_result = trade_result
-            execution_result["order_ticket"] = order_ticket
-            execution_result["deal_ticket"] = deal_ticket
-            position_info = connector.get_position_by_ticket(order_ticket)
-    
-        elif account.platform == "cTrader":
-            try:
-                ctrader_account = CTraderAccount.objects.get(account=account)
-            except CTraderAccount.DoesNotExist:
-                return Response({"detail": "No linked cTrader account found."}, status=status.HTTP_400_BAD_REQUEST)
-            
-            # Build the payload using details from the account and trade inputs.
-            payload = {
-                "access_token": ctrader_account.access_token,
-                "ctid_trader_account_id": ctrader_account.ctid_trader_account_id,
-                "symbol": symbol,
-                "order_type": "MARKET",  # For LIMIT orders, include "limit_price" in payload
-                "trade_side": direction.upper(),
-                "volume": final_lot_size,
-                "stop_loss": stop_loss_distance,
-                "take_profit": take_profit_distance
-            }
-            print("cTrader Payload:", payload)
-            base_url = settings.CTRADER_API_BASE_URL  # e.g., "http://localhost:8080"
-            order_url = f"{base_url}/ctrader/order/place"
-            
-            try:
-                order_resp = requests.post(order_url, json=payload, timeout=10)
-            except requests.RequestException as e:
-                return Response({"detail": f"Error calling cTrader order placement endpoint: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
-            
-            if order_resp.status_code != 200:
-                return Response({"detail": f"cTrader order placement failed with status: {order_resp.status_code}"}, status=status.HTTP_400_BAD_REQUEST)
-            
-            order_data = order_resp.json()
-            if "error" in order_data:
-                return Response({"detail": order_data["error"]}, status=status.HTTP_400_BAD_REQUEST)
-            
-            order_ticket = order_data.get("orderId")
-            deal_ticket = order_data.get("deal") or order_ticket
-    
-            execution_result = order_data
-            # Build a minimal position_info dictionary based on the order placement response.
-            position_info = {
-                "ticket": order_data.get("positionId"),
-                "price_open": order_data.get("entry_price"),
-                "volume": order_data.get("lot_size"),
-                "sl": stop_loss_price,
-                "tp": take_profit_price,
-            }
-        else:
-            return Response({"detail": "Unsupported trading platform"}, status=status.HTTP_400_BAD_REQUEST)
-        
-        position_ticket = position_info.get("ticket")
-        new_trade = Trade.objects.create(
-            account=account,
-            instrument=symbol,
-            direction=direction,
-            lot_size=Decimal(position_info.get("volume", final_lot_size)),
-            remaining_size=Decimal(position_info.get("volume", final_lot_size)),
-            entry_price=Decimal(position_info.get("price_open", take_profit)),
-            stop_loss=Decimal(position_info.get("sl", stop_loss_price)),
-            profit_target=Decimal(position_info.get("tp", take_profit_price)),
-            risk_percent=Decimal(risk_percent),
-            trade_status="open",
-            projected_profit=Decimal(projected_profit),
-            projected_loss=Decimal(projected_loss),
-            rr_ratio=rr_ratio,
-            order_id=order_ticket,  # Save original order ticket
-            deal_id=deal_ticket,     # Save opening deal ticket
-            position_id=position_ticket,
-            reason=reason,
-            trader=trader
-        )
-    
-        return Response({
-            "message": "Trade executed successfully",
-            "trade_id": str(new_trade.id),
-            "platform": account.platform,
-            "order_ticket": order_ticket,
-            "deal_ticket": deal_ticket,
-            "real_fill_data": position_info,
-        }, status=status.HTTP_200_OK)
+        # 2️⃣ run service
+        svc = TradeService(request.user, in_ser.validated_data)
+        account, final_lot, sl, tp = svc.validate()
+        resp = svc.execute_on_broker(account, final_lot, sl, tp)
+        order, trade = svc.persist(account, resp, final_lot, sl, tp)
+
+        # 3️⃣ build and return output
+        out = svc.build_response(order, trade)
+        out_ser = self.response_serializer_class(data=out)
+        out_ser.is_valid(raise_exception=True)  # ensures consistent output
+        return Response(out_ser.data, status=status.HTTP_200_OK)
+
 
 # ----- Retrieve Open Trades -----
 class OpenTradesView(APIView):
@@ -464,3 +321,194 @@ class OpenPositionsLiveView(APIView):
                     return Response({"open_positions": transformed_positions}, status=200)
 
         return Response({"detail": "Unsupported trading platform."}, status=400)
+    
+
+
+class AllOpenPositionsLiveView(APIView):
+    """
+    Retrieves live open positions from the appropriate trading platform.
+    """
+    authentication_classes = [TokenAuthentication, SessionAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        accounts = Account.objects.filter(user=request.user)
+
+        all_open_positions = []
+
+        for account in accounts:
+
+            if account.platform == "MT5":
+                try:
+                    mt5_account = account.mt5_account
+                except MT5Account.DoesNotExist:
+                    continue
+
+                connector = MT5Connector(mt5_account.account_number, mt5_account.broker_server)
+                login_result = connector.connect(mt5_account.encrypted_password)
+                if "error" in login_result:
+                    continue
+
+                mt5_positions = connector.get_open_positions()
+                if "error" in mt5_positions:
+                    continue
+
+                # Enhance MT5 positions with UUIDs
+                enriched_positions = []
+                for pos in mt5_positions["open_positions"]:
+                    ticket = pos["ticket"]
+                    try:
+                        trade = Trade.objects.get(order_id=ticket)
+                        pos["trade_id"] = str(trade.id)
+                    except Trade.DoesNotExist:
+                        pos["trade_id"] = None
+                    enriched_positions.append(pos)
+
+                all_open_positions.extend(enriched_positions)
+
+            elif account.platform == "cTrader":
+                try:
+                    ctrader_account = CTraderAccount.objects.get(account=account)
+                except CTraderAccount.DoesNotExist:
+                    continue
+
+                payload = {
+                    "access_token": ctrader_account.access_token,
+                    "ctid_trader_account_id": ctrader_account.ctid_trader_account_id,
+                }
+                base_url = settings.CTRADER_API_BASE_URL  # e.g. "http://localhost:8080"
+                positions_url = f"{base_url}/ctrader/positions"
+
+                try:
+                    pos_resp = requests.post(positions_url, json=payload, timeout=10)
+                except requests.RequestException as e:
+                    continue
+
+                if pos_resp.status_code != 200:
+                    continue
+
+                pos_data = pos_resp.json()
+                if "error" in pos_data:
+                    continue
+
+                raw_positions = pos_data.get("positions", [])
+                transformed_positions = []
+                for pos in raw_positions:
+                    # Ticket from positionId (converted to int)
+                    try:
+                        ticket = int(pos.get("positionId"))
+                    except (ValueError, TypeError):
+                        ticket = None
+
+                    trade_data = pos.get("tradeData", {})
+                    # Convert volume from string (in micro units) to lots.
+                    try:
+                        volume = float(trade_data.get("volume", "0")) / 100
+                    except (ValueError, TypeError):
+                        volume = 0.0
+
+                    # Determine the trade side/direction.
+                    direction = trade_data.get("tradeSide", "").upper()
+
+                    # Use 'price_open' if available; otherwise, fallback to 'price'.
+                    price_open = pos.get("price_open", pos.get("price", 0))
+                    try:
+                        price_open = float(price_open)
+                    except (ValueError, TypeError):
+                        price_open = 0.0
+
+                    # Use unrealized_pnl as profit.
+                    try:
+                        profit = float(pos.get("unrealized_pnl", 0))
+                    except (ValueError, TypeError):
+                        profit = 0.0
+
+                    # Use openTimestamp if available, else utcLastUpdateTimestamp; convert from ms to s.
+                    timestamp_raw = trade_data.get("openTimestamp") or pos.get("utcLastUpdateTimestamp")
+                    try:
+                        time_val = int(float(timestamp_raw) / 1000)
+                    except (ValueError, TypeError):
+                        time_val = 0
+
+                    # Use the 'symbol' field directly as provided.
+                    symbol_str = pos.get("symbol")
+                    if not symbol_str:
+                        # Fallback if, for some reason, symbol is not provided.
+                        symbol_id = trade_data.get("symbolId")
+                        symbol_str = f"Unknown-{symbol_id}" if symbol_id else "Unknown"
+
+                    transformed_positions.append({
+                        "trade_id": None,      # Not assigned until linked to a trade.
+                        "ticket": ticket,
+                        "symbol": symbol_str,
+                        "volume": volume,
+                        "price_open": price_open,
+                        "profit": profit,
+                        "time": time_val,
+                        "direction": direction,
+                    })
+
+                all_open_positions.extend(transformed_positions)
+
+        return Response({"open_positions": all_open_positions}, status=200)
+
+
+
+
+
+    
+class PendingOrdersView(APIView):
+    """
+    GET /trades/pending-orders/{account_id}/
+    Returns all pending (limit/stop) orders for the given account.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, account_id):
+        # 1️⃣ Verify ownership
+        account = get_object_or_404(Account, id=account_id, user=request.user)
+
+        # 2️⃣ Fetch PENDING orders from the DB
+        pending = Order.objects.filter(
+            account=account,
+            status=Order.Status.PENDING
+        )
+
+        # 3️⃣ Serialize & return
+        serializer = OrderSerializer(pending, many=True)
+        return Response(
+            {'pending_orders': serializer.data},
+            status=status.HTTP_200_OK
+        )
+    
+
+
+
+class AllPendingOrdersView(APIView):
+    """
+    GET /trades/pending-orders/{account_id}/
+    Returns all pending (limit/stop) orders for the given account.
+    """
+    authentication_classes = [TokenAuthentication, SessionAuthentication]    
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        accounts = Account.objects.filter(user=request.user)
+
+        all_open_orders = []
+
+        for account in accounts:
+
+            # 2️⃣ Fetch PENDING orders from the DB
+            pending = Order.objects.filter(
+                account=account,
+                status=Order.Status.PENDING
+            )
+
+            # 3️⃣ Serialize & return
+            serializer = OrderSerializer(pending, many=True)
+            all_open_orders.extend(serializer.data)
+        return Response(
+            {'pending_orders': all_open_orders},
+            status=status.HTTP_200_OK
+        )

@@ -48,64 +48,151 @@ class MT5Connector:
         print("Successfully Logged into MT5")
         return {"message": f"Logged into MT5 account {self.account_id}"}
 
-    def place_trade(self, symbol: str, lot_size: float, direction: str, stop_loss: float, take_profit: float):
-        """Executes a trade and ensures the session remains active."""
-        print("🔹 Checking MT5 Session Before Trade...")
+    def place_trade(
+        self,
+        symbol: str,
+        lot_size: float,
+        direction: str,
+        order_type: str = "MARKET",
+        limit_price: float = None,
+        time_in_force: str = "GTC",
+        stop_loss: float = None,
+        take_profit: float = None,
+    ) -> dict:
+        """
+        Executes a market trade or submits a pending order (limit/stop) on MT5.
+
+        :param symbol: instrument symbol, e.g. "EURUSD"
+        :param lot_size: size of the position in lots
+        :param direction: "BUY" or "SELL"
+        :param order_type: "MARKET", "LIMIT", or "STOP"
+        :param limit_price: required price for LIMIT or STOP orders
+        :param time_in_force: "GTC" or "DAY"
+        :param stop_loss: absolute stop loss price
+        :param take_profit: absolute take profit price
+        :return: dict with execution result or error
+        """
+
+        # Ensure MT5 session is active
         if mt5.terminal_info() is None:
             return {"error": "⚠️ MT5 session lost before trade execution!"}
 
-        # Ensure we are still logged in before placing a trade
+        # Ensure logged in to correct account
         account_info = mt5.account_info()
         if account_info is None or account_info.login != self.account_id:
             return {"error": "⚠️ MT5 session lost! Please reconnect before trading."}
 
-        order_type = mt5.ORDER_TYPE_BUY if direction.upper() == "BUY" else mt5.ORDER_TYPE_SELL
-        price_info = mt5.symbol_info_tick(symbol)
+                # 1️⃣ Fetch symbol precision & current tick
+        symbol_info = mt5.symbol_info(symbol)
+        if not symbol_info:
+            return {"error": f"⚠️ Symbol {symbol} not found or no info available"}
+        tick = mt5.symbol_info_tick(symbol)
+        if not tick:
+            return {"error": f"⚠️ No tick data for {symbol}"}
 
-        if not price_info:
-            return {"error": f"⚠️ Symbol {symbol} not found or no tick info available"}
+        direction  = direction.upper()
+        order_type = order_type.upper()
 
-        price = price_info.ask if direction.upper() == "BUY" else price_info.bid
-        print(f"Placing trade: symbol={symbol}, lot_size={lot_size}, direction={direction}, price={price}, sl={stop_loss}, tp={take_profit}")
+        # 2️⃣ If pending order, ensure limit_price is provided, rounded and valid
+        if order_type in ("LIMIT", "STOP"):
+            if limit_price is None:
+                return {"error": f"Missing 'limit_price' for {order_type} order"}
 
+            # ⬇ Convert the string to float ⬇
+            try:
+                price_val = float(limit_price)
+            except (TypeError, ValueError):
+                return {"error": f"Invalid limit_price: {limit_price}"}
+
+            # ⬇ Round to the symbol’s allowed number of decimal places ⬇
+            limit_price = round(price_val, symbol_info.digits)
+
+            # BUY‐LIMIT must be below ask; SELL‐LIMIT above bid
+            if order_type == "LIMIT":
+                if direction == "BUY" and limit_price >= tick.ask:
+                    return {"error": (
+                        f"Invalid price: BUY_LIMIT {limit_price} ≥ current ask {tick.ask}"
+                    )}
+                if direction == "SELL" and limit_price <= tick.bid:
+                    return {"error": (
+                        f"Invalid price: SELL_LIMIT {limit_price} ≤ current bid {tick.bid}"
+                    )}
+
+            # BUY‐STOP must be above ask; SELL‐STOP below bid
+            if order_type == "STOP":
+                if direction == "BUY" and limit_price <= tick.ask:
+                    return {"error": (
+                        f"Invalid price: BUY_STOP {limit_price} ≤ current ask {tick.ask}"
+                    )}
+                if direction == "SELL" and limit_price >= tick.bid:
+                    return {"error": (
+                        f"Invalid price: SELL_STOP {limit_price} ≥ current bid {tick.bid}"
+                    )}
+
+        # 3️⃣ Map action/type/price exactly as before, using our now‐validated limit_price
+        if order_type == "MARKET":
+            action = mt5.TRADE_ACTION_DEAL
+            req_type = mt5.ORDER_TYPE_BUY if direction == "BUY" else mt5.ORDER_TYPE_SELL
+            price = tick.ask if direction == "BUY" else tick.bid
+        elif order_type == "LIMIT":
+            action = mt5.TRADE_ACTION_PENDING
+            req_type = (
+                mt5.ORDER_TYPE_BUY_LIMIT if direction == "BUY" 
+                else mt5.ORDER_TYPE_SELL_LIMIT
+            )
+            price = limit_price
+        else:  # STOP
+            action = mt5.TRADE_ACTION_PENDING
+            req_type = (
+                mt5.ORDER_TYPE_BUY_STOP if direction == "BUY" 
+                else mt5.ORDER_TYPE_SELL_STOP
+            )
+            price = limit_price
+
+        # Map time_in_force
+        tif_map = {
+            "GTC": mt5.ORDER_TIME_GTC,
+            "DAY": mt5.ORDER_TIME_DAY,
+        }
+        tif = tif_map.get(time_in_force.upper(), mt5.ORDER_TIME_GTC)
+
+        # Build trade request
         trade_request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": symbol,
-            "volume": lot_size,
-            "type": order_type,
-            "price": price,
-            "sl": stop_loss,
-            "tp": take_profit,
-            "deviation": 10,
-            "magic": 0,
-            "comment": "Trade placed via API",
-            "type_time": mt5.ORDER_TIME_GTC,
+            "action":      action,
+            "symbol":      symbol,
+            "volume":      lot_size,
+            "type":        req_type,
+            "price":       price,
+            "sl":          stop_loss or 0,
+            "tp":          take_profit or 0,
+            "deviation":   10,
+            "magic":       0,
+            "comment":     "Trade placed via API",
+            "type_time":   tif,
             "type_filling": mt5.ORDER_FILLING_IOC,
         }
 
-        print("🔹 Sending Trade Request...")
+        # Send order
         result = mt5.order_send(trade_request)
-        print("order_send result:", result)
-
         if result is None:
-            # Retrieve last error if available
-            error_code, error_message = mt5.last_error()
-            return {"error": f"❌ Trade execution failed: {error_code} - {error_message}"}
-
+            err_code, err_msg = mt5.last_error()
+            return {"error": f"❌ Trade execution failed: {err_code} - {err_msg}"}
         if result.retcode != mt5.TRADE_RETCODE_DONE:
             return {"error": f"❌ Trade failed: {result.comment}"}
 
-        print("✅ Trade Executed Successfully!")
+        # Success payload
         return {
-            "message": "Trade executed successfully",
-            "order_id": result.order,
-            "deal_id" : result.deal,
-            "volume": lot_size,
-            "symbol": symbol,
-            "direction": direction.upper(),
-            "price": price
-            
+            "message":     "Trade executed successfully",
+            "order_id":    result.order,
+            "deal_id":     getattr(result, 'deal', None),
+            "volume":      lot_size,
+            "symbol":      symbol,
+            "direction":   direction,
+            "price":       price,
+            # pending orders don’t fill immediately
+            "status":      "filled" if order_type == "MARKET" else "pending",
         }
+
 
     def get_position_by_ticket(self, ticket: int) -> dict:
         """Fetch an open position by ticket (order ID)."""

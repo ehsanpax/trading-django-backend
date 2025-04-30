@@ -132,6 +132,7 @@ def validate_trade_request(account_id: str, user, symbol: str, trade_direction: 
             take_profit_price=take_profit_price,
             market_prices=market_prices
         )
+        print("CALCULATION RESULT: ", calculation_result)
     except Exception as e:
         return {"error": str(e)}
     take_profit_price=float(take_profit_price)

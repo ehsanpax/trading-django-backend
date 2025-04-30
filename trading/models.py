@@ -33,7 +33,7 @@ class Trade(models.Model):
     direction = models.CharField(max_length=10)  # E.g., 'BUY' or 'SELL'
     lot_size = models.DecimalField(max_digits=10, decimal_places=2)
     remaining_size = models.DecimalField(max_digits=10, decimal_places=2)
-    entry_price = models.DecimalField(max_digits=10, decimal_places=5)
+    entry_price = models.DecimalField(max_digits=10, decimal_places=5, null=True, blank=True)
     stop_loss = models.DecimalField(max_digits=10, decimal_places=5)
     profit_target = models.DecimalField(max_digits=10, decimal_places=5)
     risk_percent = models.DecimalField(max_digits=5, decimal_places=2)
@@ -62,11 +62,30 @@ class Trade(models.Model):
     blank=True,
     help_text="The identifier or name of the user executing the trade."
     )
+    indicators = models.JSONField(
+        null=True, blank=True,
+        help_text="Snapshot of precomputed indicators at entry"
+    )
 
     def __str__(self):
         return f"Trade {self.id} on {self.instrument}"
 
 
+class ProfitTarget(models.Model):
+    """
+    One take-profit leg for a Trade (supports n-step scaling).
+    """
+    id            = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    trade         = models.ForeignKey(Trade, on_delete=models.CASCADE, related_name="targets")
+    rank          = models.PositiveSmallIntegerField()               # 1, 2, 3 …
+    target_price  = models.DecimalField(max_digits=15, decimal_places=5)
+    target_volume = models.DecimalField(max_digits=12, decimal_places=2)  # lots
+    status        = models.CharField(max_length=10, default="pending")    # pending / hit
+    hit_at        = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        unique_together = ("trade", "rank")        # one TP1, TP2… per Trade
+        ordering = ["rank"]
 
 
 class Watchlist(models.Model):
@@ -124,3 +143,146 @@ class IndicatorData(models.Model):
         return f"{self.indicator_type} for {self.symbol} ({self.timeframe})"
 
 
+"""trading/models/orders_model.py
+
+Order model for the new order‑management workflow.  It intentionally lives in the
+`trading` app (next to `Trade`) so migrations are straightforward.  If you prefer
+another app (e.g. `orders/`), move the file and update the import paths in
+services / views.
+"""
+
+from decimal import Decimal
+from trading.models import Trade  # keep existing Trade model; link via OneToOne
+
+
+class Order(models.Model):
+    """Represents *any* order (market, limit, stop, etc.).
+
+    A *filled* market order will spawn a Trade immediately, while a *pending*
+    limit/stop order will be linked *after* execution (connector updates
+    `status`, `filled_*` fields, and creates the Trade).
+    """
+
+    class Direction(models.TextChoices):
+        BUY = "BUY", "Buy"
+        SELL = "SELL", "Sell"
+
+    class OrderType(models.TextChoices):
+        MARKET = "MARKET", "Market"
+        LIMIT = "LIMIT", "Limit"
+        STOP = "STOP", "Stop"
+        STOP_LIMIT = "STOP_LIMIT", "Stop‑Limit"
+
+    class TimeInForce(models.TextChoices):
+        GTC = "GTC", "Good‑Till‑Cancel"
+        GTD = "GTD", "Good‑Till‑Date"
+        IOC = "IOC", "Immediate‑Or‑Cancel"
+        FOK = "FOK", "Fill‑Or‑Kill"
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"  # accepted, waiting for fill
+        FILLED = "filled", "Filled"
+        PARTIALLY_FILLED = "partial", "Partially filled"
+        CANCELLED = "cancelled", "Cancelled"
+        REJECTED = "rejected", "Rejected"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    account = models.ForeignKey(
+        Account,
+        on_delete=models.CASCADE,
+        related_name="orders",
+    )
+    instrument = models.CharField(max_length=100)
+    direction = models.CharField(max_length=4, choices=Direction.choices)
+    order_type = models.CharField(max_length=12, choices=OrderType.choices)
+
+    volume = models.DecimalField(max_digits=12, decimal_places=2)
+    price = models.DecimalField(
+        max_digits=15,
+        decimal_places=5,
+        null=True,
+        blank=True,
+        help_text="Limit/stop price. Null for market orders.",
+    )
+    stop_loss = models.DecimalField(max_digits=15, decimal_places=5, null=True, blank=True)
+    take_profit = models.DecimalField(max_digits=15, decimal_places=5, null=True, blank=True)
+
+    time_in_force = models.CharField(
+        max_length=4,
+        choices=TimeInForce.choices,
+        default=TimeInForce.GTC,
+    )
+    status = models.CharField(
+        max_length=16,
+        choices=Status.choices,
+        default=Status.PENDING,
+    )
+
+    # Data returned from broker/platform (ticket, deal ids, etc.)
+    broker_order_id = models.BigIntegerField(null=True, blank=True)
+    broker_deal_id = models.BigIntegerField(null=True, blank=True)
+
+    filled_price = models.DecimalField(max_digits=15, decimal_places=5, null=True, blank=True)
+    filled_volume = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    filled_at = models.DateTimeField(null=True, blank=True)
+
+    # Link to the resulting Trade (created when filled)
+    trade = models.OneToOneField(
+        Trade,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="order",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["account", "status"]),
+            models.Index(fields=["broker_order_id"]),
+        ]
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"Order {self.id} ({self.instrument} {self.order_type})"
+
+    # Convenience helpers ---------------------------------------------------
+
+    def mark_filled(self, price: Decimal, volume: Decimal, broker_deal_id: int):
+        """Utility called by connectors when an execution event is observed."""
+        from trading.models import Trade  # inline to avoid circular import
+
+        if self.status == self.Status.FILLED:
+            return  # already done
+
+        trade = Trade.objects.create(
+            account=self.account,
+            instrument=self.instrument,
+            direction=self.direction,
+            lot_size=volume,
+            remaining_size=volume,
+            entry_price=price,
+            stop_loss=self.stop_loss or Decimal("0"),
+            profit_target=self.take_profit or Decimal("0"),
+            risk_percent=Decimal("0"),  # set if known
+            trade_status="open",
+            order_id=self.broker_order_id,
+            deal_id=broker_deal_id,
+            position_id=None,
+        )
+
+        self.trade = trade
+        self.status = self.Status.FILLED
+        self.filled_price = price
+        self.filled_volume = volume
+        self.filled_at = trade.created_at
+        self.save(update_fields=[
+            "trade",
+            "status",
+            "filled_price",
+            "filled_volume",
+            "filled_at",
+            "updated_at",
+        ])
