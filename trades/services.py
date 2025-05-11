@@ -9,6 +9,7 @@ from trading.models import Order, Trade, ProfitTarget
 from uuid import uuid4
 from .targets import derive_target_price
 from trading.models import IndicatorData
+from rest_framework.exceptions import ValidationError, APIException
 
 def get_cached(symbol, tf, ind):
     row = (
@@ -50,7 +51,7 @@ class TradeService:
             risk_percent       = float(self.data["risk_percent"]),
         )
         if "error" in rv:
-            raise ValueError(rv["error"])
+            raise ValidationError(rv["error"])
 
         final_lot = rv["lot_size"]
         sl_price  = rv["stop_loss_price"]
@@ -60,7 +61,7 @@ class TradeService:
         rm = fetch_risk_settings(account.id)
         rc = perform_risk_checks(rm, Decimal(final_lot), self.data["symbol"], Decimal(self.data["risk_percent"]))
         if "error" in rc:
-            raise ValueError(rc["error"])
+            raise ValidationError(rc["error"])
 
         return account, final_lot, sl_price, tp_price
     def _get_connector(self, account: Account):
@@ -97,7 +98,7 @@ class TradeService:
                 take_profit   = tp_price,
             )
             if "error" in resp:
-                raise RuntimeError(resp["error"])
+                raise APIException(resp["error"])
 
             # if filled immediately, grab full position info
             if resp.get("status") == "filled":
@@ -116,7 +117,7 @@ class TradeService:
                 take_profit   = tp_price,
             )
             if "error" in resp:
-                raise RuntimeError(resp["error"])
+                raise APIException(resp["error"])
             # cTraderClient should already include resp["position_info"] when filled
 
         return resp

@@ -69,63 +69,81 @@ class RiskManagementDetailView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = RiskManagementSerializer
 
-    def get_object(self):
+    def _get_account(self):
         account_id = self.kwargs.get("account_id")
-        account = get_object_or_404(
+        return get_object_or_404(
             Account,
             id=account_id,
             user=self.request.user
         )
 
-        defaults = {
-            "max_daily_loss": 5,
-            "max_trade_risk": 1,
-            "max_open_positions": 3,
-            "enforce_cooldowns": True,
-            "consecutive_loss_limit": 3,
-            "cooldown_period": timedelta(minutes=30),
-            "max_lot_size": 2,
-            "max_open_trades_same_symbol": 1,
-            # new defaults
-            "risk_percent": 0.30,
-            "default_tp_profile": None,
-        }
-        risk_settings, created = RiskManagement.objects.get_or_create(
-            account=account,
-            defaults=defaults
-        )
-        return risk_settings
-
     def get(self, request, account_id=None):
-        instance = self.get_object()
-        serializer = self.serializer_class(instance)
-        return Response(serializer.data)
+        try:
+            rm = RiskManagement.objects.get(account=self._get_account())
+            serializer = self.serializer_class(rm)
+            return Response(serializer.data)
+        except RiskManagement.DoesNotExist:
+            blank = {field: None for field in self.serializer_class.Meta.fields}
+            return Response(blank, status=status.HTTP_200_OK)
 
-    def put(self, request, account_id=None):
-        return self._update(request, partial=False)
-
-    def patch(self, request, account_id=None):
-        return self._update(request, partial=True)
-
-    def _update(self, request, partial):
-        instance = self.get_object()
-        now = timezone.now()
-        # enforce monthly update limit (e.g. 30 days)
-        if now - instance.last_updated < timedelta(days=0.05):
+    def post(self, request, account_id=None):
+        account = self._get_account()
+        if RiskManagement.objects.filter(account=account).exists():
             return Response(
-                {"detail": "Risk settings can only be updated once every 30 days."},
+                {"detail": "Risk settings already exist. Use PUT/PATCH to update."},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        serializer = self.serializer_class(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        serializer.save(account=account)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    def put(self, request, account_id=None):
+        return self._upsert(request, partial=False)
+
+    def patch(self, request, account_id=None):
+        return self._upsert(request, partial=True)
+
+    def _upsert(self, request, partial):
+        account = self._get_account()
+        data_keys = set(request.data.keys())
+
+        try:
+            instance = RiskManagement.objects.get(account=account)
+            created = False
+        except RiskManagement.DoesNotExist:
+            instance = None
+            created = True
+
+        # If we’re updating an existing instance, enforce the 30-day rule…
+        if instance and not created:
+            # But if the only key in the payload is default_tp_profile_id,
+            # we bypass the 30-day guard
+            updatable_keys = data_keys - {'default_tp_profile_id'}
+            if updatable_keys:
+                # there are other fields besides default_tp_profile_id
+                if timezone.now() - instance.last_updated < timedelta(days=30):
+                    return Response(
+                        {"detail": "Risk settings can only be updated once every 30 days."},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+        # Build serializer (instance may be None → create)
         serializer = self.serializer_class(
-            instance, data=request.data, partial=partial
+            instance,
+            data=request.data,
+            partial=partial,
+            context={'request': request}
         )
         serializer.is_valid(raise_exception=True)
 
-        # ensure default_tp_profile, if set, belongs to this user
+        # Ownership check for default_tp_profile
         default_profile = serializer.validated_data.get('default_tp_profile')
         if default_profile and default_profile.user != request.user:
-            raise PermissionDenied("Cannot assign a profile that you do not own.")
+            raise PermissionDenied("Cannot assign a profile you do not own.")
 
-        serializer.save()
-        return Response(serializer.data)
+        # Save & pick status code
+        rm = serializer.save(account=account)
+        status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        return Response(self.serializer_class(rm).data, status=status_code)
