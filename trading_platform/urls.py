@@ -31,14 +31,15 @@ urlpatterns = [
     # ✅ JWT endpoints:
     path('api/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),      # login
     path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
-    path("accounts/", include("accounts.urls")),     # refresh token
-    path('trades/', include('trades.urls')),
-    path("ctrader/", include("ctrader_auth.urls")),
-    path('mt5/', include('mt5.urls')),
-    path('risk/', include('risk.urls')),
-    path('trade_journal/', include('trade_journal.urls')),
-    path('connectors/', include('connectors.urls')),
-    path('automations/', include('automations.urls')),
+    path("api/accounts/", include("accounts.urls")),     # refresh token
+    path('api/trades/', include('trades.urls')),
+    path("api/ctrader/", include("ctrader_auth.urls")),
+    path('api/mt5/', include('mt5.urls')),
+    path('api/risk/', include('risk.urls')),
+    path('api/trade_journal/', include('trade_journal.urls')),
+    path('api/connectors/', include('connectors.urls')),
+    path('api/automations/', include('automations.urls')),
+    path('api/calculators/', include('calculators.urls')),
 
 ]
 if settings.DEBUG:

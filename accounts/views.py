@@ -155,3 +155,20 @@ class FetchAccountDetailsView(APIView):
         if "error" in account_details:
             return Response({"detail": account_details["error"]}, status=status.HTTP_400_BAD_REQUEST)
         return Response(account_details, status=status.HTTP_200_OK)
+
+from rest_framework import viewsets
+from accounts.models import ProfitTakingProfile
+from .serializers import ProfitTakingProfileSerializer
+from rest_framework.exceptions import PermissionDenied
+
+class ProfitTakingProfileViewSet(viewsets.ModelViewSet):
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = ProfitTakingProfileSerializer
+
+    def get_queryset(self):
+        # only show profiles for the logged-in user
+        return ProfitTakingProfile.objects.filter(user=self.request.user)
+
+    def perform_create(self, serializer):
+        # HiddenField already ensures `user=request.user`, so just save
+        serializer.save()

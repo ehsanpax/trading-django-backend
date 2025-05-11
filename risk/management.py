@@ -11,8 +11,17 @@ from django.db.models import Sum, Q
 from django.utils import timezone
 from risk.utils import get_total_open_pnl
 from risk.utils import get_account_equity
+import string
+
 
 logger = logging.getLogger(__name__)
+
+def is_forex_pair(sym):
+    return (
+        len(sym) == 6
+        and sym[:3].isalpha()
+        and sym[3:].isalpha()
+    )
 
 def fetch_risk_settings(account_id: str):
     """
@@ -79,7 +88,20 @@ def calculate_position_size(account_id, symbol, account_equity, risk_percent, st
     # Calculate the amount at risk and pip value
     decimals = get_decimals_from_pip_size(pip_size)
     risk_amount = account_equity * (risk_percent / 100.0)
-    pip_value = contract_size * pip_size
+
+    pip_value_raw = contract_size * pip_size
+
+    if is_forex_pair(symbol):
+        # it's something like EURUSD or USDJPY
+        quote = symbol[-3:].upper()
+        if quote == "USD":
+            pip_value = pip_value_raw
+        else:
+            pip_value = pip_value_raw / entry_price
+    else:
+        # non-FX instrument (e.g. U500, BTCUSD, GOLD)
+        pip_value = pip_value_raw
+
     if pip_value == 0:
         logger.error("Pip value calculation failed (division by zero)")
         return {"error": "Invalid pip value"}

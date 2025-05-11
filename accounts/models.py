@@ -59,3 +59,38 @@ class CTraderAccount(models.Model):
     def __str__(self):
         return f"cTrader Account for user {self.user.username or self.user.id}"
 
+
+from django.core.exceptions import ValidationError
+
+class ProfitTakingProfile(models.Model):
+    # Link to the User directly
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='profit_profiles'
+    )
+    name = models.CharField(max_length=100, blank=True)
+    partial_targets = models.JSONField(
+        help_text='List of {"r_multiple": float, "size_pct": float}'
+    )
+    is_default = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ('user', 'name')
+
+    def clean(self):
+        total = sum(item.get('size_pct', 0) for item in self.partial_targets)
+        if round(total, 2) != 100:
+            raise ValidationError('Sum of size_pct must be 100.')
+        if self.is_default:
+            qs = ProfitTakingProfile.objects.filter(user=self.user, is_default=True)
+            if self.pk:
+                qs = qs.exclude(pk=self.pk)
+            if qs.exists():
+                raise ValidationError('Only one default profile allowed per user.')
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
