@@ -1,2 +1,2 @@
-from .celery_app import app as celery_app
-__all__ = ("celery_app",)
+# This file can be empty or contain other project-level initializations
+# that do not involve importing modules that load Django models prematurely.
