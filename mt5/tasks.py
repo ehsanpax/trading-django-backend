@@ -179,10 +179,10 @@ def monitor_mt5_stop_losses():
                     if close_time_str:
                         try:
                             dt_obj = datetime.fromisoformat(close_time_str.replace("Z", "+00:00"))
-                            if dt_obj.tzinfo is None or dt_obj.tzinfo.utcoffset(dt_obj) is None: 
-                                trade_to_check.closed_at = timezone.make_aware(dt_obj, timezone.utc)
-                            else: 
-                                trade_to_check.closed_at = dt_obj.astimezone(timezone.utc)
+                            if dt_obj.tzinfo is None or dt_obj.tzinfo.utcoffset(dt_obj) is None: # Naive datetime
+                                trade_to_check.closed_at = timezone.make_aware(dt_obj, datetime.timezone.utc) # Use datetime.timezone.utc
+                            else: # Aware datetime
+                                trade_to_check.closed_at = dt_obj.astimezone(datetime.timezone.utc) # Use datetime.timezone.utc
                         except ValueError:
                             print(f"{log_prefix}DEBUG: Error parsing close_time_str '{close_time_str}' for trade {trade_to_check.id}. Using current time as fallback.")
                             trade_to_check.closed_at = timezone.now()

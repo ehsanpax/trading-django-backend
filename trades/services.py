@@ -162,8 +162,9 @@ class TradeService:
                 stop_loss       = Decimal(pos.get("sl", sl_price)),
                 profit_target   = Decimal(pos.get("tp", tp_price)),
                 trade_status    = "open",
-                order_id        = resp["order_id"],
-                deal_id         = resp.get("deal_id"),
+                order_id        = resp["order_id"], # This is the MT5 Order Ticket
+                deal_id         = resp.get("deal_id"), # This is the MT5 Entry Deal Ticket
+                position_id     = pos.get("ticket"), # This is the MT5 Position ID from position_info
                 risk_percent    = Decimal(self.data["risk_percent"]),
                 projected_profit= Decimal(self.data["projected_profit"]),
                 projected_loss  = Decimal(self.data["projected_loss"]),

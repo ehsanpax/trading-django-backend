@@ -425,15 +425,15 @@ class MT5Connector:
             time.sleep(delay)
         return {"error": f"No closed deals found for order {order_ticket} after {max_retries} retries"}
 
-    def get_closing_deal_details_for_position(self, position_id: int, days_history=2) -> dict:
+    def get_closing_deal_details_for_position(self, position_id: int, days_history=7) -> dict: # Increased default to 7 days
         """
         Retrieves details of the closing deal(s) for a given position_id.
-        It looks for deals that close the specified position (DEAL_ENTRY_OUT).
+        It looks for deals that close the specified position (DEAL_ENTRY_OUT or DEAL_ENTRY_INOUT).
         Returns the combined profit, commission, swap, the reason of the primary closing deal,
         and the time of the latest deal associated with the position.
 
         :param position_id: The ID of the MT5 position.
-        :param days_history: How many days back to check for deals.
+        :param days_history: How many days back to check for deals. Default is 7 days.
         :return: A dict with 'profit', 'commission', 'swap', 'reason_code', 'close_time', 'closed_by_sl', 'closed_by_tp'
                  or an error dict.
         """
@@ -447,21 +447,25 @@ class MT5Connector:
         if not account_info or account_info.login != self.account_id:
             return {"error": "Not logged in to the correct MT5 account"}
 
+        # MT5 deal times are UTC Unix timestamps. We query using a UTC window.
+        # If the MT5 server filters history_deals_get date range based on its local server time,
+        # a generous `days_history` ensures our UTC window covers the server's local day(s).
         utc_to = datetime.now(timezone.utc)
+        # Ensure `utc_from` goes back enough days from the current UTC time.
         utc_from = utc_to - timedelta(days=days_history)
+
+        print(f"DEBUG MT5Service: Querying history deals for position_id: {position_id} from {utc_from.isoformat()} to {utc_to.isoformat()} (UTC window, {days_history} days back from now)")
         
-        # Fetch deals by position ID instead of order ID
-        print(f"DEBUG MT5Service: Fetching history deals for position_id: {position_id} from {utc_from} to {utc_to}")
         deals = mt5.history_deals_get(utc_from, utc_to, position=position_id)
 
         if deals is None:
             err_code, err_msg = mt5.last_error()
-            print(f"DEBUG MT5Service: history_deals_get() failed for position {position_id}: {err_code} - {err_msg}")
-            return {"error": f"history_deals_get() failed for position {position_id}: {err_code} - {err_msg}"}
+            print(f"DEBUG MT5Service: history_deals_get() call failed for position {position_id}: {err_code} - {err_msg}")
+            return {"error": f"history_deals_get() call failed for position {position_id}: {err_code} - {err_msg}"}
 
         if not deals:
-            print(f"DEBUG MT5Service: No deals found for position {position_id} in the last {days_history} days.")
-            return {"error": f"No deals found for position {position_id} in the last {days_history} days."}
+            print(f"DEBUG MT5Service: No deals found for position {position_id} in the UTC window from {utc_from.isoformat()} to {utc_to.isoformat()}. (days_history param: {days_history})")
+            return {"error": f"No deals found for position {position_id} in the last {days_history} days (queried UTC window)."}
         
         print(f"DEBUG MT5Service: Found {len(deals)} deals for position {position_id}.")
 
@@ -492,10 +496,13 @@ class MT5Connector:
         close_time_timestamp = latest_exit_deal.time 
         close_time_dt = datetime.fromtimestamp(close_time_timestamp, tz=timezone.utc)
 
-        closed_by_sl = (closure_reason_code == mt5.DEAL_REASON_SL)
-        closed_by_tp = (closure_reason_code == mt5.DEAL_REASON_TP)
+        # Explicitly check against the known integer values for clarity in debugging
+        # DEAL_REASON_SL = 3
+        # DEAL_REASON_TP = 4
+        is_sl_closure = (closure_reason_code == 3) # mt5.DEAL_REASON_SL
+        is_tp_closure = (closure_reason_code == 4) # mt5.DEAL_REASON_TP
         
-        print(f"DEBUG MT5Service: Closing details for position {position_id}: P&L={total_profit}, Comm={total_commission}, Swap={total_swap}, Reason={closure_reason_code}, Time={close_time_dt.isoformat()}")
+        print(f"DEBUG MT5Service: Closing details for position {position_id}: P&L={total_profit}, Comm={total_commission}, Swap={total_swap}, ReasonCode={closure_reason_code}, IsSL={is_sl_closure}, IsTP={is_tp_closure}, Time={close_time_dt.isoformat()}")
 
         return {
             "profit": total_profit, # Gross profit from deals
@@ -504,7 +511,7 @@ class MT5Connector:
             "net_profit": total_profit + total_commission + total_swap, # Net financial impact
             "reason_code": closure_reason_code,
             "close_time": close_time_dt.isoformat(),
-            "closed_by_sl": closed_by_sl,
-            "closed_by_tp": closed_by_tp,
+            "closed_by_sl": is_sl_closure, # Use the new boolean variables
+            "closed_by_tp": is_tp_closure, # Use the new boolean variables
             "message": f"Closing details found for position {position_id}."
         }
