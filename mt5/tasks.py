@@ -151,19 +151,25 @@ def monitor_mt5_stop_losses():
                     print(f"{log_prefix}Trade {trade_to_check.id} (Order ID: {trade_to_check.order_id}) is still open on MT5. Skipping.")
                     continue
                 
-                print(f"{log_prefix}Trade {trade_to_check.id} (Order ID: {trade_to_check.order_id}) appears closed on MT5 (or get_position_by_ticket failed). Attempting to fetch closing deal details...")
-                closing_details = connector.get_closing_deal_details_for_order(order_ticket=trade_to_check.order_id)
-                print(f"{log_prefix}DEBUG: Response from get_closing_deal_details_for_order for order {trade_to_check.order_id}: {closing_details}")
+                print(f"{log_prefix}Trade {trade_to_check.id} (Order ID: {trade_to_check.order_id}, Position ID: {trade_to_check.position_id}) appears closed on MT5 (or get_position_by_ticket failed). Attempting to fetch closing deal details...")
+                
+                if not trade_to_check.position_id:
+                    print(f"{log_prefix}DEBUG: Trade {trade_to_check.id} has no position_id. Cannot fetch closing details by position. Skipping.")
+                    skipped_trades_count += 1
+                    continue
+
+                closing_details = connector.get_closing_deal_details_for_position(position_id=trade_to_check.position_id)
+                print(f"{log_prefix}DEBUG: Response from get_closing_deal_details_for_position for position {trade_to_check.position_id}: {closing_details}")
 
                 has_closing_error = "error" in closing_details
                 print(f"{log_prefix}DEBUG: Trade {trade_to_check.id} - Has error in closing_details? {has_closing_error}")
 
                 if has_closing_error:
-                    print(f"{log_prefix}Trade {trade_to_check.id} (Order ID: {trade_to_check.order_id}): Not in open positions, but failed to retrieve closing deal details: {closing_details['error']}. Will retry in next cycle.")
+                    print(f"{log_prefix}Trade {trade_to_check.id} (Position ID: {trade_to_check.position_id}): Not in open positions, but failed to retrieve closing deal details: {closing_details['error']}. Will retry in next cycle.")
                     skipped_trades_count += 1 
                     continue 
                 else:
-                    print(f"{log_prefix}Trade {trade_to_check.id} (Order ID: {trade_to_check.order_id}): Closing deal details found. Updating database.")
+                    print(f"{log_prefix}Trade {trade_to_check.id} (Position ID: {trade_to_check.position_id}): Closing deal details found. Updating database.")
                     trade_to_check.trade_status = "closed"
                     trade_to_check.actual_profit_loss = Decimal(str(closing_details.get("net_profit", 0)))
                     trade_to_check.commission = Decimal(str(closing_details.get("commission", 0)))

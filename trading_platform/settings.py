@@ -233,13 +233,5 @@ INDICATOR_TIMEFRAMES = {
 
 # ─── Celery broker & beat ───────────────────────────
 CELERY_BROKER_URL = "redis://localhost:6379/0"
-CELERY_BEAT_SCHEDULE = {
-    "refresh-indicators-every-minute": {
-        "task": "indicators.tasks.update_indicator_cache",
-        "schedule": 60.0,   # every 60s
-    },
-        "scan-profit-targets-every-15s": {
-        "task": "trades.tasks.scan_profit_targets",
-        "schedule": 15.0,
-    },
-}
+# CELERY_BEAT_SCHEDULE is now defined in trading_platform/celery_app.py
+# Ensure django-celery-beat is not also scheduling this task via the admin if it's installed.
