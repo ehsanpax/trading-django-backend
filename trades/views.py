@@ -29,13 +29,14 @@ from risk.management import (
     perform_risk_checks      # our new guard rail checks
 )
 from .targets import derive_target_price
-from .services import TradeService
+from .services import TradeService, close_trade_globally
 from .serializers import (
     OrderSerializer,
     ExecuteTradeInputSerializer,
     ExecuteTradeOutputSerializer
 )
 from rest_framework.generics import GenericAPIView
+from rest_framework.exceptions import APIException, PermissionDenied, ValidationError
 # ----- Trade / Order Execution --------------------------------------------
 
 class ExecuteTradeView(GenericAPIView):
@@ -104,67 +105,30 @@ class CloseTradeView(APIView):
     permission_classes = [IsAuthenticated]
 
     def delete(self, request, trade_id):
-        trade = get_object_or_404(Trade, id=trade_id)
-
-        if trade.account.user != request.user:
-            return Response({"detail": "Unauthorized to close this trade"}, status=status.HTTP_403_FORBIDDEN)
-
-        if trade.trade_status != "open":
-            return Response({"detail": "Trade is already closed"}, status=status.HTTP_400_BAD_REQUEST)
-
-        profit = None
-
-        if trade.account.platform == "MT5":
+        try:
+            # Ensure trade_id is a valid UUID
             try:
-                mt5_account = trade.account.mt5_account
-            except MT5Account.DoesNotExist:
-                return Response({"detail": "No linked MT5 account found."}, status=status.HTTP_400_BAD_REQUEST)
+                valid_trade_id = uuid.UUID(trade_id)
+            except ValueError:
+                return Response({"detail": "Invalid trade ID format."}, status=status.HTTP_400_BAD_REQUEST)
 
-            connector = MT5Connector(mt5_account.account_number, mt5_account.broker_server)
-            login_result = connector.connect(mt5_account.encrypted_password)
-            if "error" in login_result:
-                return Response({"detail": login_result["error"]}, status=status.HTTP_400_BAD_REQUEST)
-
-            # Capture the current profit, commission, and swap BEFORE closing
-            position_data = connector.get_position_by_ticket(trade.order_id)
-            if position_data:
-                profit = (
-                    position_data.get("profit", 0)
-                    + position_data.get("commission", 0)
-                    + position_data.get("swap", 0)
-                )
-                print(f"Captured P&L before closing: {profit}")
-            else:
-                print("No position data found; defaulting profit to 0")
-                profit = 0
-
-            # Now close the trade in MT5
-            close_result = connector.close_trade(
-                ticket=trade.order_id,
-                volume=float(trade.remaining_size),
-                symbol=trade.instrument
-            )
-
-            if "error" in close_result:
-                return Response({"detail": close_result["error"]}, status=status.HTTP_400_BAD_REQUEST)
-
-        elif trade.account.platform == "cTrader":
-            return Response({"detail": "cTrader close not implemented yet."}, status=status.HTTP_400_BAD_REQUEST)
-        else:
-            return Response({"detail": "Unsupported trading platform."}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Update the trade record with the captured profit
-        trade.trade_status = "closed"
-        trade.closed_at = timezone.now()
-        if profit is not None:
-            trade.actual_profit_loss = Decimal(profit)
-        trade.save()
-
-        return Response({
-            "message": "Trade closed successfully",
-            "trade_id": str(trade.id),
-            "actual_profit_loss": float(trade.actual_profit_loss or 0)
-        }, status=status.HTTP_200_OK)
+            result = close_trade_globally(request.user, valid_trade_id)
+            return Response(result, status=status.HTTP_200_OK)
+        except Trade.DoesNotExist:
+            return Response({"detail": "Trade not found."}, status=status.HTTP_404_NOT_FOUND)
+        except PermissionDenied as e:
+            return Response({"detail": str(e)}, status=status.HTTP_403_FORBIDDEN)
+        except ValidationError as e:
+            # ValidationError typically returns a dict detail, but str(e) can work for simple messages
+            return Response({"detail": e.detail if hasattr(e, 'detail') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except APIException as e:
+            # APIException also uses e.detail
+            return Response({"detail": e.detail if hasattr(e, 'detail') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            # Catch-all for other unexpected errors
+            # Log this error server-side for review
+            print(f"Unexpected error in CloseTradeView: {e}") # Or use proper logging
+            return Response({"detail": "An unexpected error occurred while closing the trade."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 # ----- Retrieve Symbol Info -----

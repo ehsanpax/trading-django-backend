@@ -9,7 +9,9 @@ from trading.models import Order, Trade, ProfitTarget
 from uuid import uuid4
 from .targets import derive_target_price
 from trading.models import IndicatorData
-from rest_framework.exceptions import ValidationError, APIException
+from rest_framework.exceptions import ValidationError, APIException, PermissionDenied
+from django.utils import timezone
+from uuid import UUID
 
 def get_cached(symbol, tf, ind):
     row = (
@@ -212,3 +214,94 @@ class TradeService:
                 "entry_price": float(trade.entry_price),
             })
         return out
+
+def close_trade_globally(user, trade_id: UUID) -> dict:
+    """
+    Closes a trade, performs platform-specific actions, and updates the database.
+    """
+    trade = get_object_or_404(Trade, id=trade_id)
+
+    if trade.account.user != user:
+        raise PermissionDenied("Unauthorized to close this trade")
+
+    if trade.trade_status != "open":
+        raise ValidationError("Trade is already closed")
+
+    profit = None
+    # This variable helps decide if we should proceed to update our DB record
+    # In some cases, we might want to close our record even if broker interaction fails or is skipped.
+    # However, for MT5, if broker interaction fails, an exception is raised, stopping execution.
+    # So, reaching the DB update part implies broker success for MT5.
+
+    if trade.account.platform == "MT5":
+        try:
+            mt5_account = trade.account.mt5_account
+        except MT5Account.DoesNotExist:
+            # If the MT5Account link is missing, it's a server-side configuration issue.
+            raise APIException("No linked MT5 account found for this trade's account.")
+
+        connector = MT5Connector(mt5_account.account_number, mt5_account.broker_server)
+        login_result = connector.connect(mt5_account.encrypted_password)
+        if "error" in login_result:
+            raise APIException(f"MT5 connection failed: {login_result['error']}")
+
+        # Capture profit *before* closing.
+        # Ensure that if get_position_by_ticket returns an error, we handle it.
+        position_data = connector.get_position_by_ticket(trade.order_id)
+        if position_data and not position_data.get("error"):
+            profit = (
+                Decimal(str(position_data.get("profit", 0))) +
+                Decimal(str(position_data.get("commission", 0))) +
+                Decimal(str(position_data.get("swap", 0)))
+            )
+        elif position_data and position_data.get("error"):
+            # If there's an error fetching position (e.g., position already closed on MT5 side),
+            # we might log this and proceed to close our record, or halt.
+            # For now, let's assume we can't determine profit but can still attempt to mark as closed.
+            # Or, more strictly, raise an error if pre-close state can't be determined.
+            # The original view defaulted to profit = 0 if no position_data.
+            # Let's be a bit more explicit: if we can't get data, we can't confirm P&L.
+            # However, the trade might have been closed on MT5 already.
+            # For now, let's assume if we can't get position data, we can't reliably get P&L.
+            # The close_trade might still succeed if the ticket exists but is already closed.
+            # Let's default profit to 0 in this case, similar to original view's behavior for "no position data".
+            profit = Decimal(0) # Default if position info is problematic but not a fatal error for P&L capture
+            # Consider logging this event: f"Could not retrieve full position data for ticket {trade.order_id} before closing: {position_data.get('error')}"
+        else: # No position_data returned at all (e.g. ticket doesn't exist anymore)
+            profit = Decimal(0)
+            # Consider logging: f"No position data found for ticket {trade.order_id} before closing. Assuming already closed on broker."
+
+
+        # Now close the trade in MT5
+        # The volume parameter in connector.close_trade expects a float.
+        close_result = connector.close_trade(
+            ticket=trade.order_id,
+            volume=float(trade.remaining_size), # trade.remaining_size is likely Decimal
+            symbol=trade.instrument
+        )
+
+        if "error" in close_result:
+            raise APIException(f"MT5 trade closure failed: {close_result['error']}")
+        
+        # If MT5 closure is successful, we proceed to update DB.
+
+    elif trade.account.platform == "cTrader":
+        # Consistent with original view, cTrader close is not implemented.
+        # Raising APIException will result in a 500, but view can catch it for a 400.
+        # For now, let service raise APIException.
+        raise APIException("cTrader close not implemented yet.")
+    else:
+        raise APIException("Unsupported trading platform.")
+
+    # Update the trade record in the database
+    trade.trade_status = "closed"
+    trade.closed_at = timezone.now()
+    if profit is not None: # Profit should be a Decimal here
+        trade.actual_profit_loss = profit
+    trade.save()
+
+    return {
+        "message": "Trade closed successfully",
+        "trade_id": str(trade.id),
+        "actual_profit_loss": float(trade.actual_profit_loss if trade.actual_profit_loss is not None else 0)
+    }

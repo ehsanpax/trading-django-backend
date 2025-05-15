@@ -424,3 +424,82 @@ class MT5Connector:
             print(f"⏳ Retry {attempt+1}/{max_retries} — waiting for closed deals...")
             time.sleep(delay)
         return {"error": f"No closed deals found for order {order_ticket} after {max_retries} retries"}
+
+    def get_closing_deal_details_for_order(self, order_ticket: int, days_history=2) -> dict:
+        """
+        Retrieves details of the closing deal(s) for a given order_ticket.
+        It looks for deals that close a position (DEAL_ENTRY_OUT) associated with the order.
+        Returns the combined profit, commission, swap, the reason of the primary closing deal,
+        and the time of the latest deal associated with the order.
+
+        :param order_ticket: The ticket ID of the order.
+        :param days_history: How many days back to check for deals.
+        :return: A dict with 'profit', 'commission', 'swap', 'reason', 'close_time', 'closed_by_sl', 'closed_by_tp'
+                 or an error dict.
+        """
+        if mt5.terminal_info() is None:
+            return {"error": "MT5 terminal is not running"}
+        
+        account_info = mt5.account_info()
+        if not account_info or account_info.login != self.account_id:
+            return {"error": "Not logged in to the correct MT5 account"}
+
+        utc_to = datetime.now(timezone.utc)
+        utc_from = utc_to - timedelta(days=days_history)
+        
+        deals = mt5.history_deals_get(utc_from, utc_to, order=order_ticket)
+
+        if deals is None:
+            # This case indicates an error in the call itself, not just empty results.
+            err_code, err_msg = mt5.last_error()
+            return {"error": f"history_deals_get() failed for order {order_ticket}: {err_code} - {err_msg}"}
+
+        if not deals:
+            return {"error": f"No deals found for order {order_ticket} in the last {days_history} days."}
+
+        # Filter for deals that represent an exit or a reversal that closes the position.
+        # DEAL_ENTRY_OUT (1) is a deal that closes a position.
+        # DEAL_ENTRY_INOUT (2) is a deal that is a result of a reversal.
+        # We are interested in the deal that effectively closed the position related to the order.
+        closing_deals = [d for d in deals if d.entry == mt5.DEAL_ENTRY_OUT or d.entry == mt5.DEAL_ENTRY_INOUT]
+
+        if not closing_deals:
+            # It's possible the position is still open or closed by means not resulting in a typical "OUT" deal
+            # (e.g. merged, or if history_deals_get by order doesn't capture all related closing activities).
+            # For simplicity, if no explicit closing deal is found, we report that.
+            # A more complex scenario might involve checking mt5.positions_get(ticket=order_ticket)
+            # to see if the position still exists. If not, then it was closed, but how?
+            # For now, we rely on finding an explicit closing deal.
+            return {"error": f"No explicit closing deal found for order {order_ticket}."}
+
+        # Assuming the latest closing deal is the most relevant if multiple exist (e.g. partial closes then full close)
+        # However, history_deals_get(order=order_ticket) should give all deals for that specific order.
+        # If an order results in one position, there should ideally be one set of entry/exit deals.
+        
+        total_profit = sum(d.profit for d in deals) # Sum over all deals for the order
+        total_commission = sum(d.commission for d in deals)
+        total_swap = sum(d.swap for d in deals)
+        
+        # Use the reason from the first identified closing deal.
+        # If multiple closing deals, this might need refinement based on specific broker behavior.
+        # Typically, for a single order leading to a single position, there's one primary closing event.
+        primary_closing_deal = sorted(closing_deals, key=lambda d: d.time, reverse=True)[0]
+        
+        closure_reason = primary_closing_deal.reason
+        close_time_timestamp = primary_closing_deal.time 
+        close_time_dt = datetime.fromtimestamp(close_time_timestamp, tz=timezone.utc)
+
+        closed_by_sl = (closure_reason == mt5.DEAL_REASON_SL)
+        closed_by_tp = (closure_reason == mt5.DEAL_REASON_TP)
+
+        return {
+            "profit": total_profit,
+            "commission": total_commission,
+            "swap": total_swap,
+            "net_profit": total_profit + total_commission + total_swap,
+            "reason_code": closure_reason,
+            "close_time": close_time_dt.isoformat(),
+            "closed_by_sl": closed_by_sl,
+            "closed_by_tp": closed_by_tp,
+            "message": f"Closing details found for order {order_ticket}."
+        }
