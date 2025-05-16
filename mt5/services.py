@@ -361,9 +361,16 @@ class MT5Connector:
         result = mt5.order_send(close_request)
 
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-            return {"error": f"Failed to close trade: {result.comment if result else 'no result'}"}
+            return {"error": f"Failed to close trade: {result.comment if result else 'no result'}", "retcode": result.retcode if result else None}
 
-        return {"message": "Trade closed in MT5", "close_price": close_price}
+        return {
+            "message": "Trade closed in MT5",
+            "close_price": close_price,
+            "order_id": result.order, # The order ticket for the closing operation
+            "deal_id": getattr(result, 'deal', None), # The deal ticket of the execution
+            "retcode": result.retcode,
+            "comment": result.comment
+        }
 
     def modify_position_protection(self, position_id: int, symbol: str, stop_loss: float = None, take_profit: float = None) -> dict:
         """

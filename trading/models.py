@@ -234,6 +234,9 @@ class Order(models.Model):
     # Broker-specific reason code for the deal
     broker_deal_reason_code = models.IntegerField(null=True, blank=True, help_text="Platform-specific reason code for the deal (e.g., MT5 DEAL_REASON_CLIENT)")
 
+    # Application-specific textual reason for the order/deal, e.g., "TP1 hit by scan"
+    closure_reason = models.CharField(max_length=255, null=True, blank=True, help_text="Application-specific reason for order closure")
+
     # Link to the resulting Trade (created when filled, or for subsequent deal history)
     trade = models.ForeignKey(
         Trade,

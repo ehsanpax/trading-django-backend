@@ -4,7 +4,7 @@ from django.utils import timezone
 from django.db import transaction
 from decimal import Decimal
 from celery import shared_task
-from trading.models import ProfitTarget, Trade
+from trading.models import ProfitTarget, Trade, Order # Added Order import
 from accounts.models import Account, MT5Account, CTraderAccount
 from mt5.services import MT5Connector
 from connectors.ctrader_client import CTraderClient
@@ -124,6 +124,7 @@ def scan_profit_targets():
                     print(f"{log_prefix_trade}Target HIT!")
                     partial_close_success = False
                     platform_actions_attempted = False
+                    tp_deal_id = None # To store the deal ID from the TP closure
 
                     try:
                         # Note: For MT5, connector.close_trade expects 'ticket' to be the position_id.
@@ -143,6 +144,7 @@ def scan_profit_targets():
                         
                         print(f"{log_prefix_trade}Partial volume closed successfully on platform. Response: {close_response}")
                         partial_close_success = True
+                        tp_deal_id = close_response.get("deal_id") # Capture the deal_id
 
                         # If TP1 and SL to Breakeven is configured
                         if pt.rank == 1 and trade.entry_price is not None:
@@ -191,6 +193,19 @@ def scan_profit_targets():
                             else:
                                 print(f"{log_prefix_trade}Post-action synchronization successful.")
                                 processed_targets += 1
+                                # Now, update the closure_reason for the specific Order created for this TP deal
+                                if tp_deal_id:
+                                    try:
+                                        order_for_tp_deal = Order.objects.get(broker_deal_id=tp_deal_id, trade=trade)
+                                        order_for_tp_deal.closure_reason = f"TP{pt.rank} hit by automated scan"
+                                        order_for_tp_deal.save(update_fields=['closure_reason'])
+                                        print(f"{log_prefix_trade}Updated closure_reason for Order (DealID: {tp_deal_id}) to 'TP{pt.rank} hit by automated scan'.")
+                                    except Order.DoesNotExist:
+                                        print(f"{log_prefix_trade}Could not find Order with DealID {tp_deal_id} to update closure_reason.")
+                                    except Exception as e_order_update:
+                                        print(f"{log_prefix_trade}Exception updating closure_reason for Order (DealID: {tp_deal_id}): {e_order_update}")
+                                else:
+                                    print(f"{log_prefix_trade}No tp_deal_id captured from close_response, cannot update Order closure_reason.")
                         except Exception as e_sync:
                             print(f"{log_prefix_trade}Exception during post-action synchronization: {e_sync}")
                             import traceback
