@@ -10,9 +10,9 @@ from uuid import uuid4
 from .targets import derive_target_price
 from trading.models import IndicatorData
 from rest_framework.exceptions import ValidationError, APIException, PermissionDenied
-from django.utils import timezone
+from django.utils import timezone as django_timezone # Alias for django's timezone
 from uuid import UUID
-from datetime import datetime
+from datetime import datetime, timezone as dt_timezone # Import datetime's timezone as dt_timezone
 
 def get_cached(symbol, tf, ind):
     row = (
@@ -297,7 +297,7 @@ def close_trade_globally(user, trade_id: UUID) -> dict:
 
     # Update the trade record in the database
     trade.trade_status = "closed"
-    trade.closed_at = timezone.now()
+    trade.closed_at = dt_timezone.now()
     if profit is not None: # Profit should be a Decimal here
         trade.actual_profit_loss = profit
     trade.save()
@@ -390,7 +390,11 @@ def synchronize_trade_with_platform(trade_id: UUID):
                 broker_deal_id=broker_deal_id,
                 filled_price=deal_info.get("price"),
                 filled_volume=deal_info.get("volume"),
-                filled_at=datetime.fromtimestamp(deal_info.get("time"), tz=timezone.utc) if deal_info.get("time") else None,
+                filled_at=datetime.fromtimestamp(deal_info.get("time"), tz=dt_timezone.utc) if deal_info.get("time") else None,
+                profit=deal_info.get("profit"), # Already Decimal from fetch_trade_sync_data
+                commission=deal_info.get("commission"), # Already Decimal
+                swap=deal_info.get("swap"), # Already Decimal
+                broker_deal_reason_code=deal_info.get("reason"), # Integer reason code
                 trade=trade_instance,
                 # Note: SL/TP from original order might not be in deal_info.
                 # If needed, would require more complex logic to trace back to original order.
@@ -406,10 +410,10 @@ def synchronize_trade_with_platform(trade_id: UUID):
         
         latest_deal_ts = sync_data.get("latest_deal_timestamp")
         if latest_deal_ts:
-            trade_instance.closed_at = datetime.fromtimestamp(latest_deal_ts, tz=timezone.utc)
+            trade_instance.closed_at = datetime.fromtimestamp(latest_deal_ts, tz=dt_timezone.utc)
         else:
             # If no deals, but platform says closed, use current time. Unlikely scenario.
-            trade_instance.closed_at = timezone.now() 
+            trade_instance.closed_at = django_timezone.now() 
 
         # Calculate P/L
         final_profit = sync_data.get("final_profit", Decimal("0"))
