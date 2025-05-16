@@ -226,6 +226,14 @@ class Order(models.Model):
     filled_volume = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     filled_at = models.DateTimeField(null=True, blank=True)
 
+    # Financials for this specific deal/order
+    profit = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True, help_text="Profit of this specific deal")
+    commission = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True, help_text="Commission for this specific deal")
+    swap = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True, help_text="Swap for this specific deal")
+
+    # Broker-specific reason code for the deal
+    broker_deal_reason_code = models.IntegerField(null=True, blank=True, help_text="Platform-specific reason code for the deal (e.g., MT5 DEAL_REASON_CLIENT)")
+
     # Link to the resulting Trade (created when filled, or for subsequent deal history)
     trade = models.ForeignKey(
         Trade,
