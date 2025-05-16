@@ -58,6 +58,7 @@ INSTALLED_APPS = [
     'automations',
     'indicators',
     'calculators',
+    'trade_history',
 ]
 
 

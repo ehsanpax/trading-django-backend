@@ -40,8 +40,8 @@ urlpatterns = [
     path('api/connectors/', include('connectors.urls')),
     path('api/automations/', include('automations.urls')),
     path('api/calculators/', include('calculators.urls')),
+    path('api/history/', include('trade_history.urls')),
 
 ]
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
-

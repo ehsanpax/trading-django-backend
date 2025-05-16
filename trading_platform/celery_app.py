@@ -22,6 +22,10 @@ app.conf.beat_schedule = {
         'task': 'mt5.tasks.monitor_mt5_stop_losses', # Path to the new task
         'schedule': crontab(minute='*/1'),  # Run every 1 minute
     },
+    'scan-profit-targets': {
+        'task': 'trades.tasks.scan_profit_targets',
+        'schedule': crontab(minute='*/1'),  # Run every 1 minute
+    },
     # Example of an existing task (if any, adjust as needed or remove if not present)
     # 'run-daily-at-midnight': {
     #     'task': 'indicators.tasks.run_daily_at_midnight',
