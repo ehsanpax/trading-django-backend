@@ -43,57 +43,176 @@ def hit_target(direction: str, price: dict, target_price: Decimal) -> bool:
     return False
 
 
-@shared_task
+# Import for MT5 global state management if needed within the task
+import MetaTrader5 as mt5_global 
+from trades.services import synchronize_trade_with_platform
+
+@shared_task(name="trades.tasks.scan_profit_targets")
 def scan_profit_targets():
     """
-    Temporarily disabled for debugging other Celery issues.
-    Periodically close partial volumes when price hits each ProfitTarget,
-    update remaining_size and move SL to breakeven after TP1.
+    Periodically scans for open trades with pending profit targets.
+    If a target is hit, it executes a partial closure on the trading platform
+    and updates the local database by calling synchronize_trade_with_platform.
+    Moves SL to breakeven after TP1 if applicable.
     """
-    print(f"CELERY TASK: trades.tasks.scan_profit_targets CALLED at {timezone.now()} - Currently disabled for debugging.")
-    return "scan_profit_targets is temporarily disabled."
-    # Original logic commented out below:
-    # # 1️⃣ load all pending legs for open trades
-    # pending = ProfitTarget.objects.select_related("trade__account") \
-    #     .filter(status="pending", trade__trade_status="open")
+    task_name = "scan_profit_targets"
+    print(f"CELERY TASK: {task_name} CALLED at {timezone.now()}")
 
-    # for pt in pending:
-    #     trade   = pt.trade
-    #     account = trade.account
+    pending_targets = ProfitTarget.objects.select_related(
+        "trade__account",
+        "trade__account__mt5_account",  # Ensures MT5Account is fetched if platform is MT5
+        "trade__account__ctrader_account" # Ensures CTraderAccount is fetched if platform is CTrader
+    ).filter(status="pending", trade__trade_status="open")
 
-    #     # 2️⃣ build the right connector
-    #     try:
-    #         conn = get_connector(account)
-    #     except Exception:
-    #         continue  # skip if connector fails
+    if not pending_targets.exists():
+        print(f"{task_name}: No pending profit targets found for open trades.")
+        return f"{task_name}: No pending profit targets."
 
-    #     # 3️⃣ fetch live price
-    #     price_data = conn.get_live_price(trade.instrument)
-    #     if not price_data or "bid" not in price_data:
-    #         continue
+    processed_targets = 0
+    errors_occurred = 0
 
-    #     # 4️⃣ if target hit, do atomic update + broker call
-    #     if hit_target(trade.direction, price_data, pt.target_price):
-    #         with transaction.atomic():
-    #             # — close partial volume
-    #             conn.close_trade(
-    #                 ticket=trade.order_id,
-    #                 volume=float(pt.target_volume),
-    #                 symbol=trade.instrument
-    #             )
+    # Group targets by account to manage connections efficiently
+    targets_by_account = {}
+    for pt in pending_targets:
+        if pt.trade.account.id not in targets_by_account:
+            targets_by_account[pt.trade.account.id] = []
+        targets_by_account[pt.trade.account.id].append(pt)
 
-    #             # — update the Trade.remaining_size
-    #             trade.remaining_size -= pt.target_volume
-    #             trade.save(update_fields=["remaining_size"])
+    for account_id, account_targets in targets_by_account.items():
+        if not account_targets:
+            continue
 
-    #             # — mark this leg as hit
-    #             pt.status = "hit"
-    #             pt.hit_at = timezone.now()
-    #             pt.save(update_fields=["status", "hit_at"])
+        # Assume all targets for this account use the same platform
+        account_instance = account_targets[0].trade.account
+        log_prefix_account = f"{task_name} (Account: {account_instance.id}, Platform: {account_instance.platform}): "
+        
+        connector = None
+        mt5_session_managed_by_this_loop = False
 
-    #             # — after TP1, move SL to breakeven
-    #             if pt.rank == 1:
-    #                 conn.modify_sl(
-    #                     ticket=trade.order_id,
-    #                     new_sl=float(trade.entry_price)
-    #                 )
+        try:
+            print(f"{log_prefix_account}Attempting to get connector.")
+            connector = get_connector(account_instance)
+            if not connector:
+                print(f"{log_prefix_account}Failed to get connector. Skipping targets for this account.")
+                errors_occurred += len(account_targets)
+                continue
+            
+            # If MT5, this task initiated the connection via get_connector, so it should manage its shutdown.
+            if account_instance.platform == "MT5":
+                mt5_session_managed_by_this_loop = True
+            
+            print(f"{log_prefix_account}Connector obtained. Processing {len(account_targets)} targets.")
+
+            for pt in account_targets:
+                trade = pt.trade
+                log_prefix_trade = f"{log_prefix_account}TradeID: {trade.id}, PT_ID: {pt.id}, Symbol: {trade.instrument}: "
+
+                if not trade.position_id:
+                    print(f"{log_prefix_trade}Skipping - Trade has no position_id.")
+                    continue
+
+                print(f"{log_prefix_trade}Fetching live price...")
+                price_data = connector.get_live_price(trade.instrument)
+
+                if not price_data or ("bid" not in price_data and "ask" not in price_data): # Check for valid price structure
+                    print(f"{log_prefix_trade}Failed to get valid live price. Skipping. Price Data: {price_data}")
+                    continue
+                
+                print(f"{log_prefix_trade}Live price: {price_data}. Target price: {pt.target_price}")
+
+                if hit_target(trade.direction, price_data, pt.target_price):
+                    print(f"{log_prefix_trade}Target HIT!")
+                    partial_close_success = False
+                    platform_actions_attempted = False
+
+                    try:
+                        # Note: For MT5, connector.close_trade expects 'ticket' to be the position_id.
+                        # The MT5Connector.close_trade method uses 'position' parameter with this ticket.
+                        print(f"{log_prefix_trade}Attempting to close partial volume: {pt.target_volume} for position {trade.position_id}")
+                        platform_actions_attempted = True
+                        close_response = connector.close_trade(
+                            ticket=trade.position_id, 
+                            volume=float(pt.target_volume), 
+                            symbol=trade.instrument
+                        )
+
+                        if close_response.get("error"):
+                            print(f"{log_prefix_trade}Error closing partial volume: {close_response['error']}")
+                            errors_occurred +=1
+                            continue # Skip this target on error
+                        
+                        print(f"{log_prefix_trade}Partial volume closed successfully on platform. Response: {close_response}")
+                        partial_close_success = True
+
+                        # If TP1 and SL to Breakeven is configured
+                        if pt.rank == 1 and trade.entry_price is not None:
+                            print(f"{log_prefix_trade}TP1 hit. Attempting to move SL to breakeven: {trade.entry_price}")
+                            if hasattr(connector, "modify_position_protection"):
+                                sl_response = connector.modify_position_protection(
+                                    position_id=trade.position_id,
+                                    symbol=trade.instrument,
+                                    stop_loss=float(trade.entry_price)
+                                )
+                                if sl_response.get("error"):
+                                    print(f"{log_prefix_trade}Error moving SL to breakeven: {sl_response['error']}")
+                                    # Log error but don't necessarily fail the whole TP hit
+                                else:
+                                    print(f"{log_prefix_trade}SL moved to breakeven successfully.")
+                            else:
+                                print(f"{log_prefix_trade}Connector does not support modify_position_protection.")
+                        
+                        # Mark ProfitTarget as hit in DB after successful platform operation
+                        with transaction.atomic():
+                            pt_db = ProfitTarget.objects.select_for_update().get(id=pt.id)
+                            if pt_db.status == "pending": # Ensure it's still pending
+                                pt_db.status = "hit"
+                                pt_db.hit_at = timezone.now()
+                                pt_db.save(update_fields=["status", "hit_at"])
+                                print(f"{log_prefix_trade}Marked ProfitTarget as HIT in DB.")
+                            else:
+                                print(f"{log_prefix_trade}ProfitTarget status was not pending ({pt_db.status}). Not updated.")
+
+
+                    except Exception as e_platform:
+                        print(f"{log_prefix_trade}Exception during platform operation: {e_platform}")
+                        import traceback
+                        traceback.print_exc()
+                        errors_occurred += 1
+                        continue # Skip this target on error
+
+                    if partial_close_success:
+                        print(f"{log_prefix_trade}Synchronizing trade with platform after partial close.")
+                        try:
+                            # synchronize_trade_with_platform handles its own MT5 connection lifecycle
+                            sync_result = synchronize_trade_with_platform(trade_id=trade.id)
+                            if sync_result.get("error"):
+                                print(f"{log_prefix_trade}Error during post-action synchronization: {sync_result['error']}")
+                                errors_occurred += 1
+                            else:
+                                print(f"{log_prefix_trade}Post-action synchronization successful.")
+                                processed_targets += 1
+                        except Exception as e_sync:
+                            print(f"{log_prefix_trade}Exception during post-action synchronization: {e_sync}")
+                            import traceback
+                            traceback.print_exc()
+                            errors_occurred += 1
+                else:
+                    print(f"{log_prefix_trade}Target not yet hit.")
+        
+        except Exception as e_account_loop:
+            print(f"{log_prefix_account}Exception processing account: {e_account_loop}")
+            import traceback
+            traceback.print_exc()
+            errors_occurred += len(account_targets) # Count all targets for this account as errored/skipped
+        finally:
+            if mt5_session_managed_by_this_loop and mt5_global.terminal_info():
+                print(f"{log_prefix_account}Shutting down MT5 connection for account.")
+                mt5_global.shutdown()
+            elif account_instance.platform == "MT5" and mt5_global.terminal_info():
+                 # Fallback if somehow session was started but flag not set (should not happen)
+                print(f"{log_prefix_account}MT5 terminal active, attempting shutdown (fallback).")
+                mt5_global.shutdown()
+
+
+    print(f"{task_name} finished. Processed successfully: {processed_targets}, Errors/Skipped: {errors_occurred}.")
+    return f"{task_name}: Processed {processed_targets}, Errors/Skipped {errors_occurred}."

@@ -364,6 +364,63 @@ class MT5Connector:
             return {"error": f"Failed to close trade: {result.comment if result else 'no result'}"}
 
         return {"message": "Trade closed in MT5", "close_price": close_price}
+
+    def modify_position_protection(self, position_id: int, symbol: str, stop_loss: float = None, take_profit: float = None) -> dict:
+        """
+        Modifies the Stop Loss and/or Take Profit of an open position.
+        Pass 0 or None to a price level to remove it (if supported/desired).
+        MT5 expects absolute price levels.
+        """
+        if mt5.terminal_info() is None:
+            return {"error": "MT5 terminal is not running or not initialized."}
+        
+        account_info = mt5.account_info()
+        if not account_info or account_info.login != self.account_id:
+            return {"error": "Not logged in to the correct MT5 account for modifying position."}
+
+        if stop_loss is None and take_profit is None:
+            return {"error": "No stop_loss or take_profit value provided to modify."}
+
+        # Ensure SL/TP are floats if provided, or 0.0 if None (MT5 uses 0.0 to remove SL/TP)
+        sl_price = float(stop_loss) if stop_loss is not None else 0.0
+        tp_price = float(take_profit) if take_profit is not None else 0.0
+        
+        # Basic validation: SL/TP should not be negative.
+        # More advanced validation (e.g., SL must be below current price for BUY, etc.) can be added if needed.
+        if sl_price < 0 or tp_price < 0:
+            return {"error": "Stop Loss or Take Profit prices cannot be negative."}
+
+        request = {
+            "action": mt5.TRADE_ACTION_SLTP,
+            "position": position_id,
+            "symbol": symbol,
+            "sl": sl_price,
+            "tp": tp_price,
+        }
+
+        print(f"Attempting to modify SL/TP for position {position_id} on {symbol}: SL={sl_price}, TP={tp_price}")
+        result = mt5.order_send(request)
+
+        if result is None:
+            err_code, err_msg = mt5.last_error()
+            error_message = f"order_send() failed for TRADE_ACTION_SLTP: {err_code} - {err_msg}"
+            print(error_message)
+            return {"error": error_message}
+
+        if result.retcode != mt5.TRADE_RETCODE_DONE:
+            error_message = f"Failed to modify SL/TP for position {position_id}: {result.comment} (retcode: {result.retcode})"
+            print(error_message)
+            return {"error": error_message, "retcode": result.retcode, "comment": result.comment}
+
+        success_message = f"Successfully modified SL/TP for position {position_id} on {symbol}."
+        print(success_message)
+        return {
+            "message": success_message,
+            "order_id": result.order, # The order ticket for the modification operation
+            "request_id": result.request_id,
+            "retcode": result.retcode,
+            "comment": result.comment
+        }
     
 
 
