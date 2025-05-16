@@ -5,9 +5,10 @@ import os
 from django.utils import timezone as django_timezone # Alias to avoid confusion
 from decimal import Decimal
 from datetime import datetime, timezone # Import timezone directly
-from trading.models import Trade 
+from trading.models import Trade
 from accounts.models import MT5Account
 from django.db.models import Q
+from trades.services import synchronize_trade_with_platform # Added import
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=60) # bind=True gives access to self for retries
 def manage_mt5_account_operation(self, account_id: int, password: str, broker_server: str, operation: str, operation_params: dict = None):
@@ -137,76 +138,50 @@ def monitor_mt5_stop_losses():
             print(f"{log_prefix}DEBUG: Successfully logged into MT5 account {mt5_account_details.account_number}")
 
             for trade_to_check in trades_for_account:
-                print(f"{log_prefix}DEBUG: Checking trade {trade_to_check.id} (Order ID: {trade_to_check.order_id})")
-                
-                position_info = connector.get_position_by_ticket(trade_to_check.order_id)
-                print(f"{log_prefix}DEBUG: Response from get_position_by_ticket for order {trade_to_check.order_id}: {position_info}")
-                
-                # Condition evaluation:
-                # position_info is truthy (not None, not empty dict) AND 'error' key is NOT in position_info
-                is_still_open = bool(position_info and not position_info.get("error"))
-                print(f"{log_prefix}DEBUG: Trade {trade_to_check.id} - Is still open based on position_info? {is_still_open}")
+                print(f"{log_prefix}DEBUG: Synchronizing trade {trade_to_check.id} (Position ID: {trade_to_check.position_id})")
 
-                if is_still_open:
-                    print(f"{log_prefix}Trade {trade_to_check.id} (Order ID: {trade_to_check.order_id}) is still open on MT5. Skipping.")
-                    continue
-                
-                print(f"{log_prefix}Trade {trade_to_check.id} (Order ID: {trade_to_check.order_id}, Position ID: {trade_to_check.position_id}) appears closed on MT5 (or get_position_by_ticket failed). Attempting to fetch closing deal details...")
-                
                 if not trade_to_check.position_id:
-                    print(f"{log_prefix}DEBUG: Trade {trade_to_check.id} has no position_id. Cannot fetch closing details by position. Skipping.")
+                    print(f"{log_prefix}DEBUG: Trade {trade_to_check.id} has no position_id. Cannot sync. Skipping.")
                     skipped_trades_count += 1
                     continue
-
-                closing_details = connector.get_closing_deal_details_for_position(position_id=trade_to_check.position_id)
-                print(f"{log_prefix}DEBUG: Response from get_closing_deal_details_for_position for position {trade_to_check.position_id}: {closing_details}")
-
-                has_closing_error = "error" in closing_details
-                print(f"{log_prefix}DEBUG: Trade {trade_to_check.id} - Has error in closing_details? {has_closing_error}")
-
-                if has_closing_error:
-                    print(f"{log_prefix}Trade {trade_to_check.id} (Position ID: {trade_to_check.position_id}): Not in open positions, but failed to retrieve closing deal details: {closing_details['error']}. Will retry in next cycle.")
-                    skipped_trades_count += 1 
-                    continue 
-                else:
-                    print(f"{log_prefix}Trade {trade_to_check.id} (Position ID: {trade_to_check.position_id}): Closing deal details found. Updating database.")
-                    trade_to_check.trade_status = "closed"
-                    trade_to_check.actual_profit_loss = Decimal(str(closing_details.get("net_profit", 0)))
-                    trade_to_check.commission = Decimal(str(closing_details.get("commission", 0)))
-                    trade_to_check.swap = Decimal(str(closing_details.get("swap", 0)))
-                    
-                    close_time_str = closing_details.get("close_time")
-                    if close_time_str:
-                        try:
-                            dt_obj = datetime.fromisoformat(close_time_str.replace("Z", "+00:00"))
-                            if dt_obj.tzinfo is None or dt_obj.tzinfo.utcoffset(dt_obj) is None: # Naive datetime
-                                trade_to_check.closed_at = django_timezone.make_aware(dt_obj, timezone.utc) # Now refers to datetime.timezone
-                            else: # Aware datetime
-                                trade_to_check.closed_at = dt_obj.astimezone(timezone.utc) # Now refers to datetime.timezone
-                        except ValueError:
-                            print(f"{log_prefix}DEBUG: Error parsing close_time_str '{close_time_str}' for trade {trade_to_check.id}. Using current time as fallback.")
-                            trade_to_check.closed_at = django_timezone.now() # Use aliased django_timezone
-                    else:
-                        print(f"{log_prefix}DEBUG: No close_time in details for trade {trade_to_check.id}. Using current time as fallback.")
-                        trade_to_check.closed_at = django_timezone.now() # Use aliased django_timezone
-
-                    reason_suffix = ""
-                    if closing_details.get("closed_by_sl"):
-                        reason_suffix = " Closed by Stop Loss on MT5."
-                    elif closing_details.get("closed_by_tp"):
-                        reason_suffix = " Closed by Take Profit on MT5."
-                    else:
-                        reason_suffix = f" Closed on MT5 (Reason code: {closing_details.get('reason_code')})."
-                    
-                    print(f"{log_prefix}DEBUG: Trade {trade_to_check.id} - Reason Suffix: '{reason_suffix.strip()}' P&L: {trade_to_check.actual_profit_loss}")
-                    
-                    current_reason = trade_to_check.reason or ""
-                    if reason_suffix.strip() and reason_suffix.strip() not in current_reason:
-                        trade_to_check.reason = (current_reason + reason_suffix).strip()
                 
-                    trade_to_check.save()
-                    updated_trades_count += 1
-                    print(f"{log_prefix}Updated trade {trade_to_check.id} in database with confirmed closure details.")
+                # Call the centralized synchronization function from trades.services
+                # This function will handle fetching deals, creating new Order records for partials,
+                # updating remaining_size, and updating trade status if fully closed.
+                # It manages its own MT5 connection via MT5Connector.
+                try:
+                    # We pass trade_id and let the service function fetch the instance
+                    # to ensure it works with the latest data, though we have trade_to_check here.
+                    # This also decouples it further if synchronize_trade_with_platform is called from elsewhere.
+                    sync_result = synchronize_trade_with_platform(trade_id=trade_to_check.id)
+                    
+                    if sync_result.get("error"):
+                        print(f"{log_prefix}Error synchronizing trade {trade_to_check.id}: {sync_result.get('error')}")
+                        skipped_trades_count += 1
+                    else:
+                        print(f"{log_prefix}Successfully synchronized trade {trade_to_check.id}. Result: {sync_result.get('message')}, Status: {sync_result.get('status')}")
+                        # Check if the trade was updated to closed status by the sync function
+                        # Re-fetch the trade instance to get the latest status after sync
+                        updated_trade = Trade.objects.get(id=trade_to_check.id)
+                        if updated_trade.trade_status == "closed" and trade_to_check.trade_status == "open": # trade_to_check is stale here
+                             updated_trades_count += 1
+                        elif updated_trade.trade_status == "open":
+                             print(f"{log_prefix}Trade {updated_trade.id} remains open after sync.")
+                        # If new orders (partials) were created, it's a successful sync action.
+                        # The sync_result could be enhanced to indicate if new orders were created.
+                        # For now, a successful call without error is considered a positive processing step.
+
+                except Exception as sync_exc:
+                    import traceback
+                    tb_str_sync = traceback.format_exc()
+                    print(f"{log_prefix}Unhandled exception during synchronize_trade_with_platform for trade {trade_to_check.id}: {sync_exc}\n{tb_str_sync}")
+                    skipped_trades_count += 1
+            
+            # The MT5 connection for this account group is managed by the outer try/finally block.
+            # synchronize_trade_with_platform creates its own connector instance and handles its lifecycle.
+            # This means mt5.initialize/login/shutdown might happen per trade inside synchronize_trade_with_platform.
+            # This is less efficient but ensures synchronize_trade_with_platform is self-contained.
+            # The outer connector in this task is now primarily for the initial login check for the account group.
 
         except Exception as e:
             import traceback

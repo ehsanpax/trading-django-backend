@@ -12,6 +12,7 @@ from trading.models import IndicatorData
 from rest_framework.exceptions import ValidationError, APIException, PermissionDenied
 from django.utils import timezone
 from uuid import UUID
+from datetime import datetime
 
 def get_cached(symbol, tf, ind):
     row = (
