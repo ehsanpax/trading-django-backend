@@ -3,6 +3,7 @@ import MetaTrader5 as mt5
 from trading.models import Trade
 from datetime import datetime, timedelta, timezone
 import time
+from decimal import Decimal
 # import os # Good practice for path manipulations, though not strictly needed for this change.
 
 class MT5Connector:
@@ -450,22 +451,22 @@ class MT5Connector:
         # MT5 deal times are UTC Unix timestamps. We query using a UTC window.
         # If the MT5 server filters history_deals_get date range based on its local server time,
         # a generous `days_history` ensures our UTC window covers the server's local day(s).
-        utc_to = datetime.now(timezone.utc)
-        # Ensure `utc_from` goes back enough days from the current UTC time.
-        utc_from = utc_to - timedelta(days=days_history)
-
-        print(f"DEBUG MT5Service: Querying history deals for position_id: {position_id} from {utc_from.isoformat()} to {utc_to.isoformat()} (UTC window, {days_history} days back from now)")
+        # MT5 deal times are UTC Unix timestamps.
+        # When a position_id is known, querying by position_id without a date range
+        # should fetch all deals for that position's entire lifecycle.
+        print(f"DEBUG MT5Service: Querying all history deals for position_id: {position_id}")
         
-        deals = mt5.history_deals_get(utc_from, utc_to, position=position_id)
+        deals = mt5.history_deals_get(position=position_id) # Query by position_id only
 
         if deals is None:
             err_code, err_msg = mt5.last_error()
-            print(f"DEBUG MT5Service: history_deals_get() call failed for position {position_id}: {err_code} - {err_msg}")
-            return {"error": f"history_deals_get() call failed for position {position_id}: {err_code} - {err_msg}"}
+            print(f"DEBUG MT5Service: history_deals_get(position={position_id}) call failed: {err_code} - {err_msg}")
+            return {"error": f"history_deals_get(position={position_id}) call failed: {err_code} - {err_msg}"}
 
         if not deals:
-            print(f"DEBUG MT5Service: No deals found for position {position_id} in the UTC window from {utc_from.isoformat()} to {utc_to.isoformat()}. (days_history param: {days_history})")
-            return {"error": f"No deals found for position {position_id} in the last {days_history} days (queried UTC window)."}
+            # This means no deals were ever associated with this position_id, or the ID is wrong.
+            print(f"DEBUG MT5Service: No deals found for position_id {position_id} (queried without date range).")
+            return {"error": f"No deals found for position_id {position_id}."}
         
         print(f"DEBUG MT5Service: Found {len(deals)} deals for position {position_id}.")
 
@@ -514,4 +515,115 @@ class MT5Connector:
             "closed_by_sl": is_sl_closure, # Use the new boolean variables
             "closed_by_tp": is_tp_closure, # Use the new boolean variables
             "message": f"Closing details found for position {position_id}."
+        }
+
+    def fetch_trade_sync_data(self, position_id: int, instrument_symbol: str) -> dict:
+        """
+        Fetches all necessary data from MT5 for a given position to allow synchronization.
+        This method does not modify the local database.
+        Assumes MT5 is initialized and logged in via self.connect().
+        """
+        if mt5.terminal_info() is None:
+            return {"error_message": "MT5 terminal is not running or not initialized."}
+        
+        account_info = mt5.account_info()
+        if not account_info or account_info.login != self.account_id:
+            return {"error_message": "Not logged in to the correct MT5 account for sync data fetch."}
+
+        deals_data = []
+        platform_remaining_size = Decimal('0.0')
+        is_closed_on_platform = False
+        latest_deal_timestamp = None
+        final_profit = None
+        final_commission = None
+        final_swap = None
+        error_message = None
+
+        # Fetch all deals for the position
+        mt5_deals_raw = mt5.history_deals_get(position=position_id)
+
+        if mt5_deals_raw is None:
+            err_code, err_msg = mt5.last_error()
+            error_message = f"history_deals_get(position={position_id}) failed: {err_code} - {err_msg}"
+            return {
+                "deals": [], "is_closed_on_platform": False, "platform_remaining_size": Decimal('0.0'),
+                "latest_deal_timestamp": None, "final_profit": None, "final_commission": None,
+                "final_swap": None, "error_message": error_message
+            }
+
+        if not mt5_deals_raw:
+            # No deals found, could mean position never existed or was cancelled before any deal.
+            # Or, it's genuinely a new position with no deals yet.
+            # For sync purposes, this means it's not closed by deals and has no P/L from deals.
+            pass # Keep defaults: empty deals, not closed, zero P/L.
+
+        # Process deals if any
+        if mt5_deals_raw:
+            # Sort deals by time to correctly calculate running volume and find latest deal
+            sorted_deals = sorted(mt5_deals_raw, key=lambda d: d.time)
+            latest_deal_timestamp = sorted_deals[-1].time
+
+            for deal in sorted_deals:
+                deals_data.append({
+                    "ticket": deal.ticket,
+                    "order": deal.order,
+                    "time": deal.time,
+                    "time_msc": deal.time_msc,
+                    "type": deal.type, # ORDER_TYPE_BUY, ORDER_TYPE_SELL
+                    "entry": deal.entry, # DEAL_ENTRY_IN, DEAL_ENTRY_OUT, DEAL_ENTRY_INOUT
+                    "magic": deal.magic,
+                    "reason": deal.reason,
+                    "position_id": deal.position_id,
+                    "volume": Decimal(str(deal.volume)),
+                    "price": Decimal(str(deal.price)),
+                    "commission": Decimal(str(deal.commission)),
+                    "swap": Decimal(str(deal.swap)),
+                    "profit": Decimal(str(deal.profit)),
+                    "symbol": deal.symbol,
+                    "comment": deal.comment,
+                    # "external_id": deal.external_id # if needed
+                })
+                
+                deal_volume = Decimal(str(deal.volume))
+                if deal.entry == mt5.DEAL_ENTRY_IN:
+                    platform_remaining_size += deal_volume
+                elif deal.entry == mt5.DEAL_ENTRY_OUT or deal.entry == mt5.DEAL_ENTRY_INOUT:
+                    platform_remaining_size -= deal_volume
+        
+        # Check if position is closed on platform
+        # Method 1: Based on remaining size from deals
+        if platform_remaining_size <= Decimal('0.0') and mt5_deals_raw: # Must have deals to be closed by deals
+            is_closed_on_platform = True
+        
+        # Method 2: Check active positions (more definitive if available)
+        # Note: mt5.positions_get(ticket=position_id) is for specific position ticket, not generic position_id for history.
+        # We need to get all positions for the symbol and check.
+        open_mt5_positions = mt5.positions_get(symbol=instrument_symbol)
+        if open_mt5_positions is None:
+            err_code, err_msg = mt5.last_error()
+            # This is an error in fetching positions, not necessarily that the specific position is closed
+            print(f"Warning: positions_get(symbol={instrument_symbol}) failed: {err_code} - {err_msg}. Relying on deal volume for closure status.")
+            # We don't set error_message here as we can still proceed with deal-based info.
+        elif isinstance(open_mt5_positions, tuple):
+            found_open_position = any(p.ticket == position_id for p in open_mt5_positions)
+            if not found_open_position and mt5_deals_raw : # If not found among open positions, and there were deals
+                is_closed_on_platform = True
+            elif found_open_position: # Explicitly found open
+                 is_closed_on_platform = False
+
+
+        if is_closed_on_platform and mt5_deals_raw:
+            final_profit = sum(Decimal(str(d.profit)) for d in mt5_deals_raw)
+            final_commission = sum(Decimal(str(d.commission)) for d in mt5_deals_raw)
+            final_swap = sum(Decimal(str(d.swap)) for d in mt5_deals_raw)
+
+        return {
+            "deals": deals_data,
+            "is_closed_on_platform": is_closed_on_platform,
+            "platform_remaining_size": platform_remaining_size,
+            "latest_deal_timestamp": latest_deal_timestamp, # Unix timestamp (float or int)
+            "final_profit": final_profit,
+            "final_commission": final_commission,
+            "final_swap": final_swap,
+            "error_message": error_message
         }

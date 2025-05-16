@@ -306,3 +306,130 @@ def close_trade_globally(user, trade_id: UUID) -> dict:
         "trade_id": str(trade.id),
         "actual_profit_loss": float(trade.actual_profit_loss if trade.actual_profit_loss is not None else 0)
     }
+
+def synchronize_trade_with_platform(trade_id: UUID):
+    """
+    Synchronizes a single trade record with the trading platform (e.g., MT5).
+    Fetches the latest deals, updates order history, remaining size, status, and P/L.
+    """
+    try:
+        trade_instance = get_object_or_404(Trade, id=trade_id)
+    except Trade.DoesNotExist:
+        # Or raise custom error / log
+        return {"error": f"Trade with id {trade_id} not found."}
+
+    sync_data = None
+    platform_name = trade_instance.account.platform
+
+    if platform_name == "MT5":
+        try:
+            mt5_account_details = MT5Account.objects.get(account=trade_instance.account)
+        except MT5Account.DoesNotExist:
+            return {"error": f"MT5Account details not found for account {trade_instance.account.id}."}
+
+        connector = MT5Connector(account_id=mt5_account_details.account_number, broker_server=mt5_account_details.broker_server)
+        connect_result = connector.connect(password=mt5_account_details.encrypted_password)
+
+        if connect_result.get("error"):
+            # MT5Connector's connect method already calls mt5.initialize and mt5.login
+            # No separate mt5.shutdown() is typically needed here unless connector doesn't manage it.
+            # For now, assume connector handles its lifecycle or mt5.shutdown() is called by a higher layer if needed.
+            return {"error": f"MT5 connection failed: {connect_result.get('error')}"}
+        
+        if not trade_instance.position_id:
+            # mt5.shutdown() # Ensure shutdown if we exit early after successful connect
+            return {"error": f"Trade {trade_instance.id} does not have a position_id. Cannot sync with MT5."}
+
+        sync_data = connector.fetch_trade_sync_data(
+            position_id=trade_instance.position_id,
+            instrument_symbol=trade_instance.instrument
+        )
+        # Assuming MT5Connector methods that use mt5 leave it in a usable state or shutdown is handled by caller of this sync function.
+        # For safety, if this is the end of MT5 interaction for this scope:
+        # import MetaTrader5 as mt5_main # To avoid conflict if mt5 is used elsewhere
+        # mt5_main.shutdown()
+        # However, the MT5Connector itself initializes MT5. If multiple calls to sync happen,
+        # repeated initialize/shutdown might be inefficient. This needs a strategy.
+        # For now, let's assume the connector leaves MT5 initialized if it was,
+        # and a higher-level process manages global MT5 shutdown if necessary.
+
+    elif platform_name == "cTrader":
+        # Placeholder for cTrader logic
+        # ctrade_account_details = CTraderAccount.objects.get(account=trade_instance.account)
+        # connector = CTraderClient(ctrade_account_details)
+        # sync_data = connector.fetch_trade_sync_data(...)
+        return {"error": "cTrader synchronization not yet implemented."}
+    else:
+        return {"error": f"Unsupported platform: {platform_name}"}
+
+    if not sync_data:
+        return {"error": "Failed to retrieve sync data from platform."}
+
+    if sync_data.get("error_message"):
+        return {"error": f"Platform error: {sync_data.get('error_message')}"}
+
+    # Process sync_data - platform-agnostic part
+    # 1. Update/Create Order records from sync_data["deals"]
+    existing_broker_deal_ids = set(
+        trade_instance.order_history.values_list('broker_deal_id', flat=True).exclude(broker_deal_id__isnull=True)
+    )
+
+    for deal_info in sync_data.get("deals", []):
+        broker_deal_id = deal_info.get("ticket")
+        if broker_deal_id and broker_deal_id not in existing_broker_deal_ids:
+            Order.objects.create(
+                account=trade_instance.account,
+                instrument=deal_info.get("symbol"),
+                direction=Order.Direction.BUY if deal_info.get("type") == 0 else Order.Direction.SELL, # MT5: 0 for Buy, 1 for Sell
+                order_type=Order.OrderType.MARKET, # Deals are executions
+                volume=deal_info.get("volume"), # Already Decimal from fetch_trade_sync_data
+                price=deal_info.get("price"),   # Already Decimal
+                status=Order.Status.FILLED,
+                broker_order_id=deal_info.get("order"),
+                broker_deal_id=broker_deal_id,
+                filled_price=deal_info.get("price"),
+                filled_volume=deal_info.get("volume"),
+                filled_at=datetime.fromtimestamp(deal_info.get("time"), tz=timezone.utc) if deal_info.get("time") else None,
+                trade=trade_instance,
+                # Note: SL/TP from original order might not be in deal_info.
+                # If needed, would require more complex logic to trace back to original order.
+            )
+            existing_broker_deal_ids.add(broker_deal_id) # Add to set to prevent re-creation in same run
+
+    # 2. Update Trade.remaining_size
+    trade_instance.remaining_size = sync_data.get("platform_remaining_size", trade_instance.remaining_size)
+
+    # 3. Update Trade status if closed
+    if sync_data.get("is_closed_on_platform") and trade_instance.trade_status == "open":
+        trade_instance.trade_status = "closed"
+        
+        latest_deal_ts = sync_data.get("latest_deal_timestamp")
+        if latest_deal_ts:
+            trade_instance.closed_at = datetime.fromtimestamp(latest_deal_ts, tz=timezone.utc)
+        else:
+            # If no deals, but platform says closed, use current time. Unlikely scenario.
+            trade_instance.closed_at = timezone.now() 
+
+        # Calculate P/L
+        final_profit = sync_data.get("final_profit", Decimal("0"))
+        final_commission = sync_data.get("final_commission", Decimal("0"))
+        final_swap = sync_data.get("final_swap", Decimal("0"))
+        
+        # Ensure they are Decimals if not None
+        final_profit = final_profit if final_profit is not None else Decimal("0")
+        final_commission = final_commission if final_commission is not None else Decimal("0")
+        final_swap = final_swap if final_swap is not None else Decimal("0")
+
+        trade_instance.actual_profit_loss = final_profit + final_commission + final_swap
+    
+    try:
+        trade_instance.save()
+        return {
+            "message": f"Trade {trade_instance.id} synchronized successfully.",
+            "trade_id": str(trade_instance.id),
+            "status": trade_instance.trade_status,
+            "remaining_size": str(trade_instance.remaining_size)
+        }
+    except Exception as e:
+        # Log error e
+        return {"error": f"Failed to save synchronized trade {trade_instance.id}: {str(e)}"}

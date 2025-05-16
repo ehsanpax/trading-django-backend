@@ -226,13 +226,13 @@ class Order(models.Model):
     filled_volume = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     filled_at = models.DateTimeField(null=True, blank=True)
 
-    # Link to the resulting Trade (created when filled)
-    trade = models.OneToOneField(
+    # Link to the resulting Trade (created when filled, or for subsequent deal history)
+    trade = models.ForeignKey(
         Trade,
-        on_delete=models.SET_NULL,
+        on_delete=models.CASCADE,
+        related_name="order_history",
         null=True,
-        blank=True,
-        related_name="order",
+        blank=True
     )
 
     created_at = models.DateTimeField(auto_now_add=True)

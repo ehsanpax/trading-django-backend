@@ -2,9 +2,9 @@ from celery import shared_task
 from .services import MT5Connector
 import MetaTrader5 as mt5
 import os
-from django.utils import timezone
+from django.utils import timezone as django_timezone # Alias to avoid confusion
 from decimal import Decimal
-from datetime import datetime
+from datetime import datetime, timezone # Import timezone directly
 from trading.models import Trade 
 from accounts.models import MT5Account
 from django.db.models import Q
@@ -180,15 +180,15 @@ def monitor_mt5_stop_losses():
                         try:
                             dt_obj = datetime.fromisoformat(close_time_str.replace("Z", "+00:00"))
                             if dt_obj.tzinfo is None or dt_obj.tzinfo.utcoffset(dt_obj) is None: # Naive datetime
-                                trade_to_check.closed_at = timezone.make_aware(dt_obj, datetime.timezone.utc) # Use datetime.timezone.utc
+                                trade_to_check.closed_at = django_timezone.make_aware(dt_obj, timezone.utc) # Now refers to datetime.timezone
                             else: # Aware datetime
-                                trade_to_check.closed_at = dt_obj.astimezone(datetime.timezone.utc) # Use datetime.timezone.utc
+                                trade_to_check.closed_at = dt_obj.astimezone(timezone.utc) # Now refers to datetime.timezone
                         except ValueError:
                             print(f"{log_prefix}DEBUG: Error parsing close_time_str '{close_time_str}' for trade {trade_to_check.id}. Using current time as fallback.")
-                            trade_to_check.closed_at = timezone.now()
+                            trade_to_check.closed_at = django_timezone.now() # Use aliased django_timezone
                     else:
                         print(f"{log_prefix}DEBUG: No close_time in details for trade {trade_to_check.id}. Using current time as fallback.")
-                        trade_to_check.closed_at = timezone.now()
+                        trade_to_check.closed_at = django_timezone.now() # Use aliased django_timezone
 
                     reason_suffix = ""
                     if closing_details.get("closed_by_sl"):
