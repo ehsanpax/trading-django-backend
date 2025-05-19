@@ -105,8 +105,28 @@ class TradeService:
 
             # if filled immediately, grab full position info
             if resp.get("status") == "filled":
-                pos = conn.get_position_by_order_id(resp["order_id"]) or {}
-                resp["position_info"] = pos
+                opened_pos_ticket = resp.get("opened_position_ticket")
+                pos_details_source = "get_position_by_order_id" # For logging
+
+                if opened_pos_ticket:
+                    print(f"--- trades/services.py: Direct opened_position_ticket from place_trade: {opened_pos_ticket}")
+                    pos_details = conn.get_open_position_details_by_ticket(opened_pos_ticket)
+                    pos_details_source = f"get_open_position_details_by_ticket (direct ticket: {opened_pos_ticket})"
+                    
+                    if "error" in pos_details:
+                        print(f"Warning: Could not fetch details for directly provided ticket {opened_pos_ticket}: {pos_details['error']}. Falling back to get_position_by_order_id for order {resp.get('order_id')}.")
+                        # Fallback to original method if direct fetch fails
+                        pos_details = conn.get_position_by_order_id(resp["order_id"]) or {}
+                        pos_details_source = f"get_position_by_order_id (fallback for order: {resp.get('order_id')})"
+                    resp["position_info"] = pos_details
+                else:
+                    # opened_position_ticket was not in resp, fall back to original method
+                    print(f"Warning: opened_position_ticket not found in place_trade response for order {resp.get('order_id')}. Using get_position_by_order_id.")
+                    pos_details = conn.get_position_by_order_id(resp["order_id"]) or {}
+                    pos_details_source = f"get_position_by_order_id (no direct ticket for order: {resp.get('order_id')})"
+                    resp["position_info"] = pos_details
+                
+                print(f"--- trades/services.py: Position info for order {resp.get('order_id')} (source: {pos_details_source}): {resp['position_info']}")
 
         else:  # cTrader
             resp = conn.place_order(

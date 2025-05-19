@@ -222,7 +222,42 @@ class MT5Connector:
             # pending orders don’t fill immediately
             "status":      "filled" if order_type == "MARKET" else "pending",
         }
+        # Add opened_position_ticket if it's a market order and position was created/affected
+        if order_type == "MARKET" and result.retcode == mt5.TRADE_RETCODE_DONE:
+            if hasattr(result, 'position') and result.position != 0:
+                payload["opened_position_ticket"] = result.position
+        return payload
 
+
+    def get_open_position_details_by_ticket(self, position_ticket: int) -> dict:
+        """Fetch details of a specific open position by its ticket."""
+        if mt5.terminal_info() is None:
+            return {"error": "MT5 terminal is not running"}
+
+        account_info = mt5.account_info()
+        if not account_info or account_info.login != self.account_id:
+            return {"error": "Not logged in to the correct MT5 account"}
+
+        positions = mt5.positions_get(ticket=position_ticket)
+        if positions is None:
+            err_code, err_msg = mt5.last_error()
+            return {"error": f"positions_get(ticket={position_ticket}) failed: {err_code} - {err_msg}"}
+
+        if not positions:
+            return {"error": f"No open position found for ticket {position_ticket}"}
+
+        pos = positions[0]
+        return {
+            "ticket": pos.ticket,
+            "symbol": pos.symbol,
+            "volume": pos.volume,
+            "price_open": pos.price_open,
+            "sl": pos.sl,
+            "tp": pos.tp,
+            "profit": pos.profit,
+            "comment": pos.comment,
+            "time": pos.time
+        }
 
     def get_position_by_order_id(self, order_id: int) -> dict:
         """Fetch an open position by the ticket of the order that created/modified it."""
@@ -249,16 +284,43 @@ class MT5Connector:
             return {"error": f"No deals found for order_id {order_id}"}
 
         position_ticket = None
-        # Iterate through deals to find the position_id.
-        # Deals are returned newest first by default from history_deals_get if not sorted otherwise.
-        # Any deal belonging to the order should have the correct position_id.
-        for deal in deals:
-            if deal.position_id != 0:  # 0 indicates a balance operation or similar, not a position.
-                position_ticket = deal.position_id
-                break  # Found the position ticket
+        MAX_RETRIES = 3
+        RETRY_DELAY_SECONDS = 0.5  # Half a second delay
 
-        if position_ticket is None:
-            return {"error": f"No position ticket found associated with order_id {order_id} through its deals."}
+        for attempt in range(MAX_RETRIES):
+            # Fetch deals in each attempt, in case they are updated
+            current_deals = mt5.history_deals_get(from_date, to_date, order=order_id)
+
+            if current_deals: # Check if current_deals is not None and not empty
+                for deal in current_deals:
+                    # We are looking for the position that was OPENED by this specific order_id.
+                    # Such a deal should have deal.entry == mt5.DEAL_ENTRY_IN.
+                    if deal.entry == mt5.DEAL_ENTRY_IN:
+                        if deal.position_id != 0:
+                            position_ticket = deal.position_id
+                            break  # Found the position_id from an opening deal
+                if position_ticket:
+                    break  # Exit retry loop if position_ticket is found
+            
+            if attempt < MAX_RETRIES - 1:
+                print(f"Attempt {attempt + 1}/{MAX_RETRIES}: DEAL_ENTRY_IN not found for order {order_id}, retrying in {RETRY_DELAY_SECONDS}s...")
+                time.sleep(RETRY_DELAY_SECONDS)
+            elif not position_ticket: # Last attempt and still not found
+                # Fallback: If no DEAL_ENTRY_IN found after retries, try to get any position_id from any deal for this order.
+                # This is less ideal but might catch cases where entry type is not IN but a position was still made.
+                print(f"Warning: DEAL_ENTRY_IN not found for order {order_id} after {MAX_RETRIES} retries. Attempting fallback.")
+                if current_deals: # Use deals from the last attempt
+                    for deal in current_deals:
+                        if deal.position_id != 0:
+                            position_ticket = deal.position_id
+                            print(f"Fallback: Using position_id {position_ticket} from a non-DEAL_ENTRY_IN (or first available) deal for order {order_id}.")
+                            break 
+                if not position_ticket: # Still no position_ticket after fallback
+                    return {"error": f"No opening deal (DEAL_ENTRY_IN) found and no fallback position_id available for order_id {order_id} after {MAX_RETRIES} retries."}
+
+
+        if position_ticket is None: # Should be caught by the error above, but as a safeguard.
+            return {"error": f"Failed to determine position_id for order_id {order_id} after retries and fallback."}
 
         # Now fetch the open position using its ticket (which is position_ticket)
         positions = mt5.positions_get(ticket=position_ticket)
