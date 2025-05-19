@@ -224,8 +224,8 @@ class MT5Connector:
         }
 
 
-    def get_position_by_ticket(self, ticket: int) -> dict:
-        """Fetch an open position by ticket (order ID)."""
+    def get_position_by_order_id(self, order_id: int) -> dict:
+        """Fetch an open position by the ticket of the order that created/modified it."""
         if mt5.terminal_info() is None:
             return {"error": "MT5 terminal is not running"}
 
@@ -233,17 +233,48 @@ class MT5Connector:
         if not account_info or account_info.login != self.account_id:
             return {"error": "Not logged in to the correct MT5 account"}
 
-        positions = mt5.positions_get(ticket=ticket)
-        if positions is None:
+        # Fetch deals related to the given order_id
+        # Querying history deals for the last few days to ensure we capture recent orders.
+        # Adjust timedelta if orders can be much older.
+        from_date = datetime.now(timezone.utc) - timedelta(days=7)  # Look back 7 days from current time
+        to_date = datetime.now(timezone.utc) + timedelta(hours=13) # Current time + 13 hours buffer
+        deals = mt5.history_deals_get(from_date, to_date, order=order_id)
+
+        if deals is None:
+            # This means the call to history_deals_get failed, not necessarily no deals.
             err_code, err_msg = mt5.last_error()
-            return {"error": f"positions_get() failed: {err_code} - {err_msg}"}
+            return {"error": f"Failed to retrieve deals for order_id {order_id}: {err_code} - {err_msg}"}
+
+        if not deals:
+            return {"error": f"No deals found for order_id {order_id}"}
+
+        position_ticket = None
+        # Iterate through deals to find the position_id.
+        # Deals are returned newest first by default from history_deals_get if not sorted otherwise.
+        # Any deal belonging to the order should have the correct position_id.
+        for deal in deals:
+            if deal.position_id != 0:  # 0 indicates a balance operation or similar, not a position.
+                position_ticket = deal.position_id
+                break  # Found the position ticket
+
+        if position_ticket is None:
+            return {"error": f"No position ticket found associated with order_id {order_id} through its deals."}
+
+        # Now fetch the open position using its ticket (which is position_ticket)
+        positions = mt5.positions_get(ticket=position_ticket)
+        if positions is None:
+            # This means the call to positions_get failed
+            err_code, err_msg = mt5.last_error()
+            return {"error": f"positions_get(ticket={position_ticket}) failed: {err_code} - {err_msg}"}
 
         if not positions:
-            return {"error": f"No open position found for ticket {ticket}"}
+            # The position associated with this order_id is no longer open.
+            return {"error": f"No open position found for position ticket {position_ticket} (derived from order_id {order_id})"}
 
         pos = positions[0]
+        # The key "ticket" in the returned dict should refer to the position's ticket.
         return {
-            "ticket": pos.ticket,
+            "ticket": pos.ticket, # This is position_ticket
             "symbol": pos.symbol,
             "volume": pos.volume,
             "price_open": pos.price_open,

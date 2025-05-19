@@ -127,7 +127,7 @@ class MT5PositionView(APIView):
             return Response({"detail": f"MT5 login failed: {login_result['error']}"},
                             status=status.HTTP_400_BAD_REQUEST)
         
-        position_info = connector.get_position_by_ticket(ticket)
+        position_info = connector.get_position_by_order_id(ticket) # 'ticket' here is now treated as an order_id
         if "error" in position_info:
             return Response({"detail": position_info["error"]}, status=status.HTTP_400_BAD_REQUEST)
         return Response(position_info, status=status.HTTP_200_OK)

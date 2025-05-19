@@ -105,7 +105,7 @@ class TradeService:
 
             # if filled immediately, grab full position info
             if resp.get("status") == "filled":
-                pos = conn.get_position_by_ticket(resp["order_id"]) or {}
+                pos = conn.get_position_by_order_id(resp["order_id"]) or {}
                 resp["position_info"] = pos
 
         else:  # cTrader
@@ -249,7 +249,7 @@ def close_trade_globally(user, trade_id: UUID) -> dict:
 
         # Capture profit *before* closing.
         # Ensure that if get_position_by_ticket returns an error, we handle it.
-        position_data = connector.get_position_by_ticket(trade.order_id)
+        position_data = connector.get_position_by_order_id(trade.order_id)
         if position_data and not position_data.get("error"):
             profit = (
                 Decimal(str(position_data.get("profit", 0))) +
