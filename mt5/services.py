@@ -210,8 +210,8 @@ class MT5Connector:
         if result.retcode != mt5.TRADE_RETCODE_DONE:
             return {"error": f"❌ Trade failed: {result.comment}"}
 
-        # Success payload
-        return {
+        # Construct success payload
+        payload = {
             "message":     "Trade executed successfully",
             "order_id":    result.order,
             "deal_id":     getattr(result, 'deal', None),
@@ -219,13 +219,20 @@ class MT5Connector:
             "symbol":      symbol,
             "direction":   direction,
             "price":       price,
-            # pending orders don’t fill immediately
-            "status":      "filled" if order_type == "MARKET" else "pending",
+            # Status and opened_position_ticket are added below
         }
-        # Add opened_position_ticket if it's a market order and position was created/affected
-        if order_type == "MARKET" and result.retcode == mt5.TRADE_RETCODE_DONE:
+
+        if order_type == "MARKET": # This implies result.retcode == mt5.TRADE_RETCODE_DONE already passed
+            payload["status"] = "filled"
+            print(f"--- MT5Connector.place_trade: Market order result for order {result.order}: Deal={result.deal}, Position={getattr(result, 'position', 'N/A')}, Comment={result.comment}, Retcode={result.retcode}")
             if hasattr(result, 'position') and result.position != 0:
                 payload["opened_position_ticket"] = result.position
+                print(f"--- MT5Connector.place_trade: Added opened_position_ticket {result.position} to payload.")
+            else:
+                print(f"--- MT5Connector.place_trade: result.position not valid or not found. hasattr: {hasattr(result, 'position')}, value: {getattr(result, 'position', 'N/A')}")
+        else: # Pending order, also implies result.retcode == mt5.TRADE_RETCODE_DONE
+            payload["status"] = "pending"
+        
         return payload
 
 
@@ -310,13 +317,13 @@ class MT5Connector:
                 # This is less ideal but might catch cases where entry type is not IN but a position was still made.
                 print(f"Warning: DEAL_ENTRY_IN not found for order {order_id} after {MAX_RETRIES} retries. Attempting fallback.")
                 if current_deals: # Use deals from the last attempt
-                    for deal in current_deals:
-                        if deal.position_id != 0:
-                            position_ticket = deal.position_id
-                            print(f"Fallback: Using position_id {position_ticket} from a non-DEAL_ENTRY_IN (or first available) deal for order {order_id}.")
+                    for deal_idx, deal_fallback in enumerate(current_deals):
+                        if deal_fallback.position_id != 0:
+                            position_ticket = deal_fallback.position_id
+                            print(f"Fallback: Using position_id {position_ticket} from deal at index {deal_idx} (Ticket: {deal_fallback.ticket}, Order: {deal_fallback.order}, Entry: {deal_fallback.entry}, PosID: {deal_fallback.position_id}) for order_id {order_id}.")
                             break 
                 if not position_ticket: # Still no position_ticket after fallback
-                    return {"error": f"No opening deal (DEAL_ENTRY_IN) found and no fallback position_id available for order_id {order_id} after {MAX_RETRIES} retries."}
+                    return {"error": f"No opening deal (DEAL_ENTRY_IN) found and no fallback position_id available (no deals with non-zero position_id) for order_id {order_id} after {MAX_RETRIES} retries."}
 
 
         if position_ticket is None: # Should be caught by the error above, but as a safeguard.
