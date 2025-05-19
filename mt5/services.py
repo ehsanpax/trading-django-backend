@@ -212,27 +212,30 @@ class MT5Connector:
 
         # Construct success payload
         payload = {
-            "message":     "Trade executed successfully",
-            "order_id":    result.order,
-            "deal_id":     getattr(result, 'deal', None),
-            "volume":      lot_size,
-            "symbol":      symbol,
-            "direction":   direction,
-            "price":       price,
-            # Status and opened_position_ticket are added below
+            "message":   "Trade executed successfully",
+            "order_id":  result.order,
+            "deal_id":   getattr(result, 'deal', None),
+            "volume":    lot_size,
+            "symbol":    symbol,
+            "direction": direction,
+            "price":     price,
+            "status":    "pending", # Default status
+            "opened_position_ticket": None # Initialize to None, will be set for market orders
         }
 
-        if order_type == "MARKET": # This implies result.retcode == mt5.TRADE_RETCODE_DONE already passed
+        if order_type == "MARKET":
             payload["status"] = "filled"
-            print(f"--- MT5Connector.place_trade: Market order result for order {result.order}: Deal={result.deal}, Position={getattr(result, 'position', 'N/A')}, Comment={result.comment}, Retcode={result.retcode}")
-            if hasattr(result, 'position') and result.position != 0:
-                payload["opened_position_ticket"] = result.position
-                print(f"--- MT5Connector.place_trade: Added opened_position_ticket {result.position} to payload.")
+            print(f"--- MT5Connector.place_trade (Market Order): OrderSendResult for order {result.order}: Deal={getattr(result, 'deal', 'N/A')}, Position (attr value)={getattr(result, 'position', 'N/A')}, Comment='{result.comment}', Retcode={result.retcode}")
+            
+            if result.order != 0: # Ensure the order ticket is valid
+                payload["opened_position_ticket"] = result.order # Use order's own ticket
+                print(f"--- MT5Connector.place_trade: Set opened_position_ticket to {result.order} (from result.order)")
             else:
-                print(f"--- MT5Connector.place_trade: result.position not valid or not found. hasattr: {hasattr(result, 'position')}, value: {getattr(result, 'position', 'N/A')}")
-        else: # Pending order, also implies result.retcode == mt5.TRADE_RETCODE_DONE
-            payload["status"] = "pending"
+                # This case should be rare for a successful order send
+                print(f"--- MT5Connector.place_trade: result.order is 0, opened_position_ticket remains None.")
+        # For pending orders, status remains "pending" and opened_position_ticket remains None as initialized.
         
+        print(f"--- MT5Connector.place_trade: Final payload being returned: {payload}")
         return payload
 
 

@@ -105,10 +105,13 @@ class TradeService:
 
             # if filled immediately, grab full position info
             if resp.get("status") == "filled":
-                opened_pos_ticket = resp.get("opened_position_ticket")
+                opened_pos_ticket_value = resp.get("opened_position_ticket")
+                print(f"--- trades/services.py: Value of resp.get('opened_position_ticket'): {opened_pos_ticket_value} (type: {type(opened_pos_ticket_value)})")
+
+                opened_pos_ticket = resp.get("opened_position_ticket") # Re-get for the variable, or use opened_pos_ticket_value
                 pos_details_source = "get_position_by_order_id" # For logging
 
-                if opened_pos_ticket:
+                if opened_pos_ticket: # This condition checks if opened_pos_ticket is truthy (not None, not 0)
                     print(f"--- trades/services.py: Direct opened_position_ticket from place_trade: {opened_pos_ticket}")
                     pos_details = conn.get_open_position_details_by_ticket(opened_pos_ticket)
                     pos_details_source = f"get_open_position_details_by_ticket (direct ticket: {opened_pos_ticket})"
@@ -172,20 +175,51 @@ class TradeService:
 
         trade = None
         if resp.get("status") == "filled":
-            pos = resp.get("position_info", {})
+            raw_position_info = resp.get("position_info", {})
+            
+            # Prepare data for Trade object creation, using fallbacks if necessary
+            trade_lot_size = final_lot
+            trade_entry_price = resp.get("price") # Default to price from place_trade (tick.ask/bid)
+            trade_sl = sl_price
+            trade_tp = tp_price
+
+            if raw_position_info and not raw_position_info.get("error"):
+                trade_lot_size = raw_position_info.get("volume", final_lot)
+                # Override entry_price if available from fetched position details
+                if raw_position_info.get("price_open") is not None:
+                    trade_entry_price = raw_position_info.get("price_open")
+                trade_sl = raw_position_info.get("sl", sl_price)
+                trade_tp = raw_position_info.get("tp", tp_price)
+            elif raw_position_info.get("error"):
+                 print(f"--- trades/services.py (persist): position_info has error: {raw_position_info.get('error')}. Using calculated/default values for some trade details.")
+            
+            # Determine the position_id for the Trade record
+            db_trade_position_id = None
+            # For MT5 Market orders, user confirmed that resp["order_id"] (the order ticket) IS the position_id.
+            if account.platform == "MT5" and self.data.get("order_type", "").upper() == "MARKET":
+                db_trade_position_id = resp.get("order_id") 
+                print(f"--- trades/services.py (persist): Using order_id {db_trade_position_id} as Trade.position_id for MT5 MARKET order.")
+            elif raw_position_info and not raw_position_info.get("error"):
+                # For cTrader or non-market MT5, or if MT5 market order assumption is wrong, use ticket from fetched position_info
+                db_trade_position_id = raw_position_info.get("ticket")
+                print(f"--- trades/services.py (persist): Using ticket {db_trade_position_id} from position_info as Trade.position_id.")
+            
+            if db_trade_position_id is None:
+                 print(f"Warning: Trade.position_id will be NULL for order {resp.get('order_id')}. Fetched position_info: {raw_position_info}")
+
             trade = Trade.objects.create(
                 account         = account,
                 instrument      = self.data["symbol"],
                 direction       = self.data["direction"],
-                lot_size        = Decimal(pos.get("volume", final_lot)),
-                remaining_size  = Decimal(pos.get("volume", final_lot)),
-                entry_price     = Decimal(pos.get("price_open", tp_price)),
-                stop_loss       = Decimal(pos.get("sl", sl_price)),
-                profit_target   = Decimal(pos.get("tp", tp_price)),
+                lot_size        = Decimal(str(trade_lot_size)),
+                remaining_size  = Decimal(str(trade_lot_size)),
+                entry_price     = Decimal(str(trade_entry_price)) if trade_entry_price is not None else None,
+                stop_loss       = Decimal(str(trade_sl)),
+                profit_target   = Decimal(str(trade_tp)),
                 trade_status    = "open",
-                order_id        = resp["order_id"], # This is the MT5 Order Ticket
-                deal_id         = resp.get("deal_id"), # This is the MT5 Entry Deal Ticket
-                position_id     = pos.get("ticket"), # This is the MT5 Position ID from position_info
+                order_id        = resp["order_id"], 
+                deal_id         = resp.get("deal_id"), 
+                position_id     = db_trade_position_id, 
                 risk_percent    = Decimal(self.data["risk_percent"]),
                 projected_profit= Decimal(self.data["projected_profit"]),
                 projected_loss  = Decimal(self.data["projected_loss"]),
