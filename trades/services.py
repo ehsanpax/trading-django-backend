@@ -351,7 +351,7 @@ def close_trade_globally(user, trade_id: UUID) -> dict:
 
     # Update the trade record in the database
     trade.trade_status = "closed"
-    trade.closed_at = dt_timezone.now()
+    trade.closed_at = django_timezone.now()
     if profit is not None: # Profit should be a Decimal here
         trade.actual_profit_loss = profit
     trade.save()
