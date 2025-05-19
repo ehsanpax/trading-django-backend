@@ -33,9 +33,9 @@ class Trade(models.Model):
     direction = models.CharField(max_length=10)  # E.g., 'BUY' or 'SELL'
     lot_size = models.DecimalField(max_digits=10, decimal_places=2)
     remaining_size = models.DecimalField(max_digits=10, decimal_places=2)
-    entry_price = models.DecimalField(max_digits=10, decimal_places=5, null=True, blank=True)
-    stop_loss = models.DecimalField(max_digits=10, decimal_places=5)
-    profit_target = models.DecimalField(max_digits=10, decimal_places=5)
+    entry_price = models.DecimalField(max_digits=18, decimal_places=5, null=True, blank=True)
+    stop_loss = models.DecimalField(max_digits=18, decimal_places=5)
+    profit_target = models.DecimalField(max_digits=18, decimal_places=5)
     risk_percent = models.DecimalField(max_digits=5, decimal_places=2)
     projected_profit = models.DecimalField(max_digits=15, decimal_places=2)
     projected_loss = models.DecimalField(max_digits=15, decimal_places=2)
