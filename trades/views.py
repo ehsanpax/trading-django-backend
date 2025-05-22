@@ -171,121 +171,148 @@ class OpenPositionsLiveView(APIView):
 
     def get(self, request, account_id):
         account = get_object_or_404(Account, id=account_id, user=request.user)
+        final_open_positions = []
+        db_trade_order_ids = set()
 
+        # 1. Fetch open trades from the database for this account
+        db_trades = Trade.objects.filter(account=account, trade_status="open")
+        from .serializers import TradeSerializer # Ensure TradeSerializer is imported
+        serialized_db_trades = TradeSerializer(db_trades, many=True).data
+
+        for trade_data in serialized_db_trades:
+            trade_data["source"] = "database"
+            # Ensure order_id is present and add to set for matching
+            if trade_data.get("order_id") is not None:
+                db_trade_order_ids.add(trade_data["order_id"])
+            final_open_positions.append(trade_data)
+
+        # 2. Fetch live positions from the platform
+        platform_positions_raw = []
         if account.platform == "MT5":
             try:
                 mt5_account = account.mt5_account
             except MT5Account.DoesNotExist:
-                return Response({"detail": "No linked MT5 account found."}, status=status.HTTP_400_BAD_REQUEST)
+                # If no MT5 account, we just return DB trades for this account
+                return Response({"open_positions": final_open_positions}, status=status.HTTP_200_OK)
 
             connector = MT5Connector(mt5_account.account_number, mt5_account.broker_server)
             login_result = connector.connect(mt5_account.encrypted_password)
             if "error" in login_result:
-                return Response({"detail": login_result["error"]}, status=status.HTTP_400_BAD_REQUEST)
+                # Log error or handle, but still return DB trades found so far
+                print(f"MT5 login error for account {account_id}: {login_result['error']}")
+                return Response({"open_positions": final_open_positions}, status=status.HTTP_200_OK)
 
-            mt5_positions = connector.get_open_positions()
-            if "error" in mt5_positions:
-                return Response({"detail": mt5_positions["error"]}, status=status.HTTP_400_BAD_REQUEST)
+            mt5_positions_result = connector.get_open_positions()
+            if "error" in mt5_positions_result:
+                print(f"MT5 get_open_positions error for account {account_id}: {mt5_positions_result['error']}")
+                return Response({"open_positions": final_open_positions}, status=status.HTTP_200_OK)
+            
+            platform_positions_raw = mt5_positions_result.get("open_positions", [])
 
-            # Enhance MT5 positions with UUIDs
-            enriched_positions = []
-            for pos in mt5_positions["open_positions"]:
-                ticket = pos["ticket"]
-                try:
-                    trade = Trade.objects.get(order_id=ticket)
-                    pos["trade_id"] = str(trade.id)
-                except Trade.DoesNotExist:
-                    pos["trade_id"] = None
-                enriched_positions.append(pos)
-
-            return Response({"open_positions": enriched_positions}, status=status.HTTP_200_OK)
+            # Process MT5 positions
+            for pos in platform_positions_raw:
+                ticket = pos.get("ticket")
+                if ticket is not None and ticket not in db_trade_order_ids:
+                    # This position is on the platform but not in our DB
+                    pos_data = {
+                        "trade_id": None, # Our internal UUID, unknown for platform-only
+                        "order_id": ticket, # Platform's ticket
+                        "ticket": ticket, # Keep for consistency if frontend uses it
+                        "symbol": pos.get("symbol"),
+                        "volume": pos.get("volume"),
+                        "price_open": pos.get("price_open"),
+                        "profit": pos.get("profit"),
+                        "time": pos.get("time_setup_msc") // 1000 if pos.get("time_setup_msc") else pos.get("time"), # Prefer more precise time if available
+                        "direction": "BUY" if pos.get("type") == 0 else "SELL", # MT5: 0 for Buy, 1 for Sell
+                        "stop_loss": pos.get("sl"), # Add stop loss from MT5
+                        "profit_target": pos.get("tp"), # Add take profit from MT5
+                        "swap": pos.get("swap"),
+                        "commission": pos.get("commission"),
+                        # Add other relevant fields from MT5 position if needed
+                        "source": "platform_only"
+                    }
+                    final_open_positions.append(pos_data)
 
         elif account.platform == "cTrader":
-                    try:
-                        ctrader_account = CTraderAccount.objects.get(account=account)
-                    except CTraderAccount.DoesNotExist:
-                        return Response({"detail": "No linked cTrader account found."}, status=400)
+            try:
+                ctrader_account = CTraderAccount.objects.get(account=account)
+            except CTraderAccount.DoesNotExist:
+                return Response({"open_positions": final_open_positions}, status=status.HTTP_200_OK)
 
-                    payload = {
-                        "access_token": ctrader_account.access_token,
-                        "ctid_trader_account_id": ctrader_account.ctid_trader_account_id,
+            payload = {
+                "access_token": ctrader_account.access_token,
+                "ctid_trader_account_id": ctrader_account.ctid_trader_account_id,
+            }
+            base_url = settings.CTRADER_API_BASE_URL
+            positions_url = f"{base_url}/ctrader/positions"
+
+            try:
+                pos_resp = requests.post(positions_url, json=payload, timeout=10)
+                pos_resp.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+                pos_data_response = pos_resp.json()
+                if "error" in pos_data_response:
+                    print(f"cTrader positions endpoint error for account {account_id}: {pos_data_response['error']}")
+                    return Response({"open_positions": final_open_positions}, status=status.HTTP_200_OK)
+                platform_positions_raw = pos_data_response.get("positions", [])
+            except requests.RequestException as e:
+                print(f"Error calling cTrader positions endpoint for account {account_id}: {str(e)}")
+                return Response({"open_positions": final_open_positions}, status=status.HTTP_200_OK)
+            
+            # Process cTrader positions
+            for pos in platform_positions_raw:
+                try:
+                    ticket = int(pos.get("positionId"))
+                except (ValueError, TypeError):
+                    ticket = None
+
+                if ticket is not None and ticket not in db_trade_order_ids:
+                    trade_data_ctrader = pos.get("tradeData", {})
+                    try:
+                        volume = float(trade_data_ctrader.get("volume", "0")) / 100
+                    except (ValueError, TypeError):
+                        volume = 0.0
+                    direction = trade_data_ctrader.get("tradeSide", "").upper()
+                    try:
+                        price_open = float(pos.get("price_open", pos.get("price", 0)))
+                    except (ValueError, TypeError):
+                        price_open = 0.0
+                    try:
+                        profit = float(pos.get("unrealized_pnl", 0))
+                    except (ValueError, TypeError):
+                        profit = 0.0
+                    timestamp_raw = trade_data_ctrader.get("openTimestamp") or pos.get("utcLastUpdateTimestamp")
+                    try:
+                        time_val = int(float(timestamp_raw) / 1000)
+                    except (ValueError, TypeError):
+                        time_val = 0
+                    symbol_str = pos.get("symbol")
+                    if not symbol_str:
+                        symbol_id = trade_data_ctrader.get("symbolId")
+                        symbol_str = f"Unknown-{symbol_id}" if symbol_id else "Unknown"
+
+                    pos_data = {
+                        "trade_id": None,
+                        "order_id": ticket,
+                        "ticket": ticket,
+                        "symbol": symbol_str,
+                        "volume": volume,
+                        "price_open": price_open,
+                        "profit": profit,
+                        "time": time_val,
+                        "direction": direction,
+                        "stop_loss": pos.get("stopLoss"), # Add stop loss from cTrader
+                        "profit_target": pos.get("takeProfit"), # Add take profit from cTrader
+                        "swap": pos.get("swap"), # Assuming cTrader API provides this
+                        "commission": pos.get("commission"), # Assuming cTrader API provides this
+                        # Add other relevant fields from cTrader position if needed
+                        "source": "platform_only"
                     }
-                    base_url = settings.CTRADER_API_BASE_URL  # e.g. "http://localhost:8080"
-                    positions_url = f"{base_url}/ctrader/positions"
+                    final_open_positions.append(pos_data)
+        else:
+            # Unsupported platform, just return DB trades
+            return Response({"open_positions": final_open_positions}, status=status.HTTP_200_OK)
 
-                    try:
-                        pos_resp = requests.post(positions_url, json=payload, timeout=10)
-                    except requests.RequestException as e:
-                        return Response({"detail": f"Error calling cTrader positions endpoint: {str(e)}"}, status=400)
-
-                    if pos_resp.status_code != 200:
-                        return Response({"detail": f"cTrader positions endpoint returned status: {pos_resp.status_code}"}, status=400)
-
-                    pos_data = pos_resp.json()
-                    if "error" in pos_data:
-                        return Response({"detail": pos_data["error"]}, status=400)
-
-                    raw_positions = pos_data.get("positions", [])
-                    transformed_positions = []
-                    for pos in raw_positions:
-                        # Ticket from positionId (converted to int)
-                        try:
-                            ticket = int(pos.get("positionId"))
-                        except (ValueError, TypeError):
-                            ticket = None
-
-                        trade_data = pos.get("tradeData", {})
-                        # Convert volume from string (in micro units) to lots.
-                        try:
-                            volume = float(trade_data.get("volume", "0")) / 100
-                        except (ValueError, TypeError):
-                            volume = 0.0
-
-                        # Determine the trade side/direction.
-                        direction = trade_data.get("tradeSide", "").upper()
-
-                        # Use 'price_open' if available; otherwise, fallback to 'price'.
-                        price_open = pos.get("price_open", pos.get("price", 0))
-                        try:
-                            price_open = float(price_open)
-                        except (ValueError, TypeError):
-                            price_open = 0.0
-
-                        # Use unrealized_pnl as profit.
-                        try:
-                            profit = float(pos.get("unrealized_pnl", 0))
-                        except (ValueError, TypeError):
-                            profit = 0.0
-
-                        # Use openTimestamp if available, else utcLastUpdateTimestamp; convert from ms to s.
-                        timestamp_raw = trade_data.get("openTimestamp") or pos.get("utcLastUpdateTimestamp")
-                        try:
-                            time_val = int(float(timestamp_raw) / 1000)
-                        except (ValueError, TypeError):
-                            time_val = 0
-
-                        # Use the 'symbol' field directly as provided.
-                        symbol_str = pos.get("symbol")
-                        if not symbol_str:
-                            # Fallback if, for some reason, symbol is not provided.
-                            symbol_id = trade_data.get("symbolId")
-                            symbol_str = f"Unknown-{symbol_id}" if symbol_id else "Unknown"
-
-                        transformed_positions.append({
-                            "trade_id": None,      # Not assigned until linked to a trade.
-                            "ticket": ticket,
-                            "symbol": symbol_str,
-                            "volume": volume,
-                            "price_open": price_open,
-                            "profit": profit,
-                            "time": time_val,
-                            "direction": direction,
-                        })
-
-                    return Response({"open_positions": transformed_positions}, status=200)
-
-        return Response({"detail": "Unsupported trading platform."}, status=400)
-    
+        return Response({"open_positions": final_open_positions}, status=status.HTTP_200_OK)
 
 
 class AllOpenPositionsLiveView(APIView):
@@ -293,42 +320,68 @@ class AllOpenPositionsLiveView(APIView):
     Retrieves live open positions from the appropriate trading platform.
     """
     authentication_classes = [TokenAuthentication, SessionAuthentication]
+    authentication_classes = [TokenAuthentication, SessionAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        accounts = Account.objects.filter(user=request.user)
+        user_accounts = Account.objects.filter(user=request.user)
+        final_all_open_positions = []
+        db_trade_order_ids = set()
 
-        all_open_positions = []
+        # 1. Fetch all open trades from the database for the user
+        db_trades = Trade.objects.filter(account__in=user_accounts, trade_status="open")
+        from .serializers import TradeSerializer # Ensure TradeSerializer is imported
+        serialized_db_trades = TradeSerializer(db_trades, many=True).data
 
-        for account in accounts:
-
+        for trade_data in serialized_db_trades:
+            trade_data["source"] = "database"
+            if trade_data.get("order_id") is not None:
+                db_trade_order_ids.add(trade_data["order_id"])
+            final_all_open_positions.append(trade_data)
+        
+        # 2. Fetch live positions from platforms for each account
+        for account in user_accounts:
+            platform_positions_raw = []
             if account.platform == "MT5":
                 try:
                     mt5_account = account.mt5_account
                 except MT5Account.DoesNotExist:
-                    continue
+                    continue # Skip to next account
 
                 connector = MT5Connector(mt5_account.account_number, mt5_account.broker_server)
                 login_result = connector.connect(mt5_account.encrypted_password)
                 if "error" in login_result:
+                    print(f"MT5 login error for account {account.id}: {login_result['error']}")
                     continue
 
-                mt5_positions = connector.get_open_positions()
-                if "error" in mt5_positions:
+                mt5_positions_result = connector.get_open_positions()
+                if "error" in mt5_positions_result:
+                    print(f"MT5 get_open_positions error for account {account.id}: {mt5_positions_result['error']}")
                     continue
+                
+                platform_positions_raw = mt5_positions_result.get("open_positions", [])
 
-                # Enhance MT5 positions with UUIDs
-                enriched_positions = []
-                for pos in mt5_positions["open_positions"]:
-                    ticket = pos["ticket"]
-                    try:
-                        trade = Trade.objects.get(order_id=ticket)
-                        pos["trade_id"] = str(trade.id)
-                    except Trade.DoesNotExist:
-                        pos["trade_id"] = None
-                    enriched_positions.append(pos)
-
-                all_open_positions.extend(enriched_positions)
+                for pos in platform_positions_raw:
+                    ticket = pos.get("ticket")
+                    if ticket is not None and ticket not in db_trade_order_ids:
+                        pos_data = {
+                            "trade_id": None,
+                            "order_id": ticket,
+                            "ticket": ticket,
+                            "symbol": pos.get("symbol"),
+                            "volume": pos.get("volume"),
+                            "price_open": pos.get("price_open"),
+                            "profit": pos.get("profit"),
+                            "time": pos.get("time_setup_msc") // 1000 if pos.get("time_setup_msc") else pos.get("time"),
+                            "direction": "BUY" if pos.get("type") == 0 else "SELL",
+                            "stop_loss": pos.get("sl"), # Add stop loss from MT5
+                            "profit_target": pos.get("tp"), # Add take profit from MT5
+                            "swap": pos.get("swap"),
+                            "commission": pos.get("commission"),
+                            "account_id": str(account.id), # Add account_id for context
+                            "source": "platform_only"
+                        }
+                        final_all_open_positions.append(pos_data)
 
             elif account.platform == "cTrader":
                 try:
@@ -340,81 +393,73 @@ class AllOpenPositionsLiveView(APIView):
                     "access_token": ctrader_account.access_token,
                     "ctid_trader_account_id": ctrader_account.ctid_trader_account_id,
                 }
-                base_url = settings.CTRADER_API_BASE_URL  # e.g. "http://localhost:8080"
+                base_url = settings.CTRADER_API_BASE_URL
                 positions_url = f"{base_url}/ctrader/positions"
 
                 try:
                     pos_resp = requests.post(positions_url, json=payload, timeout=10)
+                    pos_resp.raise_for_status()
+                    pos_data_response = pos_resp.json()
+                    if "error" in pos_data_response:
+                        print(f"cTrader positions endpoint error for account {account.id}: {pos_data_response['error']}")
+                        continue
+                    platform_positions_raw = pos_data_response.get("positions", [])
                 except requests.RequestException as e:
+                    print(f"Error calling cTrader positions endpoint for account {account.id}: {str(e)}")
                     continue
-
-                if pos_resp.status_code != 200:
-                    continue
-
-                pos_data = pos_resp.json()
-                if "error" in pos_data:
-                    continue
-
-                raw_positions = pos_data.get("positions", [])
-                transformed_positions = []
-                for pos in raw_positions:
-                    # Ticket from positionId (converted to int)
+                
+                for pos in platform_positions_raw:
                     try:
                         ticket = int(pos.get("positionId"))
                     except (ValueError, TypeError):
                         ticket = None
 
-                    trade_data = pos.get("tradeData", {})
-                    # Convert volume from string (in micro units) to lots.
-                    try:
-                        volume = float(trade_data.get("volume", "0")) / 100
-                    except (ValueError, TypeError):
-                        volume = 0.0
+                    if ticket is not None and ticket not in db_trade_order_ids:
+                        trade_data_ctrader = pos.get("tradeData", {})
+                        try:
+                            volume = float(trade_data_ctrader.get("volume", "0")) / 100
+                        except (ValueError, TypeError):
+                            volume = 0.0
+                        direction = trade_data_ctrader.get("tradeSide", "").upper()
+                        try:
+                            price_open = float(pos.get("price_open", pos.get("price", 0)))
+                        except (ValueError, TypeError):
+                            price_open = 0.0
+                        try:
+                            profit = float(pos.get("unrealized_pnl", 0))
+                        except (ValueError, TypeError):
+                            profit = 0.0
+                        timestamp_raw = trade_data_ctrader.get("openTimestamp") or pos.get("utcLastUpdateTimestamp")
+                        try:
+                            time_val = int(float(timestamp_raw) / 1000)
+                        except (ValueError, TypeError):
+                            time_val = 0
+                        symbol_str = pos.get("symbol")
+                        if not symbol_str:
+                            symbol_id = trade_data_ctrader.get("symbolId")
+                            symbol_str = f"Unknown-{symbol_id}" if symbol_id else "Unknown"
 
-                    # Determine the trade side/direction.
-                    direction = trade_data.get("tradeSide", "").upper()
+                        pos_data = {
+                            "trade_id": None,
+                            "order_id": ticket,
+                            "ticket": ticket,
+                            "symbol": symbol_str,
+                            "volume": volume,
+                            "price_open": price_open,
+                            "profit": profit,
+                            "time": time_val,
+                            "direction": direction,
+                            "stop_loss": pos.get("stopLoss"), # Add stop loss from cTrader
+                            "profit_target": pos.get("takeProfit"), # Add take profit from cTrader
+                            "swap": pos.get("swap"),
+                            "commission": pos.get("commission"),
+                            "account_id": str(account.id), # Add account_id for context
+                            "source": "platform_only"
+                        }
+                        final_all_open_positions.append(pos_data)
+            # No 'else' needed here as we just skip unsupported platforms for aggregation
 
-                    # Use 'price_open' if available; otherwise, fallback to 'price'.
-                    price_open = pos.get("price_open", pos.get("price", 0))
-                    try:
-                        price_open = float(price_open)
-                    except (ValueError, TypeError):
-                        price_open = 0.0
-
-                    # Use unrealized_pnl as profit.
-                    try:
-                        profit = float(pos.get("unrealized_pnl", 0))
-                    except (ValueError, TypeError):
-                        profit = 0.0
-
-                    # Use openTimestamp if available, else utcLastUpdateTimestamp; convert from ms to s.
-                    timestamp_raw = trade_data.get("openTimestamp") or pos.get("utcLastUpdateTimestamp")
-                    try:
-                        time_val = int(float(timestamp_raw) / 1000)
-                    except (ValueError, TypeError):
-                        time_val = 0
-
-                    # Use the 'symbol' field directly as provided.
-                    symbol_str = pos.get("symbol")
-                    if not symbol_str:
-                        # Fallback if, for some reason, symbol is not provided.
-                        symbol_id = trade_data.get("symbolId")
-                        symbol_str = f"Unknown-{symbol_id}" if symbol_id else "Unknown"
-
-                    transformed_positions.append({
-                        "trade_id": None,      # Not assigned until linked to a trade.
-                        "ticket": ticket,
-                        "symbol": symbol_str,
-                        "volume": volume,
-                        "price_open": price_open,
-                        "profit": profit,
-                        "time": time_val,
-                        "direction": direction,
-                    })
-
-                all_open_positions.extend(transformed_positions)
-
-        return Response({"open_positions": all_open_positions}, status=200)
+        return Response({"open_positions": final_all_open_positions}, status=status.HTTP_200_OK)
 
 
 
