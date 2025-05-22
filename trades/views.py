@@ -210,28 +210,57 @@ class OpenPositionsLiveView(APIView):
             platform_positions_raw = mt5_positions_result.get("open_positions", [])
 
             # Process MT5 positions
-            for pos in platform_positions_raw:
-                ticket = pos.get("ticket")
-                if ticket is not None and ticket not in db_trade_order_ids:
-                    # This position is on the platform but not in our DB
-                    pos_data = {
-                        "trade_id": None, # Our internal UUID, unknown for platform-only
-                        "order_id": ticket, # Platform's ticket
-                        "ticket": ticket, # Keep for consistency if frontend uses it
-                        "symbol": pos.get("symbol"),
-                        "volume": pos.get("volume"),
-                        "price_open": pos.get("price_open"),
-                        "profit": pos.get("profit"),
-                        "time": pos.get("time_setup_msc") // 1000 if pos.get("time_setup_msc") else pos.get("time"), # Prefer more precise time if available
-                        "direction": "BUY" if pos.get("type") == 0 else "SELL", # MT5: 0 for Buy, 1 for Sell
-                        "stop_loss": pos.get("sl"), # Add stop loss from MT5
-                        "profit_target": pos.get("tp"), # Add take profit from MT5
-                        "swap": pos.get("swap"),
-                        "commission": pos.get("commission"),
-                        # Add other relevant fields from MT5 position if needed
-                        "source": "platform_only"
-                    }
-                    final_open_positions.append(pos_data)
+            # Create a dictionary of DB trades by their order_id for quick lookup
+            db_trades_dict = {t_data['order_id']: t_data for t_data in serialized_db_trades if t_data.get('order_id') is not None}
+
+            for mt5_pos_live in platform_positions_raw: # Renamed to avoid confusion
+                ticket = mt5_pos_live.get("ticket")
+                
+                # Base data from live MT5 position
+                live_pos_data = {
+                    "ticket": ticket,
+                    "symbol": mt5_pos_live.get("symbol"),
+                    "volume": mt5_pos_live.get("volume"),
+                    "price_open": mt5_pos_live.get("price_open"),
+                    "current_pl": mt5_pos_live.get("profit"), # Using 'current_pl' for consistency
+                    "swap": mt5_pos_live.get("swap"),
+                    "commission": mt5_pos_live.get("commission"),
+                    "stop_loss": mt5_pos_live.get("sl"),
+                    "profit_target": mt5_pos_live.get("tp"),
+                    "time": mt5_pos_live.get("time"), # MT5 'time' is usually open time
+                    "direction": "BUY" if mt5_pos_live.get("direction") == "BUY" else "SELL", # Assuming connector provides this directly
+                    "comment": mt5_pos_live.get("comment"),
+                    "magic": mt5_pos_live.get("magic"),
+                    "account_id": str(account.id), # Add account_id for context
+                    "source": "platform_live" # Default source
+                }
+
+                # Try to find and merge with DB data
+                matched_db_trade = db_trades_dict.get(ticket)
+                if matched_db_trade:
+                    # Remove the matched trade from final_open_positions to avoid duplication
+                    # and to replace it with the merged data.
+                    final_open_positions = [t for t in final_open_positions if t.get('order_id') != ticket]
+                    
+                    # Merge: Start with DB data, then update/override with live MT5 data
+                    # This ensures DB specific fields are kept, and live fields are fresh
+                    merged_data = {**matched_db_trade, **live_pos_data}
+                    merged_data["trade_id"] = matched_db_trade.get("id") # Ensure our internal UUID is used
+                    merged_data["order_id"] = ticket # Ensure platform ticket is used as order_id
+                    merged_data["source"] = "platform_synced_with_db"
+                    # Ensure 'profit' from MT5 is used as 'current_pl'
+                    merged_data["current_pl"] = mt5_pos_live.get("profit") 
+                    # Keep SL/TP from platform as they are live
+                    merged_data["stop_loss"] = mt5_pos_live.get("sl")
+                    merged_data["profit_target"] = mt5_pos_live.get("tp")
+
+                    final_open_positions.append(merged_data)
+                else:
+                    # Position is on platform but not in our DB (or not matched)
+                    live_pos_data["trade_id"] = None # No internal DB id
+                    live_pos_data["order_id"] = ticket # Platform's ticket
+                    live_pos_data["source"] = "platform_only"
+                    final_open_positions.append(live_pos_data)
 
         elif account.platform == "cTrader":
             try:
@@ -361,27 +390,63 @@ class AllOpenPositionsLiveView(APIView):
                 
                 platform_positions_raw = mt5_positions_result.get("open_positions", [])
 
-                for pos in platform_positions_raw:
-                    ticket = pos.get("ticket")
-                    if ticket is not None and ticket not in db_trade_order_ids:
-                        pos_data = {
-                            "trade_id": None,
-                            "order_id": ticket,
-                            "ticket": ticket,
-                            "symbol": pos.get("symbol"),
-                            "volume": pos.get("volume"),
-                            "price_open": pos.get("price_open"),
-                            "profit": pos.get("profit"),
-                            "time": pos.get("time_setup_msc") // 1000 if pos.get("time_setup_msc") else pos.get("time"),
-                            "direction": "BUY" if pos.get("type") == 0 else "SELL",
-                            "stop_loss": pos.get("sl"), # Add stop loss from MT5
-                            "profit_target": pos.get("tp"), # Add take profit from MT5
-                            "swap": pos.get("swap"),
-                            "commission": pos.get("commission"),
-                            "account_id": str(account.id), # Add account_id for context
-                            "source": "platform_only"
-                        }
-                        final_all_open_positions.append(pos_data)
+                # Create a dictionary of DB trades by their order_id for quick lookup
+                # This is done outside the loop for efficiency if processing multiple accounts,
+                # but for clarity, we can re-filter or assume db_trades_dict is pre-populated
+                # with all user's trades if this view aggregates all accounts.
+                # For this specific view (AllOpenPositionsLiveView), db_trades_dict is built from all user's trades.
+                
+                db_trades_user_dict = {t_data['order_id']: t_data for t_data in serialized_db_trades if t_data.get('order_id') is not None and t_data.get('account') == str(account.id)}
+
+
+                for mt5_pos_live in platform_positions_raw: # Renamed
+                    ticket = mt5_pos_live.get("ticket")
+
+                    live_pos_data = {
+                        "ticket": ticket,
+                        "symbol": mt5_pos_live.get("symbol"),
+                        "volume": mt5_pos_live.get("volume"),
+                        "price_open": mt5_pos_live.get("price_open"),
+                        "current_pl": mt5_pos_live.get("profit"),
+                        "swap": mt5_pos_live.get("swap"),
+                        "commission": mt5_pos_live.get("commission"),
+                        "stop_loss": mt5_pos_live.get("sl"),
+                        "profit_target": mt5_pos_live.get("tp"),
+                        "time": mt5_pos_live.get("time"),
+                        "direction": "BUY" if mt5_pos_live.get("direction") == "BUY" else "SELL",
+                        "comment": mt5_pos_live.get("comment"),
+                        "magic": mt5_pos_live.get("magic"),
+                        "account_id": str(account.id),
+                        "source": "platform_live"
+                    }
+                    
+                    # Check if this live position matches a DB trade already in final_all_open_positions
+                    # and update it, or add as new if it's platform_only.
+                    
+                    found_and_updated = False
+                    for i, existing_pos in enumerate(final_all_open_positions):
+                        if existing_pos.get("order_id") == ticket and existing_pos.get("account") == str(account.id): # Match by ticket and account
+                            # This DB trade corresponds to the live MT5 position. Update it.
+                            # Start with existing_pos (DB data), then update/override with live_pos_data
+                            merged_data = {**existing_pos, **live_pos_data}
+                            merged_data["trade_id"] = existing_pos.get("id") # our internal UUID
+                            merged_data["order_id"] = ticket
+                            merged_data["source"] = "platform_synced_with_db"
+                            merged_data["current_pl"] = mt5_pos_live.get("profit")
+                            merged_data["stop_loss"] = mt5_pos_live.get("sl")
+                            merged_data["profit_target"] = mt5_pos_live.get("tp")
+                            final_all_open_positions[i] = merged_data
+                            found_and_updated = True
+                            break 
+                    
+                    if not found_and_updated:
+                        # This live position was not found in the initial list of DB trades,
+                        # so it's a platform-only position for this account.
+                        live_pos_data["trade_id"] = None
+                        live_pos_data["order_id"] = ticket
+                        live_pos_data["source"] = "platform_only"
+                        final_all_open_positions.append(live_pos_data)
+
 
             elif account.platform == "cTrader":
                 try:

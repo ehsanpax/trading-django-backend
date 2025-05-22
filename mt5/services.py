@@ -393,14 +393,20 @@ class MT5Connector:
                 trade_id = None
             
             open_positions.append({
-                "trade_id": trade_id,
+                "trade_id": trade_id, # Our internal UUID if matched
                 "ticket": pos.ticket,
                 "symbol": pos.symbol,
                 "volume": pos.volume,
                 "price_open": pos.price_open,
-                "profit": pos.profit,
-                "time": pos.time,
-                "direction": "SELL" if pos.type == 1 else "BUY"
+                "profit": pos.profit, # This is the live P/L from MT5 (floating P/L)
+                "swap": pos.swap,     # Live Swap from MT5
+                "commission": pos.commission, # Live Commission from MT5 (usually for entry/exit, not floating)
+                "sl": pos.sl,         # Live Stop Loss from MT5
+                "tp": pos.tp,         # Live Take Profit from MT5
+                "time": pos.time,     # Open time (timestamp)
+                "direction": "SELL" if pos.type == 1 else "BUY", # pos.type: 0 for buy, 1 for sell
+                "comment": pos.comment, # Position comment
+                "magic": pos.magic    # Position magic number
             })
 
         return {"open_positions": open_positions}

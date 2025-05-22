@@ -4,9 +4,36 @@ from trading.models import Trade, Order
 from decimal import Decimal
 
 class TradeSerializer(serializers.ModelSerializer):
+    current_pl = serializers.DecimalField(max_digits=15, decimal_places=2, read_only=True, required=False)
+    # Ensure other fields from the MT5 live data that might not be on the Trade model are also available
+    # if they are part of the merged dictionary passed to the serializer.
+    # For example, if 'comment' or 'magic' from MT5 live data is needed and not on Trade model:
+    comment = serializers.CharField(read_only=True, required=False, allow_blank=True)
+    magic = serializers.IntegerField(read_only=True, required=False)
+    # The 'source' field added in views.py to distinguish data origin
+    source = serializers.CharField(read_only=True, required=False)
+
+
     class Meta:
         model = Trade
-        fields = '__all__'
+        # Explicitly list fields to ensure dynamically added ones like 'current_pl' are included
+        # along with all model fields.
+        fields = [
+            # Fields from Trade model
+            'id', 'order_id', 'deal_id', 'position_id', 'swap', 'commission', 
+            'account', 'instrument', 'direction', 'lot_size', 'remaining_size',
+            'entry_price', 'stop_loss', 'profit_target', 'risk_percent',
+            'projected_profit', 'projected_loss', 'actual_profit_loss',
+            'reason', 'rr_ratio', 'trade_status', 'closed_at', 'created_at',
+            'trader', 'indicators',
+            # Dynamically added fields / fields from live platform data
+            'current_pl', 'comment', 'magic', 'source'
+        ]
+        # If you prefer to keep '__all__' and add others, DRF might not pick up non-model/non-property fields.
+        # Explicitly listing is safer for fields added to the context dictionary.
+        # Alternatively, make 'current_pl', 'comment', 'magic', 'source' properties on the Trade model
+        # if they should always be there, but for now, making them serializer fields is fine
+        # as the view prepares the data dictionary.
 
 class OrderSerializer(serializers.ModelSerializer):
     class Meta:
