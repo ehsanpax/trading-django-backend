@@ -30,11 +30,12 @@ class TradeJournalAttachment(models.Model):
     journal = models.ForeignKey(
         TradeJournal,
         on_delete=models.CASCADE,
-        related_name="attachments"
+        related_name="attachments",
+        null=True,  # Allow journal to be null
+        blank=True  # Allow blank in forms/admin
     )
     file = models.FileField(upload_to="journal_attachments/")
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
         return f"Attachment for journal {self.journal.id}"
-

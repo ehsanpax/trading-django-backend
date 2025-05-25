@@ -24,7 +24,7 @@ LOG_DIR.mkdir(exist_ok=True)
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = 'django-insecure-$u3ceh^n!)-++(v@#0%zku#)p0djp0)z5v4v53&(ensmztfd$)'
-
+CHART_IMG_API_KEY = "Wpxso3414W7AV1Ppai9wYaEerVAHwEog4y22YOZt"
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
@@ -59,6 +59,7 @@ INSTALLED_APPS = [
     'indicators',
     'calculators',
     'trade_history',
+    'chart_snapshots.apps.ChartSnapshotsConfig',
 ]
 
 
