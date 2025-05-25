@@ -5,10 +5,10 @@ class AITradeRequestSerializer(serializers.Serializer):
     account_id = serializers.UUIDField() # Or IntegerField if your IDs are integers
     symbol = serializers.CharField()
     direction = serializers.ChoiceField(choices=['BUY', 'SELL'])
-    order_type = serializers.ChoiceField(choices=['LIMIT', 'MARKET'], default='MARKET', required=False, allow_blank=True, allow_null=True)
-    entry_price = serializers.DecimalField(max_digits=20, decimal_places=8)
-    stop_loss_distance = serializers.DecimalField(max_digits=20, decimal_places=8)
-    take_profit_distance = serializers.DecimalField(max_digits=20, decimal_places=8)
+    order_type = serializers.ChoiceField(choices=['LIMIT', 'MARKET'], default='MARKET', required=False, allow_blank=True, allow_null=True) # Retaining order_type
+    entry_price = serializers.DecimalField(max_digits=20, decimal_places=8) # Will be required
+    stop_loss_price = serializers.DecimalField(max_digits=20, decimal_places=8) # Was _distance, now _price and required
+    take_profit_price = serializers.DecimalField(max_digits=20, decimal_places=8) # Was _distance, now _price and required
     projected_profit = serializers.DecimalField(max_digits=15, decimal_places=2, required=False, allow_null=True)
     projected_loss = serializers.DecimalField(max_digits=15, decimal_places=2, required=False, allow_null=True)
     rr_ratio = serializers.DecimalField(max_digits=5, decimal_places=2, required=False, allow_null=True)
