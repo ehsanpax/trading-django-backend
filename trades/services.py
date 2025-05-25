@@ -293,7 +293,6 @@ def close_trade_globally(user, trade_id: UUID) -> dict:
         try:
             mt5_account = trade.account.mt5_account
         except MT5Account.DoesNotExist:
-            # If the MT5Account link is missing, it's a server-side configuration issue.
             raise APIException("No linked MT5 account found for this trade's account.")
 
         connector = MT5Connector(mt5_account.account_number, mt5_account.broker_server)
@@ -301,45 +300,59 @@ def close_trade_globally(user, trade_id: UUID) -> dict:
         if "error" in login_result:
             raise APIException(f"MT5 connection failed: {login_result['error']}")
 
-        # Capture profit *before* closing.
-        # Ensure that if get_position_by_ticket returns an error, we handle it.
-        position_data = connector.get_position_by_order_id(trade.order_id)
-        if position_data and not position_data.get("error"):
-            profit = (
-                Decimal(str(position_data.get("profit", 0))) +
-                Decimal(str(position_data.get("commission", 0))) +
-                Decimal(str(position_data.get("swap", 0)))
-            )
-        elif position_data and position_data.get("error"):
-            # If there's an error fetching position (e.g., position already closed on MT5 side),
-            # we might log this and proceed to close our record, or halt.
-            # For now, let's assume we can't determine profit but can still attempt to mark as closed.
-            # Or, more strictly, raise an error if pre-close state can't be determined.
-            # The original view defaulted to profit = 0 if no position_data.
-            # Let's be a bit more explicit: if we can't get data, we can't confirm P&L.
-            # However, the trade might have been closed on MT5 already.
-            # For now, let's assume if we can't get position data, we can't reliably get P&L.
-            # The close_trade might still succeed if the ticket exists but is already closed.
-            # Let's default profit to 0 in this case, similar to original view's behavior for "no position data".
-            profit = Decimal(0) # Default if position info is problematic but not a fatal error for P&L capture
-            # Consider logging this event: f"Could not retrieve full position data for ticket {trade.order_id} before closing: {position_data.get('error')}"
-        else: # No position_data returned at all (e.g. ticket doesn't exist anymore)
-            profit = Decimal(0)
-            # Consider logging: f"No position data found for ticket {trade.order_id} before closing. Assuming already closed on broker."
+        # Close the trade on MT5 platform first
+        # The 'ticket' parameter for close_trade should be the position ticket.
+        # Assuming trade.position_id stores the MT5 position ticket.
+        # If trade.order_id is used for MT5 position ticket, use that.
+        # Based on TradeService.persist, trade.position_id is the intended field.
+        mt5_position_ticket_to_close = trade.position_id
+        if not mt5_position_ticket_to_close:
+            # Fallback if position_id is somehow not set, try order_id.
+            # This might happen if the trade was created before position_id was reliably populated.
+            print(f"Warning: Trade {trade.id} has no position_id. Attempting to use order_id {trade.order_id} for closure.")
+            mt5_position_ticket_to_close = trade.order_id
+        
+        if not mt5_position_ticket_to_close:
+            raise APIException(f"Cannot close trade {trade.id}: Missing MT5 position ticket (position_id or order_id).")
 
-
-        # Now close the trade in MT5
-        # The volume parameter in connector.close_trade expects a float.
         close_result = connector.close_trade(
-            ticket=trade.order_id,
-            volume=float(trade.remaining_size), # trade.remaining_size is likely Decimal
+            ticket=mt5_position_ticket_to_close,
+            volume=float(trade.remaining_size), 
             symbol=trade.instrument
         )
 
         if "error" in close_result:
-            raise APIException(f"MT5 trade closure failed: {close_result['error']}")
+            # Even if closure fails (e.g., already closed, no connection), 
+            # we might still want to fetch historical deal data if the position_id is valid.
+            # However, if close_trade itself fails due to connection, fetching deals will also fail.
+            # For now, if close_trade reports an error, we raise it.
+            # Consider more nuanced error handling if needed (e.g., if error indicates "already closed").
+            raise APIException(f"MT5 trade closure command failed: {close_result['error']}")
+
+        # After successful closure command, fetch final P/L details from historical deals
+        # Use the same position_id that was targeted for closure.
+        final_details = connector.get_closing_deal_details_for_position(position_id=mt5_position_ticket_to_close)
         
-        # If MT5 closure is successful, we proceed to update DB.
+        if "error" in final_details:
+            # Log this error, as the trade was closed on platform but we couldn't get final P/L.
+            # This could happen if history_deals_get fails or no exit deals are found immediately.
+            print(f"Warning: Trade {trade.id} (MT5 pos: {mt5_position_ticket_to_close}) closed on platform, "
+                  f"but failed to retrieve final P/L details: {final_details['error']}. P/L will be recorded as 0.")
+            profit = Decimal(0) # Default P/L if details can't be fetched post-closure
+        else:
+            # Summing up profit, commission, and swap for the net P/L
+            profit = (
+                Decimal(str(final_details.get("profit", 0))) +
+                Decimal(str(final_details.get("commission", 0))) +
+                Decimal(str(final_details.get("swap", 0)))
+            )
+            # Optionally, store raw profit, commission, swap in separate DB fields if available/needed.
+            # trade.commission = Decimal(str(final_details.get("commission",0)))
+            # trade.swap = Decimal(str(final_details.get("swap",0)))
+            # The Trade model already has commission and swap fields, let's update them.
+            trade.commission = Decimal(str(final_details.get("commission", trade.commission or 0)))
+            trade.swap = Decimal(str(final_details.get("swap", trade.swap or 0)))
+
 
     elif trade.account.platform == "cTrader":
         # Consistent with original view, cTrader close is not implemented.
