@@ -21,9 +21,9 @@ class ChartSnapshotConfig(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='chart_snapshot_configs')
-    name = models.CharField(max_length=255, help_text=_("User-defined name for this configuration (e.g., EURUSD Daily EMA Setup)"))
-    symbol = models.CharField(max_length=50, help_text=_("Symbol for the chart (e.g., EURUSD, BINANCE:BTCUSDT)"))
-    timeframe = models.CharField(max_length=3, choices=TIMEFRAME_CHOICES, default='1D')
+    name = models.CharField(max_length=255, help_text=_("User-defined name for this indicator template (e.g., Standard EMAs & DMI)"))
+    # symbol = models.CharField(max_length=50, help_text=_("Symbol for the chart in EXCHANGE:SYMBOL format (e.g., OANDA:EURUSD, BINANCE:BTCUSDT, TVC:GOLD)")) # Removed
+    # timeframe = models.CharField(max_length=3, choices=TIMEFRAME_CHOICES, default='1D') # Removed
     
     default_indicator_settings = {
         "emas": {"enabled": True, "periods": [21, 50, 100], "source": "close"},
@@ -40,7 +40,7 @@ class ChartSnapshotConfig(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        return f"{self.name} ({self.symbol} {self.timeframe}) by {self.user.username}"
+        return f"{self.name} (Indicator Template) by {self.user.username}"
 
     class Meta:
         ordering = ['-created_at']
@@ -70,11 +70,5 @@ class ChartSnapshot(models.Model):
         verbose_name = _("Chart Snapshot")
         verbose_name_plural = _("Chart Snapshots")
 
-    def save(self, *args, **kwargs):
-        # Denormalize symbol and timeframe from config if not provided directly
-        # This is useful if a snapshot is created directly with a config
-        if self.config and not self.symbol:
-            self.symbol = self.config.symbol
-        if self.config and not self.timeframe:
-            self.timeframe = self.config.timeframe
-        super().save(*args, **kwargs)
+    # Custom save method removed as denormalization from config is no longer applicable
+    # for symbol and timeframe. If other save-time logic is needed, it can be added here.

@@ -4,8 +4,11 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from .models import ChartSnapshotConfig, ChartSnapshot
+import logging # For diagnostic logging
 from .serializers import ChartSnapshotConfigSerializer, ChartSnapshotSerializer, AdhocChartSnapshotRequestSerializer
 from .tasks import generate_chart_snapshot_task
+
+logger = logging.getLogger(__name__) # For diagnostic logging
 
 class ChartSnapshotConfigViewSet(viewsets.ModelViewSet):
     """
@@ -31,18 +34,46 @@ class ChartSnapshotConfigViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], url_path='execute')
     def execute_snapshot(self, request, pk=None):
         """
-        Triggers the generation of a chart snapshot for this configuration.
+        Triggers the generation of a chart snapshot using indicator settings from this configuration,
+        but with symbol and timeframe provided in the request.
         Optionally accepts a 'journal_entry_id' in the request data to link the snapshot.
         """
-        config = self.get_object()
-        journal_entry_id = request.data.get('journal_entry_id', None)
+        config = self.get_object() # This is the ChartSnapshotConfig (indicator template)
         
-        # Basic validation for journal_entry_id if provided (e.g., is UUID) could be added here.
+        # Symbol and timeframe are now required in the request body for this action
+        symbol = request.data.get('symbol')
+        timeframe = request.data.get('timeframe')
+        journal_entry_id = request.data.get('journal_entry_id', None)
 
-        task = generate_chart_snapshot_task.delay(config_id=config.id, journal_entry_id=journal_entry_id, adhoc_settings=None)
+        if not symbol or not timeframe:
+            return Response(
+                {"error": "Symbol and timeframe are required in the request body."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Validate timeframe against choices (optional, but good practice)
+        valid_timeframes = [choice[0] for choice in ChartSnapshotConfig.TIMEFRAME_CHOICES]
+        if timeframe not in valid_timeframes:
+            return Response(
+                {"error": f"Invalid timeframe. Must be one of {valid_timeframes}"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        adhoc_payload = {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "indicator_settings": config.indicator_settings # Use indicators from the saved config
+        }
+
+        logger.info(f"Attempting to queue generate_chart_snapshot_task from config {config.id} with overridden symbol/timeframe. Celery app: {generate_chart_snapshot_task.app.conf.broker_url}")
+        task = generate_chart_snapshot_task.delay(
+            config_id=config.id, # Still pass config_id for linking/reference if needed
+            journal_entry_id=journal_entry_id,
+            adhoc_settings=adhoc_payload # Pass the combined settings
+        )
         
         return Response(
-            {'status': 'Snapshot generation tasked.', 'task_id': task.id},
+            {'status': 'Snapshot generation with specified symbol/timeframe tasked.', 'task_id': task.id},
             status=status.HTTP_202_ACCEPTED
         )
 
@@ -112,6 +143,7 @@ class AdhocChartSnapshotCreateView(generics.GenericAPIView):
             }
             journal_entry_id = validated_data.get("journal_entry_id")
 
+            logger.info(f"Attempting to queue adhoc generate_chart_snapshot_task. Celery app: {generate_chart_snapshot_task.app.conf.broker_url}")
             task = generate_chart_snapshot_task.delay(
                 config_id=None, 
                 journal_entry_id=journal_entry_id, 

@@ -54,8 +54,17 @@ def generate_chart_snapshot_task(self, config_id=None, journal_entry_id=None, ad
         'Content-Type': 'application/json'
     }
 
+    logger.info(f"Chart-img.com API Request Payload: {payload}") # Log the payload
+
     try:
         response = requests.post(API_BASE_URL, json=payload, headers=headers, timeout=30) # 30 second timeout
+        # Log response content for debugging 422 errors, if possible
+        try:
+            response_json = response.json()
+            logger.info(f"Chart-img.com API Response (status {response.status_code}): {response_json}")
+        except requests.exceptions.JSONDecodeError:
+            logger.info(f"Chart-img.com API Response (status {response.status_code}, not JSON): {response.text}")
+
         response.raise_for_status()  # Raise HTTPError for bad responses (4XX or 5XX)
     
     except requests.exceptions.Timeout:

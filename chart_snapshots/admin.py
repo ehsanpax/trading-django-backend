@@ -3,13 +3,13 @@ from .models import ChartSnapshotConfig, ChartSnapshot
 
 @admin.register(ChartSnapshotConfig)
 class ChartSnapshotConfigAdmin(admin.ModelAdmin):
-    list_display = ('name', 'user', 'symbol', 'timeframe', 'created_at', 'updated_at')
-    list_filter = ('user', 'timeframe', 'symbol')
-    search_fields = ('name', 'symbol', 'user__username')
+    list_display = ('name', 'user', 'created_at', 'updated_at')
+    list_filter = ('user', 'created_at') # Removed timeframe and symbol
+    search_fields = ('name', 'user__username') # Removed symbol
     readonly_fields = ('id', 'created_at', 'updated_at')
     fieldsets = (
         (None, {
-            'fields': ('id', 'name', 'user', 'symbol', 'timeframe')
+            'fields': ('id', 'name', 'user') # Removed symbol and timeframe
         }),
         ('Indicator Settings', {
             'classes': ('collapse',),
