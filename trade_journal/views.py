@@ -17,8 +17,19 @@ class TradeJournalViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        # Filter so users only see journals for trades that belong to them
-        return TradeJournal.objects.filter(trade__account__user=self.request.user)
+        user = self.request.user
+        # Base queryset for user's journals, ensuring through trade -> account -> user
+        queryset = TradeJournal.objects.filter(trade__account__user=user)
+
+        # Allow filtering by a specific trade_id passed as a query parameter
+        trade_id = self.request.query_params.get('trade', None) 
+        if trade_id:
+            # Ensure the trade_id is valid (e.g., UUID format) if necessary,
+            # or let the DB handle potential errors if format is incorrect.
+            # For simplicity, direct filter:
+            queryset = queryset.filter(trade__id=trade_id)
+        
+        return queryset.order_by('-created_at') # Optional: order by creation date
 
 class TradeJournalAttachmentViewSet(viewsets.ModelViewSet):
     """
