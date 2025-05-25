@@ -7,9 +7,8 @@ class ChartSnapshotConfigSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = ChartSnapshotConfig
-        # fields = '__all__' # No longer all fields
-        exclude = ('symbol', 'timeframe') # Exclude removed fields
-        read_only_fields = ('id', 'created_at', 'updated_at')
+        fields = ['id', 'user', 'name', 'indicator_settings', 'created_at', 'updated_at']
+        read_only_fields = ('id', 'created_at', 'updated_at') # user is HiddenField with CurrentUserDefault
 
     def validate_indicator_settings(self, value):
         # Add any specific validation for indicator_settings structure if needed

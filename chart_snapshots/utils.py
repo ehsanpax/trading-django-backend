@@ -66,8 +66,8 @@ def build_chart_img_payload(symbol, timeframe, indicator_settings):
         "symbol": symbol,
         "interval": timeframe,
         "studies": studies,
-        "width": 1200,  # Default width, can be configurable
-        "height": 800, # Default height, can be configurable
+        "width": 800,  # Adjusted to meet 800x600 limit
+        "height": 600, # Adjusted to meet 800x600 limit
         "theme": "dark" # Default theme, can be configurable
         # Add other parameters like timezone, style, etc. if needed
     }

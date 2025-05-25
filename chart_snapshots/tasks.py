@@ -25,23 +25,31 @@ def generate_chart_snapshot_task(self, config_id=None, journal_entry_id=None, ad
     if config_id:
         try:
             config = ChartSnapshotConfig.objects.get(id=config_id)
-            snapshot_symbol = config.symbol
-            snapshot_timeframe = config.timeframe
-            indicator_settings_payload = config.indicator_settings
+            # If adhoc_settings are also provided (e.g. from execute_snapshot view),
+            # they dictate the actual chart parameters. config is just for linking.
+            if adhoc_settings:
+                snapshot_symbol = adhoc_settings.get("symbol")
+                snapshot_timeframe = adhoc_settings.get("timeframe")
+                indicator_settings_payload = adhoc_settings.get("indicator_settings") # These came from config in the view
+            else:
+                # This case implies a direct task call with config_id only,
+                # which is no longer supported as config doesn't store symbol/timeframe.
+                # Such a call would be an error in the calling code.
+                logger.error(f"Task called with config_id {config_id} but without adhoc_settings providing symbol/timeframe.")
+                return f"Symbol/timeframe must be provided (via adhoc_settings) when using config_id {config_id}."
         except ChartSnapshotConfig.DoesNotExist:
             logger.error(f"ChartSnapshotConfig with id {config_id} not found.")
             return f"Config ID {config_id} not found."
-    elif adhoc_settings:
+    elif adhoc_settings: # Called without config_id, purely ad-hoc
         snapshot_symbol = adhoc_settings.get("symbol")
         snapshot_timeframe = adhoc_settings.get("timeframe")
         indicator_settings_payload = adhoc_settings.get("indicator_settings")
-        if not all([snapshot_symbol, snapshot_timeframe, indicator_settings_payload]):
-            logger.error(f"Invalid adhoc_settings provided: {adhoc_settings}")
-            return "Invalid adhoc_settings: symbol, timeframe, and indicator_settings are required."
-    else:
-        logger.error("Task called without config_id or adhoc_settings.")
-        return "Task requires either config_id or adhoc_settings."
-
+    
+    # Validate that we have all necessary parameters for the payload
+    if not all([snapshot_symbol, snapshot_timeframe, indicator_settings_payload]):
+        logger.error(f"Insufficient parameters for chart generation. Symbol: {snapshot_symbol}, Timeframe: {snapshot_timeframe}, Indicators: {indicator_settings_payload is not None}")
+        return "Insufficient parameters for chart generation (symbol, timeframe, or indicator_settings missing)."
+    
     api_key = getattr(settings, 'CHART_IMG_API_KEY', None)
     if not api_key:
         logger.error("CHART_IMG_API_KEY not configured in Django settings.")
