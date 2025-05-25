@@ -400,7 +400,7 @@ class MT5Connector:
                 "price_open": pos.price_open,
                 "profit": pos.profit, # This is the live P/L from MT5 (floating P/L)
                 "swap": pos.swap,     # Live Swap from MT5
-                "commission": pos.commission, # Live Commission from MT5 (usually for entry/exit, not floating)
+                #"commission": pos.commission, # Live Commission from MT5 (usually for entry/exit, not floating)
                 "sl": pos.sl,         # Live Stop Loss from MT5
                 "tp": pos.tp,         # Live Take Profit from MT5
                 "time": pos.time,     # Open time (timestamp)

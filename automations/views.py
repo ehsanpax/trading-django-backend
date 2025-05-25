@@ -23,26 +23,24 @@ class ExecuteAITradeView(APIView):
         serializer.is_valid(raise_exception=True)
         payload = serializer.validated_data
 
-        print("Payload ExecuteAITradeView:", payload)
+        print("Validated Payload ExecuteAITradeView:", payload)
 
-        
-        data = request.data
-
-        account = select_next_account()
+        # account = select_next_account() # Removed: account_id now comes from payload
         trade_payload = {}
-        trade_payload["account_id"] = str(account.id)
-        trade_payload["symbol"] = data.get("symbol")
-        trade_payload["direction"] = data.get("direction", "BUY").upper()
-        trade_payload["order_type"] = data.get("order_type", "MARKET").upper()
-        trade_payload["limit_price"] = float(data.get("entry_price"))
-        trade_payload["time_in_force"] = data.get("time_in_force", "GTC").upper()
-        trade_payload["stop_loss_distance"] = float(data.get("stop_loss_distance"))
-        trade_payload["take_profit"] = float(data.get("take_profit_distance"))
-        trade_payload["risk_percent"] = data.get("risk_percent", 0.3)
-        trade_payload["projected_profit"] = data.get("projected_profit", 0.0)
-        trade_payload["projected_loss"] = data.get("projected_loss", 0.0)
-        trade_payload["rr_ratio"] = data.get("rr_ratio")
-        trade_payload["reason"] = data.get("note", "")
+        trade_payload["account_id"] = str(payload.get("account_id"))
+        trade_payload["symbol"] = payload.get("symbol")
+        trade_payload["direction"] = payload.get("direction", "BUY").upper() # Default handled by serializer if not present
+        trade_payload["order_type"] = payload.get("order_type", "MARKET").upper() # Default handled by serializer
+        trade_payload["limit_price"] = float(payload.get("entry_price")) # entry_price is required in serializer
+        # time_in_force is not in AITradeRequestSerializer, if needed by ExecuteTradeView, it should be added or handled
+        # trade_payload["time_in_force"] = payload.get("time_in_force", "GTC").upper() 
+        trade_payload["stop_loss_distance"] = float(payload.get("stop_loss_distance")) # required in serializer
+        trade_payload["take_profit"] = float(payload.get("take_profit_distance")) # required in serializer
+        trade_payload["risk_percent"] = payload.get("risk_percent", 0.3) # Default handled by serializer
+        trade_payload["projected_profit"] = payload.get("projected_profit", 0.0) # Default handled by serializer
+        trade_payload["projected_loss"] = payload.get("projected_loss", 0.0) # Default handled by serializer
+        trade_payload["rr_ratio"] = payload.get("rr_ratio") # Default handled by serializer
+        trade_payload["reason"] = payload.get("note", "") # Default handled by serializer
 
 
         factory = APIRequestFactory()
