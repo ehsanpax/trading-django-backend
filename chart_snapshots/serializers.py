@@ -65,9 +65,33 @@ class ChartSnapshotSerializer(serializers.ModelSerializer):
 
 class AdhocChartSnapshotRequestSerializer(serializers.Serializer):
     symbol = serializers.CharField(max_length=50)
-    timeframe = serializers.ChoiceField(choices=ChartSnapshotConfig.TIMEFRAME_CHOICES)
+    # timeframe = serializers.ChoiceField(choices=ChartSnapshotConfig.TIMEFRAME_CHOICES) # Old
+    timeframes = serializers.ListField( # New: accepts a list of timeframes
+        child=serializers.ChoiceField(choices=ChartSnapshotConfig.TIMEFRAME_CHOICES),
+        allow_empty=False,
+        min_length=1
+    )
     indicator_settings = serializers.JSONField()
     journal_entry_id = serializers.UUIDField(required=False, allow_null=True)
+
+    def validate_timeframes(self, value):
+        # This method is automatically called if 'timeframes' is a ListField.
+        # Individual choice validation is handled by child=serializers.ChoiceField.
+        # If we wanted to accept a single string OR a list, custom validation would be more complex:
+        # if isinstance(value, str):
+        #     if value not in [choice[0] for choice in ChartSnapshotConfig.TIMEFRAME_CHOICES]:
+        #         raise serializers.ValidationError(f"Invalid timeframe string: {value}")
+        #     return [value] # Convert to list
+        # elif isinstance(value, list):
+        #     if not value:
+        #         raise serializers.ValidationError("Timeframes list cannot be empty.")
+        #     for tf in value:
+        #         if tf not in [choice[0] for choice in ChartSnapshotConfig.TIMEFRAME_CHOICES]:
+        #             raise serializers.ValidationError(f"Invalid timeframe in list: {tf}")
+        #     return value
+        # else:
+        #     raise serializers.ValidationError("Timeframes must be a string or a list of strings.")
+        return value # Already validated by ListField and ChoiceField
 
     def validate_indicator_settings(self, value):
         # Reuse the validation logic from ChartSnapshotConfigSerializer

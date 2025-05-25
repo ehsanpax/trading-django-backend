@@ -40,40 +40,59 @@ class ChartSnapshotConfigViewSet(viewsets.ModelViewSet):
         """
         config = self.get_object() # This is the ChartSnapshotConfig (indicator template)
         
-        # Symbol and timeframe are now required in the request body for this action
+        # Symbol and timeframes (plural) are now required in the request body for this action
         symbol = request.data.get('symbol')
-        timeframe = request.data.get('timeframe')
+        timeframes_input = request.data.get('timeframes') # Can be a single string or list
         journal_entry_id = request.data.get('journal_entry_id', None)
 
-        if not symbol or not timeframe:
+        if not symbol or not timeframes_input:
             return Response(
-                {"error": "Symbol and timeframe are required in the request body."},
+                {"error": "Symbol and timeframes (list or string) are required in the request body."},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Validate timeframe against choices (optional, but good practice)
-        valid_timeframes = [choice[0] for choice in ChartSnapshotConfig.TIMEFRAME_CHOICES]
-        if timeframe not in valid_timeframes:
+        if isinstance(timeframes_input, str):
+            timeframes = [timeframes_input]
+        elif isinstance(timeframes_input, list):
+            timeframes = timeframes_input
+        else:
             return Response(
-                {"error": f"Invalid timeframe. Must be one of {valid_timeframes}"},
+                {"error": "Timeframes must be a string or a list of strings."},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        adhoc_payload = {
-            "symbol": symbol,
-            "timeframe": timeframe,
-            "indicator_settings": config.indicator_settings # Use indicators from the saved config
-        }
+        valid_timeframe_choices = [choice[0] for choice in ChartSnapshotConfig.TIMEFRAME_CHOICES]
+        task_ids = []
 
-        logger.info(f"Attempting to queue generate_chart_snapshot_task from config {config.id} with overridden symbol/timeframe. Celery app: {generate_chart_snapshot_task.app.conf.broker_url}")
-        task = generate_chart_snapshot_task.delay(
-            config_id=config.id, # Still pass config_id for linking/reference if needed
-            journal_entry_id=journal_entry_id,
-            adhoc_settings=adhoc_payload # Pass the combined settings
-        )
+        for tf in timeframes:
+            if tf not in valid_timeframe_choices:
+                logger.warning(f"Invalid timeframe '{tf}' skipped for config {config.id}, symbol {symbol}.")
+                # Optionally, collect errors and return them, or just skip invalid ones.
+                # For now, skipping.
+                continue
+
+            adhoc_payload = {
+                "symbol": symbol,
+                "timeframe": tf, # Single timeframe for this specific task
+                "indicator_settings": config.indicator_settings # Use indicators from the saved config
+            }
+
+            logger.info(f"Attempting to queue generate_chart_snapshot_task from config {config.id} for symbol {symbol}, timeframe {tf}. Celery app: {generate_chart_snapshot_task.app.conf.broker_url}")
+            task = generate_chart_snapshot_task.delay(
+                config_id=config.id, 
+                journal_entry_id=journal_entry_id, # Same journal ID for all tasks in this batch
+                adhoc_settings=adhoc_payload 
+            )
+            task_ids.append(task.id)
         
+        if not task_ids:
+             return Response(
+                {"error": "No valid timeframes provided or all were invalid."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         return Response(
-            {'status': 'Snapshot generation with specified symbol/timeframe tasked.', 'task_id': task.id},
+            {'status': f'{len(task_ids)} snapshot generation(s) tasked.', 'task_ids': task_ids},
             status=status.HTTP_202_ACCEPTED
         )
 
@@ -136,21 +155,30 @@ class AdhocChartSnapshotCreateView(generics.GenericAPIView):
         serializer = self.get_serializer(data=request.data)
         if serializer.is_valid():
             validated_data = serializer.validated_data
-            adhoc_settings = {
-                "symbol": validated_data["symbol"],
-                "timeframe": validated_data["timeframe"],
-                "indicator_settings": validated_data["indicator_settings"],
-            }
+            # validated_data["timeframes"] is already a list due to AdhocChartSnapshotRequestSerializer
+            timeframes = validated_data["timeframes"]
+            symbol = validated_data["symbol"]
+            indicator_settings = validated_data["indicator_settings"]
             journal_entry_id = validated_data.get("journal_entry_id")
+            
+            task_ids = []
 
-            logger.info(f"Attempting to queue adhoc generate_chart_snapshot_task. Celery app: {generate_chart_snapshot_task.app.conf.broker_url}")
-            task = generate_chart_snapshot_task.delay(
-                config_id=None, 
-                journal_entry_id=journal_entry_id, 
-                adhoc_settings=adhoc_settings
-            )
+            for tf in timeframes:
+                adhoc_payload_for_task = {
+                    "symbol": symbol,
+                    "timeframe": tf, # Single timeframe for this specific task
+                    "indicator_settings": indicator_settings,
+                }
+                logger.info(f"Attempting to queue adhoc generate_chart_snapshot_task for symbol {symbol}, timeframe {tf}. Celery app: {generate_chart_snapshot_task.app.conf.broker_url}")
+                task = generate_chart_snapshot_task.delay(
+                    config_id=None, 
+                    journal_entry_id=journal_entry_id, # Same journal ID for all tasks
+                    adhoc_settings=adhoc_payload_for_task
+                )
+                task_ids.append(task.id)
+            
             return Response(
-                {'status': 'Adhoc snapshot generation tasked.', 'task_id': task.id},
+                {'status': f'{len(task_ids)} adhoc snapshot generation(s) tasked.', 'task_ids': task_ids},
                 status=status.HTTP_202_ACCEPTED
             )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
