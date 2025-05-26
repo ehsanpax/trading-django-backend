@@ -197,21 +197,24 @@ def has_exceeded_daily_loss(risk_settings) -> bool:
 
 def get_consecutive_losses(risk_settings: RiskManagement) -> int:
     """
-    Returns how many trades have been lost in a row.
-    We look for the most recent trades and count consecutive losers.
+    Returns how many trades have been lost in a row *today*.
+    We look for the most recent trades closed today and count consecutive losers.
     """
-    # Sort trades by closed_at descending
-    recent_closed_trades = Trade.objects.filter(
+    today_start = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    # Filter for trades closed today and sort by closed_at descending
+    recent_closed_trades_today = Trade.objects.filter(
         account=risk_settings.account,
-        trade_status="closed"
+        trade_status="closed",
+        closed_at__gte=today_start  # Filter for today
     ).order_by('-closed_at')
 
     consecutive_loses = 0
-    for t in recent_closed_trades:
+    for t in recent_closed_trades_today:
         if t.actual_profit_loss is not None and t.actual_profit_loss < 0:
             consecutive_loses += 1
         else:
-            # If we hit a winning trade, break out of the loop
+            # If we hit a winning trade (or a trade not yet assessed for P/L), break
             break
 
     return consecutive_loses
@@ -219,32 +222,42 @@ def get_consecutive_losses(risk_settings: RiskManagement) -> int:
 def is_cooldown_active(risk_settings: RiskManagement) -> bool:
     """
     Checks if the account is currently in a cooldown period due to exceeding
-    consecutive_loss_limit.
+    consecutive_loss_limit *for today's trades*.
     """
     if not risk_settings.enforce_cooldowns:
         return False  # If cooldowns not enforced, skip
 
-    # 1️⃣ If consecutive losses < limit, no cooldown
-    consecutive_losses = get_consecutive_losses(risk_settings)
-    if consecutive_losses < risk_settings.consecutive_loss_limit:
-        return False
+    # 1️⃣ If consecutive losses *today* < limit, no cooldown for today
+    consecutive_losses_today = get_consecutive_losses(risk_settings) # This now returns today's count
+    if consecutive_losses_today < risk_settings.consecutive_loss_limit:
+        return False # Correct, if today's losses are below limit, no cooldown.
 
-    # 2️⃣ If we exceeded consecutive_loss_limit, figure out when the last trade closed
-    # and see if the cooldown period has elapsed.
-    last_trade = Trade.objects.filter(
+    # 2️⃣ If we exceeded consecutive_loss_limit *today*, figure out when the last *losing trade today* closed
+    # and see if the cooldown period has elapsed *since that trade*.
+    today_start = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    last_losing_trade_today = Trade.objects.filter(
         account=risk_settings.account,
-        trade_status="closed"
+        trade_status="closed",
+        actual_profit_loss__lt=0, # Ensure it's a losing trade
+        closed_at__gte=today_start # Ensure it's from today
     ).order_by('-closed_at').first()
 
-    if not last_trade or not last_trade.closed_at:
+    if not last_losing_trade_today or not last_losing_trade_today.closed_at:
+        # This case implies that although consecutive_losses_today >= limit,
+        # we couldn't find a specific last losing trade today. This might happen if
+        # get_consecutive_losses had a different logic or if data is inconsistent.
+        # Given the modified get_consecutive_losses, this should ideally not be hit
+        # if consecutive_losses_today > 0.
+        # However, to be safe, if we can't find such a trade, assume no active cooldown from today.
         return False
 
-    # 3️⃣ Compare last_trade.closed_at to now - if we’re still within cooldown, return True
-    cooldown_expiry = last_trade.closed_at + risk_settings.cooldown_period
+    # 3️⃣ Compare last_losing_trade_today.closed_at to now - if we’re still within cooldown, return True
+    cooldown_expiry = last_losing_trade_today.closed_at + risk_settings.cooldown_period
     if timezone.now() < cooldown_expiry:
-        logger.warning(f"Cooldown still active until {cooldown_expiry}")
+        logger.warning(f"Cooldown (from today's losses) still active until {cooldown_expiry}")
         return True
-    return False
+        
+    return False # Cooldown period has expired or other conditions not met.
 
 def exceeds_max_lot_size(risk_settings: RiskManagement, proposed_lot: Decimal) -> bool:
     """
