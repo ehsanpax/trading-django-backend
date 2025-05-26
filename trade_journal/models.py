@@ -14,7 +14,7 @@ class TradeJournal(models.Model):
     # Additional fields
     strategy_tag = models.CharField(max_length=100, null=True, blank=True)    # e.g. 'Breakout Strategy'
     emotional_state = models.CharField(max_length=50, null=True, blank=True)  # e.g. 'Fearful', 'Confident'
-    market_condition = models.CharField(max_length=50, null=True, blank=True) # e.g. 'Trending', 'Ranging'
+    market_condition = models.CharField(max_length=255, null=True, blank=True) # e.g. 'Trending', 'Ranging'
 
     created_at = models.DateTimeField(auto_now_add=True)
 
