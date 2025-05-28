@@ -575,11 +575,13 @@ def update_trade_stop_loss_globally(user,
             raise APIException(f"Could not fetch live price for {trade.instrument}: {live_price_data['error']}")
 
         current_market_price = None
-        if trade.direction == Trade.Direction.BUY:
+        if trade.direction == "BUY": # Corrected
             current_market_price = Decimal(str(live_price_data["bid"])) # SL for BUY is based on BID
-        else: # SELL
+        elif trade.direction == "SELL": # Corrected
             current_market_price = Decimal(str(live_price_data["ask"]))  # SL for SELL is based on ASK
-        
+        else:
+            raise ValidationError(f"Invalid trade direction: {trade.direction}")
+
         price_offset = Decimal(str(value))
 
         if sl_update_type == "distance_pips":
@@ -590,10 +592,11 @@ def update_trade_stop_loss_globally(user,
             pip_size = Decimal(str(symbol_info["pip_size"]))
             price_offset = price_offset * pip_size # Convert pips to price amount
 
-        if trade.direction == Trade.Direction.BUY:
+        if trade.direction == "BUY": # Corrected
             new_stop_loss_price = current_market_price - price_offset
-        else: # SELL
+        elif trade.direction == "SELL": # Corrected
             new_stop_loss_price = current_market_price + price_offset
+        # No else needed here as validated above
         
         # Round to symbol's precision (digits)
         symbol_info_for_rounding = connector.get_symbol_info(symbol=trade.instrument) # Re-fetch or use previous if available
@@ -624,16 +627,17 @@ def update_trade_stop_loss_globally(user,
     # Validate that the new SL is not further than the existing SL
     if trade.stop_loss is not None and trade.stop_loss != 0: # Check if there's an existing SL
         current_sl_price = trade.stop_loss
-        if trade.direction == Trade.Direction.BUY:
+        if trade.direction == "BUY": # Corrected
             # For a BUY trade, a "further" SL is a lower price.
             # We want new_stop_loss_price >= current_sl_price
             if new_stop_loss_price < current_sl_price:
                 raise ValidationError(f"New stop loss ({new_stop_loss_price}) cannot be further than the current one ({current_sl_price}) for a BUY trade.")
-        elif trade.direction == Trade.Direction.SELL:
+        elif trade.direction == "SELL": # Corrected
             # For a SELL trade, a "further" SL is a higher price.
             # We want new_stop_loss_price <= current_sl_price
             if new_stop_loss_price > current_sl_price:
                 raise ValidationError(f"New stop loss ({new_stop_loss_price}) cannot be further than the current one ({current_sl_price}) for a SELL trade.")
+        # No else needed here as trade.direction should be validated by model or earlier logic
 
     # 3. Execute SL Update on Broker
     modification_result = None # Initialize to handle cases where platform is not MT5
