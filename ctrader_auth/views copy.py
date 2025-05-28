@@ -15,12 +15,12 @@ from utils.utils import token_required
 # cTrader OAuth Configuration (adjust these values as needed)
 CLIENT_ID = "13641_QqAQIxv5R7wUGHoSjbKTalzNMPbyDEt6b9I8VxgwUO3rs3qN0P"
 CLIENT_SECRET = "tFzXEFQi2fYtaIWm7xdz54n6jhnT5dQHGT82Jf5Z3J6DSUwV1i"
-API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
+API_BASE_URL = os.getenv("API_BASE_URL", "https://paksistrading.com/api")
 REDIRECT_URI = f"{API_BASE_URL}/ctrader/callback"
 AUTH_URL = "https://connect.spotware.com/oauth/v2/auth"
 TOKEN_URL = "https://connect.spotware.com/oauth/v2/token"
 TOKEN_STORAGE = os.path.join(os.getcwd(), "ctrader_tokens.json")
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://paksistrading.com/")
 CTRADER_ACCOUNTS_URL = "https://api.spotware.com/connect/tradingaccounts"
 
 class CTRaderLoginView(View):

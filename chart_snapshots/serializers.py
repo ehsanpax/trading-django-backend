@@ -49,6 +49,35 @@ class ChartSnapshotConfigSerializer(serializers.ModelSerializer):
             for p_name in params:
                 if p_name not in value["stoch_rsi"] or not isinstance(value["stoch_rsi"][p_name], int) or value["stoch_rsi"][p_name] <=0:
                     raise serializers.ValidationError(f"Invalid or missing '{p_name}' for Stochastic RSI.")
+            if "overrides" not in value["stoch_rsi"] or not isinstance(value["stoch_rsi"]["overrides"], dict):
+                raise serializers.ValidationError("Stochastic RSI 'overrides' must be a dictionary.")
+
+        # RSI specific validation
+        if "rsi" in value and value["rsi"].get("enabled"):
+            if "length" not in value["rsi"] or not isinstance(value["rsi"]["length"], int) or value["rsi"]["length"] <=0:
+                raise serializers.ValidationError("Invalid or missing 'length' for RSI.")
+            # smoothingLine and smoothingLength are optional or have defaults
+            if "overrides" not in value["rsi"] or not isinstance(value["rsi"]["overrides"], dict):
+                raise serializers.ValidationError("RSI 'overrides' must be a dictionary.")
+
+        # MACD specific validation
+        if "macd" in value and value["macd"].get("enabled"):
+            params = ["fast_length", "slow_length", "signal_length"]
+            for p_name in params:
+                if p_name not in value["macd"] or not isinstance(value["macd"][p_name], int) or value["macd"][p_name] <=0:
+                    raise serializers.ValidationError(f"Invalid or missing '{p_name}' for MACD.")
+            if "source" not in value["macd"] or value["macd"]["source"] not in ["open", "high", "low", "close", "hl2", "hlc3", "ohlc4"]:
+                 raise serializers.ValidationError("Invalid MACD source.")
+            if "overrides" not in value["macd"] or not isinstance(value["macd"]["overrides"], dict):
+                raise serializers.ValidationError("MACD 'overrides' must be a dictionary.")
+
+        # CMF specific validation
+        if "cmf" in value and value["cmf"].get("enabled"):
+            if "length" not in value["cmf"] or not isinstance(value["cmf"]["length"], int) or value["cmf"]["length"] <=0:
+                raise serializers.ValidationError("Invalid or missing 'length' for CMF.")
+            if "overrides" not in value["cmf"] or not isinstance(value["cmf"]["overrides"], dict):
+                raise serializers.ValidationError("CMF 'overrides' must be a dictionary.")
+                
         return value
 
 

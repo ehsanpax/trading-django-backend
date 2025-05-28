@@ -26,9 +26,71 @@ class ChartSnapshotConfig(models.Model):
     # timeframe = models.CharField(max_length=3, choices=TIMEFRAME_CHOICES, default='1D') # Removed
     
     default_indicator_settings = {
-        "emas": {"enabled": True, "periods": [21, 50, 100], "source": "close"},
-        "dmi": {"enabled": True, "di_length": 14, "adx_smoothing": 14},
-        "stoch_rsi": {"enabled": True, "rsi_length": 14, "stoch_length": 14, "k_smooth": 3, "d_smooth": 3}
+        "emas": {
+            "enabled": True, 
+            "periods": [21, 50, 100], 
+            "source": "close",
+            "overrides": [ # List to hold overrides for each EMA line
+                {"Plot.color": "blue", "Plot.linewidth": 1}, # For EMA 21
+                {"Plot.color": "red", "Plot.linewidth": 1},  # For EMA 50
+                {"Plot.color": "green", "Plot.linewidth": 1} # For EMA 100
+            ]
+        },
+        "dmi": {
+            "enabled": True, 
+            "di_length": 14, 
+            "adx_smoothing": 14,
+            "overrides": {
+                "+DI.color": "green", "+DI.linewidth": 1, "+DI.visible": True,
+                "-DI.color": "red", "-DI.linewidth": 1, "-DI.visible": True,
+                "ADX.color": "blue", "ADX.linewidth": 1, "ADX.visible": True
+            }
+        },
+        "stoch_rsi": {
+            "enabled": True, 
+            "rsi_length": 14, 
+            "stoch_length": 14, 
+            "k_smooth": 3, 
+            "d_smooth": 3,
+            "overrides": {
+                "%K.color": "blue", "%K.linewidth": 1, "%K.visible": True,
+                "%D.color": "red", "%D.linewidth": 1, "%D.visible": True,
+                "UpperLimit.color": "gray", "UpperLimit.value": 80, "UpperLimit.visible": True,
+                "LowerLimit.color": "gray", "LowerLimit.value": 20, "LowerLimit.visible": True
+            }
+        },
+        "rsi": {
+            "enabled": False, # Disabled by default
+            "length": 14,
+            "smoothingLine": "SMA", # Can be "EMA", "WMA"
+            "smoothingLength": 14, # Only if smoothingLine is used
+            "overrides": {
+                "Plot.color": "purple", "Plot.linewidth": 1,
+                "UpperLimit.color": "gray", "UpperLimit.value": 70, "UpperLimit.visible": True,
+                "LowerLimit.color": "gray", "LowerLimit.value": 30, "LowerLimit.visible": True,
+                "MiddleLimit.color": "lightgray", "MiddleLimit.value": 50, "MiddleLimit.visible": False 
+            }
+        },
+        "macd": {
+            "enabled": False, # Disabled by default
+            "fast_length": 12,
+            "slow_length": 26,
+            "signal_length": 9,
+            "source": "close",
+            "overrides": {
+                "MACD.color": "blue", "MACD.linewidth": 1, "MACD.visible": True,
+                "Signal.color": "red", "Signal.linewidth": 1, "Signal.visible": True,
+                "Histogram.visible": True
+            }
+        },
+        "cmf": {
+            "enabled": False, # Disabled by default
+            "length": 20,
+            "overrides": {
+                "Plot.color": "teal", "Plot.linewidth": 1,
+                "Zero.color": "gray", "Zero.linewidth": 1, "Zero.visible": True
+            }
+        }
     }
 
     def get_default_indicator_settings():

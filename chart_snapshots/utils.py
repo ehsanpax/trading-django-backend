@@ -62,6 +62,44 @@ def build_chart_img_payload(symbol, timeframe, indicator_settings):
             }
         })
 
+    # RSI
+    if indicator_settings.get("rsi", {}).get("enabled"):
+        rsi_config = indicator_settings["rsi"]
+        study_input = {"length": rsi_config.get("length", 14)}
+        if rsi_config.get("smoothingLine") and rsi_config.get("smoothingLength"): # Add smoothing if specified
+            study_input["smoothingLine"] = rsi_config["smoothingLine"]
+            study_input["smoothingLength"] = rsi_config["smoothingLength"]
+        studies.append({
+            "name": "Relative Strength Index",
+            "input": study_input,
+            "override": rsi_config.get("overrides", {})
+        })
+
+    # MACD
+    if indicator_settings.get("macd", {}).get("enabled"):
+        macd_config = indicator_settings["macd"]
+        studies.append({
+            "name": "MACD",
+            "input": {
+                "in_0": macd_config.get("fast_length", 12),
+                "in_1": macd_config.get("slow_length", 26),
+                "in_2": macd_config.get("signal_length", 9),
+                "in_3": macd_config.get("source", "close")
+            },
+            "override": macd_config.get("overrides", {})
+        })
+
+    # Chaikin Money Flow (CMF)
+    if indicator_settings.get("cmf", {}).get("enabled"):
+        cmf_config = indicator_settings["cmf"]
+        studies.append({
+            "name": "Chaikin Money Flow",
+            "input": {
+                "in_0": cmf_config.get("length", 20)
+            },
+            "override": cmf_config.get("overrides", {})
+        })
+
     payload = {
         "symbol": symbol,
         "interval": timeframe,
