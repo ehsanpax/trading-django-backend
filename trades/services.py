@@ -505,3 +505,160 @@ def synchronize_trade_with_platform(trade_id: UUID):
     except Exception as e:
         # Log error e
         return {"error": f"Failed to save synchronized trade {trade_instance.id}: {str(e)}"}
+
+def update_trade_stop_loss_globally(user,
+                                    trade_id: UUID,
+                                    sl_update_type: str,
+                                    value: Decimal = None, # For distance_pips or distance_price
+                                    specific_price: Decimal = None) -> dict:
+    """
+    Updates the stop loss for an open trade based on the specified update type.
+    Platform-agnostic, currently implements MT5 logic.
+    """
+    trade = get_object_or_404(Trade, id=trade_id)
+
+    if trade.account.user != user:
+        raise PermissionDenied("Unauthorized to update this trade's stop loss.")
+
+    if trade.trade_status != "open":
+        raise ValidationError("Stop loss can only be updated for open trades.")
+
+    account = trade.account
+    new_stop_loss_price = None
+    current_tp_price = None # Will be fetched for MT5
+
+    # 1. Instantiate Connector and Connect
+    connector = None
+    if account.platform == "MT5":
+        try:
+            mt5_account = account.mt5_account
+        except MT5Account.DoesNotExist:
+            raise APIException("No linked MT5 account found for this trade's account.")
+        
+        connector = MT5Connector(mt5_account.account_number, mt5_account.broker_server)
+        login_result = connector.connect(mt5_account.encrypted_password)
+        if "error" in login_result:
+            raise APIException(f"MT5 connection failed: {login_result['error']}")
+        
+        # Fetch current position details to get current TP for MT5
+        if not trade.position_id:
+            raise APIException(f"Trade {trade.id} does not have a position_id. Cannot update SL on MT5.")
+        
+        position_details = connector.get_open_position_details_by_ticket(position_ticket=int(trade.position_id))
+        if "error" in position_details:
+            raise APIException(f"Failed to fetch current position details from MT5: {position_details['error']}")
+        current_tp_price = Decimal(str(position_details.get("tp", 0.0))) # MT5 uses 0.0 if no TP
+
+    elif account.platform == "cTrader":
+        # ct_acc = get_object_or_404(CTraderAccount, account=account)
+        # connector = CTraderClient(ct_acc)
+        # # cTrader specific connection/auth if needed
+        raise APIException("cTrader stop loss update not implemented yet.")
+    else:
+        raise APIException(f"Unsupported platform: {account.platform}")
+
+    # 2. Calculate New Stop Loss Price
+    if sl_update_type == "breakeven":
+        if trade.entry_price is None:
+            raise ValidationError("Cannot set SL to breakeven as entry price is not available.")
+        new_stop_loss_price = trade.entry_price
+    elif sl_update_type == "specific_price":
+        if specific_price is None:
+            raise ValidationError("specific_price must be provided for 'specific_price' update type.")
+        new_stop_loss_price = specific_price
+    elif sl_update_type in ["distance_pips", "distance_price"]:
+        if value is None:
+            raise ValidationError(f"A 'value' must be provided for '{sl_update_type}'.")
+
+        live_price_data = connector.get_live_price(symbol=trade.instrument)
+        if "error" in live_price_data:
+            raise APIException(f"Could not fetch live price for {trade.instrument}: {live_price_data['error']}")
+
+        current_market_price = None
+        if trade.direction == Trade.Direction.BUY:
+            current_market_price = Decimal(str(live_price_data["bid"])) # SL for BUY is based on BID
+        else: # SELL
+            current_market_price = Decimal(str(live_price_data["ask"]))  # SL for SELL is based on ASK
+        
+        price_offset = Decimal(str(value))
+
+        if sl_update_type == "distance_pips":
+            symbol_info = connector.get_symbol_info(symbol=trade.instrument)
+            if "error" in symbol_info:
+                raise APIException(f"Could not fetch symbol info for {trade.instrument}: {symbol_info['error']}")
+            
+            pip_size = Decimal(str(symbol_info["pip_size"]))
+            price_offset = price_offset * pip_size # Convert pips to price amount
+
+        if trade.direction == Trade.Direction.BUY:
+            new_stop_loss_price = current_market_price - price_offset
+        else: # SELL
+            new_stop_loss_price = current_market_price + price_offset
+        
+        # Round to symbol's precision (digits)
+        symbol_info_for_rounding = connector.get_symbol_info(symbol=trade.instrument) # Re-fetch or use previous if available
+        if "error" in symbol_info_for_rounding:
+             raise APIException(f"Could not fetch symbol info for rounding: {symbol_info_for_rounding['error']}")
+        num_digits = symbol_info_for_rounding.get('digits', 5) # Default to 5 if not found, though get_symbol_info doesn't return 'digits' directly
+                                                              # MT5Connector.get_symbol_info returns pip_size and tick_size.
+                                                              # We need to infer digits from pip_size or tick_size.
+                                                              # Assuming pip_size = 10^-digits. So digits = -log10(pip_size)
+                                                              # Or, more simply, use the number of decimal places in tick_size.
+        
+        # Inferring digits from tick_size for rounding
+        tick_size_str = str(symbol_info_for_rounding.get("tick_size", "0.00001"))
+        if '.' in tick_size_str:
+            num_digits = len(tick_size_str.split('.')[1])
+        else:
+            num_digits = 0 # Should not happen for forex/cfds
+
+        new_stop_loss_price = new_stop_loss_price.quantize(Decimal('1e-' + str(num_digits)))
+
+
+    else:
+        raise ValidationError(f"Invalid sl_update_type: {sl_update_type}")
+
+    if new_stop_loss_price is None:
+        raise APIException("Failed to calculate new stop loss price.")
+
+    # Validate that the new SL is not further than the existing SL
+    if trade.stop_loss is not None and trade.stop_loss != 0: # Check if there's an existing SL
+        current_sl_price = trade.stop_loss
+        if trade.direction == Trade.Direction.BUY:
+            # For a BUY trade, a "further" SL is a lower price.
+            # We want new_stop_loss_price >= current_sl_price
+            if new_stop_loss_price < current_sl_price:
+                raise ValidationError(f"New stop loss ({new_stop_loss_price}) cannot be further than the current one ({current_sl_price}) for a BUY trade.")
+        elif trade.direction == Trade.Direction.SELL:
+            # For a SELL trade, a "further" SL is a higher price.
+            # We want new_stop_loss_price <= current_sl_price
+            if new_stop_loss_price > current_sl_price:
+                raise ValidationError(f"New stop loss ({new_stop_loss_price}) cannot be further than the current one ({current_sl_price}) for a SELL trade.")
+
+    # 3. Execute SL Update on Broker
+    modification_result = None # Initialize to handle cases where platform is not MT5
+    if account.platform == "MT5":
+        if not trade.position_id: # Should have been caught earlier
+            raise APIException(f"Trade {trade.id} does not have a position_id. Cannot update SL on MT5.")
+
+        # MT5Connector's modify_position_protection expects float
+        modification_result = connector.modify_position_protection(
+            position_id=int(trade.position_id),
+            symbol=trade.instrument,
+            stop_loss=float(new_stop_loss_price),
+            take_profit=float(current_tp_price) # Pass current TP along
+        )
+        if "error" in modification_result:
+            raise APIException(f"MT5 stop loss update failed: {modification_result['error']}")
+    
+    # 4. Update Trade Model in Database
+    trade.stop_loss = new_stop_loss_price
+    # Potentially log the change or create a history record for SL modifications
+    trade.save(update_fields=["stop_loss"])
+
+    return {
+        "message": "Stop loss updated successfully.",
+        "trade_id": str(trade.id),
+        "new_stop_loss": float(new_stop_loss_price),
+        "platform_response": modification_result if account.platform == "MT5" else "N/A"
+    }

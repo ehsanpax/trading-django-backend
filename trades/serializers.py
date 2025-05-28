@@ -110,3 +110,34 @@ class ExecuteTradeOutputSerializer(serializers.Serializer):
     order_status = serializers.CharField()
     trade_id     = serializers.CharField(required=False)
     entry_price  = serializers.FloatField(required=False)
+
+class UpdateStopLossSerializer(serializers.Serializer):
+    trade_id = serializers.UUIDField(required=True)
+    sl_update_type = serializers.ChoiceField(
+        choices=['breakeven', 'distance_pips', 'distance_price', 'specific_price'],
+        required=True
+    )
+    value = serializers.DecimalField(max_digits=10, decimal_places=5, required=False, allow_null=True) # For distance
+    specific_price = serializers.DecimalField(max_digits=10, decimal_places=5, required=False, allow_null=True) # For specific price
+
+    def validate(self, data):
+        sl_update_type = data.get('sl_update_type')
+        value = data.get('value')
+        specific_price = data.get('specific_price')
+
+        if sl_update_type == 'specific_price' and specific_price is None:
+            raise serializers.ValidationError({"specific_price": "This field is required when sl_update_type is 'specific_price'."})
+        
+        if sl_update_type in ['distance_pips', 'distance_price'] and value is None:
+            raise serializers.ValidationError({"value": f"This field is required when sl_update_type is '{sl_update_type}'."})
+        
+        if sl_update_type == 'breakeven' and (value is not None or specific_price is not None):
+            raise serializers.ValidationError("No 'value' or 'specific_price' should be provided when sl_update_type is 'breakeven'.")
+
+        if sl_update_type == 'specific_price' and value is not None:
+             raise serializers.ValidationError("No 'value' should be provided when sl_update_type is 'specific_price'.")
+
+        if sl_update_type in ['distance_pips', 'distance_price'] and specific_price is not None:
+            raise serializers.ValidationError("No 'specific_price' should be provided when sl_update_type is 'distance_pips' or 'distance_price'.")
+
+        return data

@@ -33,9 +33,11 @@ from .services import TradeService, close_trade_globally
 from .serializers import (
     OrderSerializer,
     ExecuteTradeInputSerializer,
-    ExecuteTradeOutputSerializer
+    ExecuteTradeOutputSerializer,
+    UpdateStopLossSerializer
 )
 from rest_framework.generics import GenericAPIView
+from .services import update_trade_stop_loss_globally # Added import
 from rest_framework.exceptions import APIException, PermissionDenied, ValidationError
 # ----- Trade / Order Execution --------------------------------------------
 
@@ -586,3 +588,33 @@ class AllPendingOrdersView(APIView):
             {'pending_orders': all_open_orders},
             status=status.HTTP_200_OK
         )
+
+class UpdateStopLossAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, *args, **kwargs):
+        serializer = UpdateStopLossSerializer(data=request.data)
+        if serializer.is_valid():
+            validated_data = serializer.validated_data
+            try:
+                result = update_trade_stop_loss_globally(
+                    user=request.user,
+                    trade_id=validated_data['trade_id'],
+                    sl_update_type=validated_data['sl_update_type'],
+                    value=validated_data.get('value'),
+                    specific_price=validated_data.get('specific_price')
+                )
+                return Response(result, status=status.HTTP_200_OK)
+            except Trade.DoesNotExist:
+                return Response({"detail": "Trade not found."}, status=status.HTTP_404_NOT_FOUND)
+            except PermissionDenied as e:
+                return Response({"detail": str(e)}, status=status.HTTP_403_FORBIDDEN)
+            except ValidationError as e:
+                return Response({"detail": e.detail if hasattr(e, 'detail') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            except APIException as e: # Catch platform-specific or other API errors from the service
+                return Response({"detail": e.detail if hasattr(e, 'detail') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            except Exception as e:
+                # Log generic error
+                print(f"Unexpected error in UpdateStopLossAPIView: {str(e)}") # Basic logging
+                return Response({"error": "An unexpected error occurred while updating stop loss."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
