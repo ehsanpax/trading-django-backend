@@ -31,9 +31,11 @@ class ChartSnapshotConfig(models.Model):
             "periods": [21, 50, 100], 
             "source": "close",
             "overrides": [ # List to hold overrides for each EMA line
-                {"Plot.color": "blue", "Plot.linewidth": 1}, # For EMA 21
-                {"Plot.color": "red", "Plot.linewidth": 1},  # For EMA 50
-                {"Plot.color": "green", "Plot.linewidth": 1} # For EMA 100
+                {"Plot.color": "rgb(0,0,255)", "Plot.linewidth": 1},    # Blue for EMA 21
+                {"Plot.color": "rgb(255,0,0)", "Plot.linewidth": 1},    # Red for EMA 50
+                {"Plot.color": "rgb(0,128,0)", "Plot.linewidth": 1}     # Green for EMA 100
+                # Add more if default periods list grows, e.g. for 200 EMA:
+                # {"Plot.color": "rgb(128,0,128)", "Plot.linewidth": 1} # Purple for EMA 200
             ]
         },
         "dmi": {
@@ -41,9 +43,9 @@ class ChartSnapshotConfig(models.Model):
             "di_length": 14, 
             "adx_smoothing": 14,
             "overrides": {
-                "+DI.color": "green", "+DI.linewidth": 1, "+DI.visible": True,
-                "-DI.color": "red", "-DI.linewidth": 1, "-DI.visible": True,
-                "ADX.color": "blue", "ADX.linewidth": 1, "ADX.visible": True
+                "+DI.color": "rgb(0,128,0)", "+DI.linewidth": 1, "+DI.visible": True,   # Green
+                "-DI.color": "rgb(255,0,0)", "-DI.linewidth": 1, "-DI.visible": True,   # Red
+                "ADX.color": "rgb(0,0,255)", "ADX.linewidth": 1, "ADX.visible": True    # Blue
             }
         },
         "stoch_rsi": {
@@ -53,42 +55,42 @@ class ChartSnapshotConfig(models.Model):
             "k_smooth": 3, 
             "d_smooth": 3,
             "overrides": {
-                "%K.color": "blue", "%K.linewidth": 1, "%K.visible": True,
-                "%D.color": "red", "%D.linewidth": 1, "%D.visible": True,
-                "UpperLimit.color": "gray", "UpperLimit.value": 80, "UpperLimit.visible": True,
-                "LowerLimit.color": "gray", "LowerLimit.value": 20, "LowerLimit.visible": True
+                "%K.color": "rgb(0,0,255)", "%K.linewidth": 1, "%K.visible": True,      # Blue
+                "%D.color": "rgb(255,0,0)", "%D.linewidth": 1, "%D.visible": True,      # Red
+                "UpperLimit.color": "rgb(128,128,128)", "UpperLimit.value": 80, "UpperLimit.visible": True, # Gray
+                "LowerLimit.color": "rgb(128,128,128)", "LowerLimit.value": 20, "LowerLimit.visible": True  # Gray
             }
         },
         "rsi": {
-            "enabled": False, # Disabled by default
+            "enabled": False, 
             "length": 14,
-            "smoothingLine": "SMA", # Can be "EMA", "WMA"
-            "smoothingLength": 14, # Only if smoothingLine is used
+            "smoothingLine": "SMA", 
+            "smoothingLength": 14, 
             "overrides": {
-                "Plot.color": "purple", "Plot.linewidth": 1,
-                "UpperLimit.color": "gray", "UpperLimit.value": 70, "UpperLimit.visible": True,
-                "LowerLimit.color": "gray", "LowerLimit.value": 30, "LowerLimit.visible": True,
-                "MiddleLimit.color": "lightgray", "MiddleLimit.value": 50, "MiddleLimit.visible": False 
+                "Plot.color": "rgb(128,0,128)", "Plot.linewidth": 1, "Plot.visible": True, # Purple
+                "UpperLimit.color": "rgb(128,128,128)", "UpperLimit.value": 70, "UpperLimit.visible": True,
+                "LowerLimit.color": "rgb(128,128,128)", "LowerLimit.value": 30, "LowerLimit.visible": True,
+                "MiddleLimit.color": "rgb(211,211,211)", "MiddleLimit.value": 50, "MiddleLimit.visible": False 
             }
         },
         "macd": {
-            "enabled": False, # Disabled by default
+            "enabled": False, 
             "fast_length": 12,
             "slow_length": 26,
             "signal_length": 9,
             "source": "close",
             "overrides": {
-                "MACD.color": "blue", "MACD.linewidth": 1, "MACD.visible": True,
-                "Signal.color": "red", "Signal.linewidth": 1, "Signal.visible": True,
+                "MACD.color": "rgb(0,0,255)", "MACD.linewidth": 1, "MACD.visible": True,    # Blue
+                "Signal.color": "rgb(255,165,0)", "Signal.linewidth": 1, "Signal.visible": True, # Orange for signal
                 "Histogram.visible": True
             }
         },
         "cmf": {
-            "enabled": False, # Disabled by default
+            "enabled": False, 
             "length": 20,
             "overrides": {
-                "Plot.color": "teal", "Plot.linewidth": 1,
-                "Zero.color": "gray", "Zero.linewidth": 1, "Zero.visible": True
+                "Plot.color": "rgb(0,128,128)", "Plot.linewidth": 1, "Plot.visible": True, # Teal
+                "Zero.color": "rgb(128,128,128)", "Zero.linewidth": 1, "Zero.visible": True # Gray
             }
         }
     }

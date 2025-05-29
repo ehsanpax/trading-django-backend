@@ -18,16 +18,18 @@ def build_chart_img_payload(symbol, timeframe, indicator_settings):
     # EMA
     if indicator_settings.get("emas", {}).get("enabled"):
         ema_config = indicator_settings["emas"]
-        for period in ema_config.get("periods", []):
-            studies.append({
+        ema_overrides_list = ema_config.get("overrides", [])
+        for i, period in enumerate(ema_config.get("periods", [])):
+            study = {
                 "name": "Moving Average Exponential",
                 "input": {
                     "length": period,
                     "source": ema_config.get("source", "close"),
-                    # Assuming offset, smoothingLine, smoothingLength are not needed for standard EMA
-                },
-                # Add "override" for colors/styles if needed later
-            })
+                }
+            }
+            if i < len(ema_overrides_list) and isinstance(ema_overrides_list[i], dict):
+                study["override"] = ema_overrides_list[i]
+            studies.append(study)
 
     # DMI
     if indicator_settings.get("dmi", {}).get("enabled"):
