@@ -3,7 +3,7 @@ from decimal import Decimal
 from django.shortcuts import get_object_or_404
 from accounts.models import Account, MT5Account, CTraderAccount
 from connectors.ctrader_client import CTraderClient
-from mt5.services import MT5Connector
+from mt5.services import MT5Connector # Ensure this is the correct import for your MT5Connector
 from risk.management import validate_trade_request, perform_risk_checks, fetch_risk_settings
 from trading.models import Order, Trade, ProfitTarget
 from uuid import uuid4
@@ -382,10 +382,11 @@ def close_trade_globally(user, trade_id: UUID) -> dict:
         "actual_profit_loss": float(trade.actual_profit_loss if trade.actual_profit_loss is not None else 0)
     }
 
-def synchronize_trade_with_platform(trade_id: UUID):
+def synchronize_trade_with_platform(trade_id: UUID, existing_connector: MT5Connector = None): # Add existing_connector
     """
     Synchronizes a single trade record with the trading platform (e.g., MT5).
     Fetches the latest deals, updates order history, remaining size, status, and P/L.
+    Can use an existing MT5Connector instance if provided.
     """
     try:
         trade_instance = get_object_or_404(Trade, id=trade_id)
@@ -395,41 +396,37 @@ def synchronize_trade_with_platform(trade_id: UUID):
 
     sync_data = None
     platform_name = trade_instance.account.platform
+    connector_to_use = existing_connector 
 
     if platform_name == "MT5":
-        try:
-            mt5_account_details = MT5Account.objects.get(account=trade_instance.account)
-        except MT5Account.DoesNotExist:
-            return {"error": f"MT5Account details not found for account {trade_instance.account.id}."}
+        if not connector_to_use: 
+            try:
+                mt5_account_details = MT5Account.objects.get(account=trade_instance.account)
+            except MT5Account.DoesNotExist:
+                return {"error": f"MT5Account details not found for account {trade_instance.account.id}."}
 
-        connector = MT5Connector(account_id=mt5_account_details.account_number, broker_server=mt5_account_details.broker_server)
-        connect_result = connector.connect(password=mt5_account_details.encrypted_password)
+            connector_to_use = MT5Connector(account_id=mt5_account_details.account_number, broker_server=mt5_account_details.broker_server)
+            connect_result = connector_to_use.connect(password=mt5_account_details.encrypted_password)
 
-        if connect_result.get("error"):
-            # MT5Connector's connect method already calls mt5.initialize and mt5.login
-            # No separate mt5.shutdown() is typically needed here unless connector doesn't manage it.
-            # For now, assume connector handles its lifecycle or mt5.shutdown() is called by a higher layer if needed.
-            return {"error": f"MT5 connection failed: {connect_result.get('error')}"}
+            if connect_result.get("error"):
+                return {"error": f"MT5 connection failed: {connect_result.get('error')}"}
         
+        if not connector_to_use:
+             return {"error": "MT5 connector not available."}
+
+        if hasattr(connector_to_use, 'account_id') and hasattr(trade_instance.account, 'mt5_account') and connector_to_use.account_id != trade_instance.account.mt5_account.account_number:
+            print(f"Warning: synchronize_trade_with_platform called with connector for account {connector_to_use.account_id}, "
+                  f"but trade {trade_instance.id} belongs to account {trade_instance.account.mt5_account.account_number}. This might lead to issues.")
+
         if not trade_instance.position_id:
-            # mt5.shutdown() # Ensure shutdown if we exit early after successful connect
             return {"error": f"Trade {trade_instance.id} does not have a position_id. Cannot sync with MT5."}
 
-        sync_data = connector.fetch_trade_sync_data(
+        sync_data = connector_to_use.fetch_trade_sync_data( 
             position_id=trade_instance.position_id,
             instrument_symbol=trade_instance.instrument
         )
-        # Assuming MT5Connector methods that use mt5 leave it in a usable state or shutdown is handled by caller of this sync function.
-        # For safety, if this is the end of MT5 interaction for this scope:
-        # import MetaTrader5 as mt5_main # To avoid conflict if mt5 is used elsewhere
-        # mt5_main.shutdown()
-        # However, the MT5Connector itself initializes MT5. If multiple calls to sync happen,
-        # repeated initialize/shutdown might be inefficient. This needs a strategy.
-        # For now, let's assume the connector leaves MT5 initialized if it was,
-        # and a higher-level process manages global MT5 shutdown if necessary.
 
     elif platform_name == "cTrader":
-        # Placeholder for cTrader logic
         # ctrade_account_details = CTraderAccount.objects.get(account=trade_instance.account)
         # connector = CTraderClient(ctrade_account_details)
         # sync_data = connector.fetch_trade_sync_data(...)
