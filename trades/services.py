@@ -62,7 +62,14 @@ class TradeService:
 
         # extra guard rails, just like the old view did
         rm = fetch_risk_settings(account.id)
-        rc = perform_risk_checks(rm, Decimal(final_lot), self.data["symbol"], Decimal(self.data["risk_percent"]))
+        # Pass account instance as the first argument to perform_risk_checks
+        rc = perform_risk_checks(
+            account,  # Account instance
+            rm,       # Risk settings object or dict
+            Decimal(str(final_lot)),  # Ensure final_lot is Decimal (was float)
+            self.data["symbol"],
+            Decimal(str(self.data["risk_percent"]))  # Ensure risk_percent is Decimal (was float)
+        )
         if "error" in rc:
             raise ValidationError(rc["error"])
 
