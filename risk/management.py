@@ -192,10 +192,10 @@ def has_exceeded_daily_loss(account: Account, max_daily_loss_percent_setting: De
     current_equity = get_account_equity(account, getattr(account, 'user', None)) 
     max_loss_threshold = current_equity * (max_daily_loss_percent_setting / Decimal('100'))
     
-    logger.debug(f"Account {account.account_id}: Current Equity: {current_equity}, Max Daily Loss Threshold: {max_loss_threshold}, Total P/L Today: {total_pl}")
+    logger.debug(f"Account {account.id}: Current Equity: {current_equity}, Max Daily Loss Threshold: {max_loss_threshold}, Total P/L Today: {total_pl}")
 
     if total_pl < 0 and abs(total_pl) >= max_loss_threshold:
-        logger.warning(f"Account {account.account_id} exceeded daily loss limit. Loss: {total_pl}, Threshold: {max_loss_threshold}")
+        logger.warning(f"Account {account.id} exceeded daily loss limit. Loss: {total_pl}, Threshold: {max_loss_threshold}")
         return True
     return False
 
@@ -248,7 +248,7 @@ def is_cooldown_active(account: Account, consecutive_loss_limit_setting: int, co
 
     cooldown_expiry = last_losing_trade_today.closed_at + cooldown_period_setting # Use passed setting
     if timezone.now() < cooldown_expiry:
-        logger.warning(f"Account {account.account_id} cooldown (from today's losses) still active until {cooldown_expiry}")
+        logger.warning(f"Account {account.id} cooldown (from today's losses) still active until {cooldown_expiry}")
         return True
         
     return False
@@ -273,7 +273,7 @@ def exceeds_max_trades_same_symbol(account: Account, max_open_trades_same_symbol
     ).count()
 
     if open_trades_same_symbol >= max_open_trades_same_symbol_setting: # Use passed setting
-        logger.warning(f"Account {account.account_id} open trades on {symbol} = {open_trades_same_symbol}, exceeds max allowed {max_open_trades_same_symbol_setting}.")
+        logger.warning(f"Account {account.id} open trades on {symbol} = {open_trades_same_symbol}, exceeds max allowed {max_open_trades_same_symbol_setting}.")
         return True
     return False
 
@@ -286,7 +286,7 @@ def exceeds_max_open_positions(account: Account, max_open_positions_setting: int
         trade_status="open"
     ).count()
     if current_open_positions >= max_open_positions_setting:
-        logger.warning(f"Account {account.account_id} has {current_open_positions} open positions, exceeds max {max_open_positions_setting}.")
+        logger.warning(f"Account {account.id} has {current_open_positions} open positions, exceeds max {max_open_positions_setting}.")
         return True
     return False
 
