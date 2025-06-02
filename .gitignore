@@ -126,6 +126,7 @@ __pypackages__/
 # Celery stuff
 celerybeat-schedule
 celerybeat.pid
+celerybeat-schedule*
 
 # SageMath parsed files
 *.sage.py
@@ -178,4 +179,8 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+#csv and parquet files
+*.csv
+*.parquet
 

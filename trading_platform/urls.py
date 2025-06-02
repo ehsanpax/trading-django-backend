@@ -42,6 +42,7 @@ urlpatterns = [
     path('api/calculators/', include('calculators.urls')),
     path('api/history/', include('trade_history.urls')),
     path('api/chart-snapshots/', include('chart_snapshots.urls')),
+    path('api/analysis/', include('analysis.urls')), # Added analysis app urls
 
 ]
 if settings.DEBUG:

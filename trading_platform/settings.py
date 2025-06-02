@@ -60,6 +60,7 @@ INSTALLED_APPS = [
     'calculators',
     'trade_history',
     'chart_snapshots.apps.ChartSnapshotsConfig',
+    'analysis', # Added new analysis app
 ]
 
 
@@ -237,3 +238,10 @@ INDICATOR_TIMEFRAMES = {
 CELERY_BROKER_URL = "redis://localhost:6379/0"
 # CELERY_BEAT_SCHEDULE is now defined in trading_platform/celery_app.py
 # Ensure django-celery-beat is not also scheduling this task via the admin if it's installed.
+
+CELERY_RESULT_BACKEND = "redis://localhost:6379/0" # Added for analysis app
+DATA_ROOT = BASE_DIR / 'analysis_data' # Added for analysis app
+DATA_ROOT.mkdir(exist_ok=True) # Ensure the directory exists
+
+OANDA_ACCESS_TOKEN = "8617505e3109641a4bc8b10bcbf546ed-d1a4b2273a700dcbc4840439c9701e42" # Added for OANDA data fetcher
+OANDA_ENVIRONMENT = "practice" # Added for OANDA data fetcher
