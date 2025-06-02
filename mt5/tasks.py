@@ -181,20 +181,20 @@ def monitor_mt5_stop_losses():
             print(f"{log_prefix}DEBUG: Unhandled exception while processing account {account_num_for_log}: {e}\n{tb_str}")
             skipped_trades_count += len(trades_for_account) 
         finally:
-            if mt5_initialized_for_this_account and connector_for_account:
-                if mt5.terminal_info() and mt5.terminal_info().path == connector_for_account.terminal_path:
-                    print(f"{log_prefix}DEBUG: Shutting down MT5 connection for account {connector_for_account.account_id} (path: {connector_for_account.terminal_path}).")
-                    mt5.shutdown()
-                else:
-                    print(f"{log_prefix}DEBUG: MT5 for account {connector_for_account.account_id} (path: {connector_for_account.terminal_path}) "
-                          "was not active or already shut down. Skipping explicit shutdown.")
-            elif connector_for_account: 
-                 print(f"{log_prefix}DEBUG: Login failed or MT5 not initialized for account {connector_for_account.account_id}. "
-                       "Ensuring no lingering global MT5 session if it matches path.")
-                 current_terminal_info = mt5.terminal_info()
-                 if current_terminal_info and current_terminal_info.path == connector_for_account.terminal_path:
-                     print(f"{log_prefix}DEBUG: Shutting down MT5 for path {connector_for_account.terminal_path} after failed login/init for its account.")
-                     mt5.shutdown()
+            # The MT5Connector.connect() method now handles path-specific initialization and shutdown if paths change.
+            # We can simplify this finally block or remove it if MT5Connector's lifecycle management is sufficient.
+            # For now, let's just log that this account's processing is done.
+            if connector_for_account:
+                 account_num_for_log_finally = mt5_account_details.account_number if 'mt5_account_details' in locals() and mt5_account_details else 'UNKNOWN_ACCOUNT'
+                 print(f"{log_prefix}DEBUG: Finished processing account {account_num_for_log_finally}. MT5 state managed by MT5Connector.")
+
+    # Consider a single mt5.shutdown() here if NO other concurrent Celery tasks are expected to use MT5 immediately.
+    # However, if other tasks (like manage_mt5_account_operation) run, this could interfere.
+    # For a periodic task, it's often better to let each task instance manage its required MT5 state.
+    # The MT5Connector's connect method will re-initialize if needed on the next run or for a different path.
+    # If mt5.terminal_info():
+    #    print(f"{log_prefix}DEBUG: End of monitor_mt5_stop_losses. Shutting down any active MT5 session.")
+    #    mt5.shutdown() # This would be a global shutdown at the end of the task.
 
     print(f"{log_prefix}MT5 stop loss monitoring task finished. Updated: {updated_trades_count}, Skipped/Errors: {skipped_trades_count}.")
     return {"status": "success", "updated_trades": updated_trades_count, "skipped_trades": skipped_trades_count}

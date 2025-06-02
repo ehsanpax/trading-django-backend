@@ -17,57 +17,57 @@ class MT5Connector:
         # Construct the path to the specific terminal for this account
         self.terminal_path = rf"C:\MetaTrader 5\{self.account_id}\terminal64.exe"
 
-        # Initialize MT5 with the specific terminal path
-        if not mt5.initialize(path=self.terminal_path):
-            init_error = mt5.last_error()
-            print(f"MT5 Initialization Failed for terminal: {self.terminal_path}. Error: {init_error}")
-            # Consider raising an exception or specific error handling
-        else:
-            print(f"MT5 Initialized Successfully for terminal: {self.terminal_path}")
+        # Initialization is now primarily handled within the connect method
+        # to allow for smarter path-specific initialization.
+        # We can do an initial check here, but connect() will be authoritative.
+        # current_terminal_info = mt5.terminal_info()
+        # if not current_terminal_info or current_terminal_info.path != self.terminal_path:
+        #     print(f"MT5Connector __init__: MT5 not yet initialized for {self.terminal_path} or for a different path.")
+        # else:
+        #     print(f"MT5Connector __init__: MT5 already initialized for {self.terminal_path}.")
+
 
     def connect(self, password: str) -> dict:
         """Log into MT5 if not already logged in, using the dedicated terminal instance."""
         
-        terminal_info = mt5.terminal_info()
-        if terminal_info is None:
-            print(f"MT5 terminal_info is None. Attempting to re-initialize with path: {self.terminal_path}")
+        current_terminal_info = mt5.terminal_info()
+
+        # Scenario 1: MT5 is initialized, for the correct path, and we are logged into the correct account.
+        if current_terminal_info and current_terminal_info.path == self.terminal_path:
+            account_info = mt5.account_info()
+            if account_info and account_info.login == self.account_id:
+                print(f"Already logged in as {self.account_id} in terminal {self.terminal_path} (path match), skipping re-login.")
+                return {"message": f"Already logged into MT5 account {self.account_id}"}
+            # Else: Correct path, but wrong account or not logged in. Proceed to login.
+        
+        # Scenario 2: MT5 is initialized but for a DIFFERENT path, or not initialized at all.
+        # We need to shut down the old one (if any) and initialize for our path.
+        if current_terminal_info and current_terminal_info.path != self.terminal_path:
+            print(f"MT5 currently initialized for a different path ({current_terminal_info.path}). Shutting down before initializing for {self.terminal_path}.")
+            mt5.shutdown()
+            time.sleep(0.5) # Short delay for shutdown
+            current_terminal_info = None # Reset to ensure re-evaluation or initialization
+
+        # Check if initialization is needed (either not initialized, or was shut down due to path mismatch)
+        if not current_terminal_info or (mt5.terminal_info() and mt5.terminal_info().path != self.terminal_path): # Re-check mt5.terminal_info after potential shutdown
+            print(f"Initializing MT5 for terminal: {self.terminal_path}")
             if not mt5.initialize(path=self.terminal_path):
-                # Log detailed error from mt5.last_error()
                 init_error = mt5.last_error()
-                error_msg = f"MT5 terminal is not running and re-initialization failed for path: {self.terminal_path}. Error: {init_error}"
+                error_msg = f"MT5 initialization failed for terminal {self.terminal_path}. Error: {init_error}"
                 print(error_msg)
                 return {"error": error_msg}
-            terminal_info = mt5.terminal_info() # Check again
-            if terminal_info is None:
-                 error_msg = f"MT5 terminal is not running even after re-initialization for path: {self.terminal_path}."
-                 print(error_msg)
-                 return {"error": error_msg}
-
-        account_info = mt5.account_info()
-        # Check if already logged into the correct account *in the currently initialized terminal*
-        if account_info and account_info.login == self.account_id:
-            # This check assumes that mt5.account_info() correctly reflects the account
-            # from the terminal specified by self.terminal_path.
-            print(f"Already logged in as {self.account_id} in terminal {self.terminal_path}, skipping re-login.")
+            else:
+                print(f"MT5 initialized successfully for terminal: {self.terminal_path}")
+        
+        # At this point, MT5 should be initialized for self.terminal_path. Now, login.
+        account_info = mt5.account_info() # Get current account info for the initialized terminal
+        # Ensure we are checking login status against the currently initialized terminal's path
+        current_path_after_init = mt5.terminal_info().path if mt5.terminal_info() else None
+        if account_info and account_info.login == self.account_id and current_path_after_init == self.terminal_path:
+            print(f"Already logged in as {self.account_id} in terminal {self.terminal_path} (verified post-init), skipping re-login.")
             return {"message": f"Already logged into MT5 account {self.account_id}"}
 
-        print(f"Attempting login for account: {self.account_id} using terminal: {self.terminal_path}")
-        
-        # Shutdown any existing MT5 session and re-initialize with the specific path
-        # This is crucial if another part of the application might have initialized MT5
-        # without a path or with a different path.
-        mt5.shutdown() 
-        time.sleep(1)   # Wait one second for the shutdown to complete
-        
-        if not mt5.initialize(path=self.terminal_path): # Use the specific terminal path
-            reinit_error = mt5.last_error()
-            error_msg = f"MT5 reinitialization failed for terminal {self.terminal_path}: {reinit_error}"
-            print(error_msg)
-            return {"error": error_msg}
-        else:
-            print(f"MT5 reinitialized successfully for terminal: {self.terminal_path}")
-
-        print(f"🔹 Logging into MT5 account: {self.account_id} on server: {self.broker_server} using terminal: {self.terminal_path}")
+        print(f"🔹 Attempting login for account: {self.account_id} on server: {self.broker_server} using terminal: {self.terminal_path}")
         login_status = mt5.login(self.account_id, password, self.broker_server)
         if not login_status:
             login_error_code, login_error_message = mt5.last_error()
