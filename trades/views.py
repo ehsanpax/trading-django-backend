@@ -29,15 +29,23 @@ from risk.management import (
     perform_risk_checks      # our new guard rail checks
 )
 from .targets import derive_target_price
-from .services import TradeService, close_trade_globally
+from .services import ( # Grouped imports for services
+    TradeService, 
+    close_trade_globally, 
+    partially_close_trade, 
+    update_trade_protection_levels, 
+    update_trade_stop_loss_globally
+)
 from .serializers import (
     OrderSerializer,
     ExecuteTradeInputSerializer,
     ExecuteTradeOutputSerializer,
-    UpdateStopLossSerializer
+    UpdateStopLossSerializer,
+    PartialCloseTradeInputSerializer, # Added PartialCloseTradeInputSerializer
+    TradeSerializer # Make sure TradeSerializer is imported if used by UpdateTradeView
 )
 from rest_framework.generics import GenericAPIView
-from .services import update_trade_stop_loss_globally # Added import
+# from .services import update_trade_stop_loss_globally # This is now part of grouped imports
 from rest_framework.exceptions import APIException, PermissionDenied, ValidationError
 # ----- Trade / Order Execution --------------------------------------------
 
@@ -78,29 +86,70 @@ class OpenTradesView(APIView):
         serializer = TradeSerializer(trades, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
-# ----- Update Trade -----
-class UpdateTradeView(APIView):
+# ----- Update Take Profit -----
+class UpdateTakeProfitView(APIView): # Renamed from UpdateTradeView
     """
-    Updates an open trade's stop loss or take profit.
+    Updates an open trade's take profit.
     Expected JSON:
     {
-        "stop_loss": <float>,
         "take_profit": <float>
     }
     """
     permission_classes = [IsAuthenticated]
 
-    def put(self, request, trade_id):
-        trade = get_object_or_404(Trade, id=trade_id)
-        if trade.account.user != request.user:
-            return Response({"detail": "Unauthorized to modify this trade"}, status=status.HTTP_403_FORBIDDEN)
+    def put(self, request, trade_id_str: str): 
+        try:
+            valid_trade_id = uuid.UUID(trade_id_str)
+        except ValueError:
+            return Response({"detail": "Invalid trade ID format."}, status=status.HTTP_400_BAD_REQUEST)
 
-        trade.stop_loss = request.data.get("stop_loss")
-        trade.profit_target = request.data.get("take_profit")
-        trade.save()
-        from .serializers import TradeSerializer
-        serializer = TradeSerializer(trade)
-        return Response({"message": "Trade updated successfully", "trade": serializer.data}, status=status.HTTP_200_OK)
+        # This view now ONLY handles take_profit updates.
+        raw_tp = request.data.get("take_profit")
+
+        if raw_tp is None:
+            return Response(
+                {"detail": "'take_profit' must be provided."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            new_tp = Decimal(str(raw_tp))
+        except Exception:
+            return Response(
+                {"detail": "'take_profit' must be a valid decimal number."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            # Call update_trade_protection_levels, passing None for new_stop_loss
+            # as this view no longer handles SL.
+            result = update_trade_protection_levels(
+                user=request.user,
+                trade_id=valid_trade_id,
+                new_stop_loss=None, # Explicitly pass None for SL
+                new_take_profit=new_tp
+            )
+            # Fetch the updated trade to include in the response
+            updated_trade = Trade.objects.get(id=valid_trade_id)
+            serializer = TradeSerializer(updated_trade)
+            
+            return Response({
+                "message": result.get("message", "Trade updated successfully."),
+                "trade": serializer.data,
+                "platform_response": result.get("platform_response")
+            }, status=status.HTTP_200_OK)
+            
+        except Trade.DoesNotExist:
+            return Response({"detail": "Trade not found."}, status=status.HTTP_404_NOT_FOUND)
+        except PermissionDenied as e:
+            return Response({"detail": str(e)}, status=status.HTTP_403_FORBIDDEN)
+        except ValidationError as e:
+            return Response({"detail": e.detail if hasattr(e, 'detail') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except APIException as e:
+            return Response({"detail": e.detail if hasattr(e, 'detail') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            print(f"Unexpected error in UpdateTradeView: {str(e)}")
+            return Response({"detail": "An unexpected error occurred while updating the trade."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 # ----- Close Trade -----
 class CloseTradeView(APIView):
@@ -614,7 +663,41 @@ class UpdateStopLossAPIView(APIView):
             except APIException as e: # Catch platform-specific or other API errors from the service
                 return Response({"detail": e.detail if hasattr(e, 'detail') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
             except Exception as e:
-                # Log generic error
+            # Log generic error
                 print(f"Unexpected error in UpdateStopLossAPIView: {str(e)}") # Basic logging
-                return Response({"error": "An unexpected error occurred while updating stop loss."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({"error": "An unexpected error occurred while updating stop loss."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+# ----- Partial Close Trade -----
+class PartialCloseTradeView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, trade_id_str: str): # Renamed trade_id to trade_id_str for clarity
+        try:
+            valid_trade_id = uuid.UUID(trade_id_str)
+        except ValueError:
+            return Response({"detail": "Invalid trade ID format."}, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer = PartialCloseTradeInputSerializer(data=request.data)
+        if serializer.is_valid():
+            volume_to_close = serializer.validated_data['volume_to_close']
+            try:
+                result = partially_close_trade(
+                    user=request.user,
+                    trade_id=valid_trade_id,
+                    volume_to_close=volume_to_close
+                )
+                return Response(result, status=status.HTTP_200_OK)
+            except Trade.DoesNotExist:
+                return Response({"detail": "Trade not found."}, status=status.HTTP_404_NOT_FOUND)
+            except PermissionDenied as e:
+                return Response({"detail": str(e)}, status=status.HTTP_403_FORBIDDEN)
+            except ValidationError as e:
+                return Response({"detail": e.detail if hasattr(e, 'detail') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            except APIException as e:
+                return Response({"detail": e.detail if hasattr(e, 'detail') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            except Exception as e:
+                print(f"Unexpected error in PartialCloseTradeView: {str(e)}") # Basic logging
+                return Response({"detail": "An unexpected error occurred while partially closing the trade."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

@@ -25,6 +25,96 @@ def get_cached(symbol, tf, ind):
 
 # snapshot what you want
 
+# ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#                          PARTIAL TRADE CLOSURE
+# ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+def partially_close_trade(user, trade_id: UUID, volume_to_close: Decimal) -> dict:
+    """
+    Partially closes an open trade, performs platform-specific actions, 
+    and updates the database.
+    """
+    trade = get_object_or_404(Trade, id=trade_id)
+
+    if trade.account.user != user:
+        raise PermissionDenied("Unauthorized to partially close this trade.")
+
+    if trade.trade_status != "open":
+        raise ValidationError("Trade is not open, cannot partially close.")
+
+    if not (Decimal("0.01") <= volume_to_close < trade.remaining_size):
+        raise ValidationError(
+            f"Volume to close ({volume_to_close}) must be between 0.01 and "
+            f"less than remaining size ({trade.remaining_size}). "
+            f"For full closure, use the close trade endpoint."
+        )
+
+    connector = None # Initialize connector
+
+    if trade.account.platform == "MT5":
+        try:
+            mt5_account = trade.account.mt5_account
+        except MT5Account.DoesNotExist:
+            raise APIException("No linked MT5 account found for this trade's account.")
+
+        connector = MT5Connector(mt5_account.account_number, mt5_account.broker_server)
+        login_result = connector.connect(mt5_account.encrypted_password)
+        if "error" in login_result:
+            raise APIException(f"MT5 connection failed: {login_result['error']}")
+
+        if not trade.position_id:
+            raise APIException(f"Cannot partially close trade {trade.id}: Missing MT5 position ticket (position_id).")
+
+        close_result = connector.close_trade(
+            ticket=trade.position_id,
+            volume=float(volume_to_close), 
+            symbol=trade.instrument
+        )
+
+        if "error" in close_result:
+            raise APIException(f"MT5 trade partial closure command failed: {close_result['error']}")
+        
+        # Successfully issued partial close command to broker
+        # Now, synchronize to get the deal and update trade state
+        sync_result = synchronize_trade_with_platform(trade_id=trade.id, existing_connector=connector)
+
+        if "error" in sync_result:
+            # This is problematic: broker action succeeded, but DB sync failed.
+            # Log this error thoroughly. The trade state in DB might be stale.
+            # For now, we'll raise an exception, but a more robust solution might involve
+            # retrying sync or flagging the trade for manual review.
+            print(f"CRITICAL: Trade {trade.id} partially closed on MT5, but DB sync failed: {sync_result['error']}")
+            raise APIException(f"Partially closed on platform, but DB sync failed: {sync_result['error']}. Please check trade status.")
+
+        # Find the latest order related to this trade to get P/L of the closed portion
+        # This assumes synchronize_trade_with_platform created an Order for the partial close deal.
+        # We sort by filled_at or created_at to get the most recent one.
+        closed_portion_order = Order.objects.filter(trade=trade, status=Order.Status.FILLED).order_by('-filled_at', '-created_at').first()
+        
+        profit_on_closed_portion = Decimal("0.00")
+        if closed_portion_order and closed_portion_order.volume == volume_to_close: # A basic check
+             profit_on_closed_portion = (closed_portion_order.profit or 0) + \
+                                        (closed_portion_order.commission or 0) + \
+                                        (closed_portion_order.swap or 0)
+
+
+        # Refresh trade instance from DB after sync
+        trade.refresh_from_db()
+
+        return {
+            "message": "Trade partially closed successfully.",
+            "trade_id": str(trade.id),
+            "closed_volume": float(volume_to_close),
+            "remaining_volume": float(trade.remaining_size),
+            "profit_on_closed_portion": float(profit_on_closed_portion),
+            "current_trade_actual_profit_loss": float(trade.actual_profit_loss or 0)
+        }
+
+    elif trade.account.platform == "cTrader":
+        raise APIException("cTrader partial close not implemented yet.")
+    else:
+        raise APIException(f"Unsupported trading platform: {trade.account.platform}")
+
+
 class TradeService:
     def __init__(self, user, validated_data):
         self.user = user
@@ -510,10 +600,111 @@ def synchronize_trade_with_platform(trade_id: UUID, existing_connector: MT5Conne
         # Log error e
         return {"error": f"Failed to save synchronized trade {trade_instance.id}: {str(e)}"}
 
+# ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#                  UPDATE TRADE STOP LOSS / TAKE PROFIT
+# ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+def update_trade_protection_levels(user, 
+                                   trade_id: UUID, 
+                                   new_stop_loss: Decimal = None, 
+                                   new_take_profit: Decimal = None) -> dict:
+    """
+    Updates the stop loss and/or take profit for an open trade on the platform and in the database.
+    At least one of new_stop_loss or new_take_profit must be provided.
+    """
+    trade = get_object_or_404(Trade, id=trade_id)
+
+    if trade.account.user != user:
+        raise PermissionDenied("Unauthorized to update this trade's protection levels.")
+
+    if trade.trade_status != "open":
+        raise ValidationError("Protection levels can only be updated for open trades.")
+
+    # This function will now ONLY handle take_profit updates.
+    # SL updates are handled by update_trade_stop_loss_globally.
+    if new_take_profit is None:
+        raise ValidationError("new_take_profit must be provided.")
+    
+    if new_stop_loss is not None:
+        # This function should not be used for SL updates anymore.
+        raise ValidationError("This endpoint is only for updating take profit. Use the specific SL update endpoint for stop loss changes.")
+
+    account = trade.account
+    connector = None
+    platform_response = None
+
+    # Determine current SL and TP to pass to modify_position_protection
+    # If a new value is provided, use that; otherwise, use the existing value from the trade object.
+    # Ensure values are float for MT5Connector, or 0.0 if None (MT5 uses 0.0 for no SL/TP).
+    
+    # Fetch live position details to get current SL/TP from platform if not updating them
+    # This ensures we send the most current values for the unmodified protection level.
+    current_sl_from_platform = trade.stop_loss # We need current SL to send to platform
+    current_tp_from_platform = trade.profit_target # Fallback if platform fetch fails
+
+    if account.platform == "MT5":
+        try:
+            mt5_account = account.mt5_account
+        except MT5Account.DoesNotExist:
+            raise APIException("No linked MT5 account found for this trade's account.")
+        
+        connector = MT5Connector(mt5_account.account_number, mt5_account.broker_server)
+        login_result = connector.connect(mt5_account.encrypted_password)
+        if "error" in login_result:
+            raise APIException(f"MT5 connection failed: {login_result['error']}")
+
+        if not trade.position_id:
+            raise APIException(f"Trade {trade.id} does not have a position_id. Cannot update protection on MT5.")
+
+        # Get current SL/TP from platform to ensure we don't accidentally remove one
+        # if only the other is being updated.
+        position_details = connector.get_open_position_details_by_ticket(position_ticket=int(trade.position_id))
+        if "error" in position_details:
+            # If we can't fetch, we might proceed with DB values, but it's risky.
+            # For now, let's raise an error, or one could fall back to trade.stop_loss / trade.profit_target
+            # with a warning.
+            raise APIException(f"Failed to fetch current position details from MT5: {position_details['error']}")
+        
+        current_sl_from_platform = Decimal(str(position_details.get("sl", 0.0))) 
+        # current_tp_from_platform = Decimal(str(position_details.get("tp", 0.0))) # TP is being updated, so use new_take_profit
+
+    # Values to send to the broker
+    # SL will be the current SL from the platform (or DB if platform fetch failed)
+    # TP will be the new_take_profit
+    sl_to_send = float(current_sl_from_platform if current_sl_from_platform is not None else 0.0)
+    tp_to_send = float(new_take_profit) # new_take_profit is guaranteed to be non-None here
+
+    if account.platform == "MT5": # Re-check platform for sending command
+        platform_response = connector.modify_position_protection(
+            position_id=int(trade.position_id),
+            symbol=trade.instrument,
+            stop_loss=sl_to_send, 
+            take_profit=tp_to_send
+        )
+        if "error" in platform_response:
+            raise APIException(f"MT5 take profit update failed: {platform_response['error']}")
+        
+    elif account.platform == "cTrader":
+        raise APIException("cTrader take profit update not implemented yet.")
+    else:
+        raise APIException(f"Unsupported platform: {account.platform}")
+
+    # Update Trade Model in Database
+    trade.profit_target = new_take_profit
+    trade.save(update_fields=["profit_target"])
+
+    return {
+        "message": "Trade take profit updated successfully.",
+        "trade_id": str(trade.id),
+        "new_take_profit": float(trade.profit_target),
+        "platform_response": platform_response
+    }
+
+
 def update_trade_stop_loss_globally(user,
                                     trade_id: UUID,
-                                    sl_update_type: str,
-                                    value: Decimal = None, # For distance_pips or distance_price
+                                    sl_update_type: str, # "breakeven", "distance_pips", "distance_price", "specific_price"
+                                    value: Decimal = None, 
                                     specific_price: Decimal = None) -> dict:
     """
     Updates the stop loss for an open trade based on the specified update type.
@@ -628,23 +819,22 @@ def update_trade_stop_loss_globally(user,
     if new_stop_loss_price is None:
         raise APIException("Failed to calculate new stop loss price.")
 
-    # Validate that the new SL is not further than the existing SL
-    if trade.stop_loss is not None and trade.stop_loss != 0: # Check if there's an existing SL
-        current_sl_price = trade.stop_loss
-        if trade.direction == "BUY": # Corrected
-            # For a BUY trade, a "further" SL is a lower price.
-            # We want new_stop_loss_price >= current_sl_price
-            if new_stop_loss_price < current_sl_price:
-                raise ValidationError(f"New stop loss ({new_stop_loss_price}) cannot be further than the current one ({current_sl_price}) for a BUY trade.")
-        elif trade.direction == "SELL": # Corrected
-            # For a SELL trade, a "further" SL is a higher price.
-            # We want new_stop_loss_price <= current_sl_price
-            if new_stop_loss_price > current_sl_price:
-                raise ValidationError(f"New stop loss ({new_stop_loss_price}) cannot be further than the current one ({current_sl_price}) for a SELL trade.")
-        # No else needed here as trade.direction should be validated by model or earlier logic
+    # SL Rule: Cannot remove SL by setting to 0.0 if type is 'specific_price'
+    if sl_update_type == "specific_price" and new_stop_loss_price == Decimal("0.0"):
+        raise ValidationError("Stop loss removal (setting to 0.0) is not allowed via this endpoint.")
+
+    # SL Rule: New SL cannot be further than the existing one (trade.stop_loss from DB).
+    if trade.stop_loss is not None and trade.stop_loss != Decimal("0.0"): # Check if there's an existing, non-zero SL
+        current_db_sl = trade.stop_loss
+        if trade.direction == "BUY":
+            if new_stop_loss_price < current_db_sl:
+                raise ValidationError(f"New stop loss ({new_stop_loss_price}) cannot be further (lower) than the current one ({current_db_sl}) for a BUY trade.")
+        elif trade.direction == "SELL":
+            if new_stop_loss_price > current_db_sl:
+                raise ValidationError(f"New stop loss ({new_stop_loss_price}) cannot be further (higher) than the current one ({current_db_sl}) for a SELL trade.")
 
     # 3. Execute SL Update on Broker
-    modification_result = None # Initialize to handle cases where platform is not MT5
+    modification_result = None
     if account.platform == "MT5":
         if not trade.position_id: # Should have been caught earlier
             raise APIException(f"Trade {trade.id} does not have a position_id. Cannot update SL on MT5.")

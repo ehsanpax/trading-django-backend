@@ -141,3 +141,10 @@ class UpdateStopLossSerializer(serializers.Serializer):
             raise serializers.ValidationError("No 'specific_price' should be provided when sl_update_type is 'distance_pips' or 'distance_price'.")
 
         return data
+
+class PartialCloseTradeInputSerializer(serializers.Serializer):
+    volume_to_close = serializers.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        min_value=Decimal("0.01")
+    )
