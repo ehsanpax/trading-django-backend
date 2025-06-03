@@ -1,6 +1,6 @@
 # trades/serializers.py
-from rest_framework import serializers# adjust import based on your project structure
-from trading.models import Trade, Order
+from rest_framework import serializers
+from trading.models import Trade, Order, Watchlist # Added Watchlist
 from decimal import Decimal
 
 class TradeSerializer(serializers.ModelSerializer):
@@ -148,3 +148,44 @@ class PartialCloseTradeInputSerializer(serializers.Serializer):
         decimal_places=2, 
         min_value=Decimal("0.01")
     )
+
+class WatchlistSerializer(serializers.ModelSerializer):
+    user = serializers.PrimaryKeyRelatedField(read_only=True) # Or StringRelatedField for username
+
+    class Meta:
+        model = Watchlist
+        fields = ['id', 'user', 'instrument', 'exchange', 'is_global', 'created_at']
+        read_only_fields = ['user', 'created_at'] # User is set in the view
+
+    def create(self, validated_data):
+        # User will be added in the view based on request.user
+        # For admin creating global watchlist, user can be None
+        user = self.context['request'].user
+        if validated_data.get('is_global', False):
+            # Admin can create global watchlists
+            if not user.is_staff: # or some other permission check
+                raise serializers.ValidationError("Only admins can create global watchlist items.")
+            validated_data['user'] = None # Global items are not tied to a specific user
+        else:
+            # Regular users create for themselves
+            validated_data['user'] = user
+        
+        # Prevent duplicates based on constraints
+        # UniqueConstraint(fields=['user', 'instrument', 'exchange'], name='unique_user_instrument_exchange_watchlist')
+        # UniqueConstraint(fields=['instrument', 'exchange'], condition=models.Q(is_global=True), name='unique_global_instrument_exchange_watchlist')
+        
+        instrument = validated_data.get('instrument')
+        exchange = validated_data.get('exchange')
+
+        if validated_data.get('is_global', False):
+            if Watchlist.objects.filter(instrument=instrument, exchange=exchange, is_global=True).exists():
+                raise serializers.ValidationError(
+                    {"detail": "This global instrument/exchange combination already exists in the watchlist."}
+                )
+        elif user: # Check for user-specific duplicates only if user is present
+            if Watchlist.objects.filter(user=user, instrument=instrument, exchange=exchange, is_global=False).exists():
+                raise serializers.ValidationError(
+                    {"detail": "This instrument/exchange combination already exists in your watchlist."}
+                )
+        
+        return Watchlist.objects.create(**validated_data)

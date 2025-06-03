@@ -1,12 +1,19 @@
 # trades/urls.py
-from django.urls import path
+from django.urls import path, include # Added include
+from rest_framework.routers import DefaultRouter # Added DefaultRouter
 from .views import (
     ExecuteTradeView, OpenTradesView, UpdateTakeProfitView, # Changed UpdateTradeView to UpdateTakeProfitView
     CloseTradeView, TradeSymbolInfoView, MarketPriceView, OpenPositionsLiveView, PendingOrdersView, AllOpenPositionsLiveView, AllPendingOrdersView,
-    UpdateStopLossAPIView, PartialCloseTradeView
+    UpdateStopLossAPIView, PartialCloseTradeView,
+    WatchlistViewSet # Added WatchlistViewSet
 )
 
+# Create a router and register our viewsets with it.
+router = DefaultRouter()
+router.register(r'watchlists', WatchlistViewSet, basename='watchlist')
+
 urlpatterns = [
+    path('', include(router.urls)), # Add a path for the router
     path('execute/', ExecuteTradeView.as_view(), name='execute-trade'),
     path('open/', OpenTradesView.as_view(), name='open-trades'),
     path('update-tp/<str:trade_id_str>/', UpdateTakeProfitView.as_view(), name='update-trade-tp'), # Changed path and name

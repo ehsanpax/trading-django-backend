@@ -1,21 +1,22 @@
 # trades/views.py
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework import status
+from rest_framework import status, viewsets # Added viewsets
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from decimal import Decimal
 import uuid, requests
 from uuid import uuid4
 from django.conf import settings
+from django.db.models import Q # For OR queries
 from accounts.services import get_account_details
 # Import models from your accounts app (or wherever they reside)
 from accounts.models import Account, MT5Account, CTraderAccount
 from connectors.ctrader_client import CTraderClient
-from trading.models import Trade, Order, ProfitTarget
+from trading.models import Trade, Order, ProfitTarget, Watchlist # Added Watchlist
 from accounts.views import FetchAccountDetailsView
 # DRF permissions
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, IsAdminUser # Added IsAdminUser
 from .helpers import fetch_symbol_info_for_platform, fetch_live_price_for_platform
 # Import risk management functions (assumed refactored for Django)
 from risk.management import validate_trade_request, fetch_risk_settings
@@ -42,11 +43,13 @@ from .serializers import (
     ExecuteTradeOutputSerializer,
     UpdateStopLossSerializer,
     PartialCloseTradeInputSerializer, # Added PartialCloseTradeInputSerializer
-    TradeSerializer # Make sure TradeSerializer is imported if used by UpdateTradeView
+    TradeSerializer, # Make sure TradeSerializer is imported if used by UpdateTradeView
+    WatchlistSerializer # Added WatchlistSerializer
 )
 from rest_framework.generics import GenericAPIView
 # from .services import update_trade_stop_loss_globally # This is now part of grouped imports
 from rest_framework.exceptions import APIException, PermissionDenied, ValidationError
+from rest_framework.decorators import action # For custom actions
 # ----- Trade / Order Execution --------------------------------------------
 
 class ExecuteTradeView(GenericAPIView):
@@ -701,3 +704,104 @@ class PartialCloseTradeView(APIView):
                 print(f"Unexpected error in PartialCloseTradeView: {str(e)}") # Basic logging
                 return Response({"detail": "An unexpected error occurred while partially closing the trade."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+# ----- Watchlist Views -----
+class WatchlistViewSet(viewsets.ModelViewSet):
+    """
+    API endpoint that allows watchlists to be viewed or edited.
+    - Users can add/remove/get their own watchlist items.
+    - Admin users can mark watchlist items as global.
+    - The list endpoint returns watchlists for the logged-in user plus global ones.
+    """
+    serializer_class = WatchlistSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        """
+        This view should return a list of all the watchlists
+        for the currently authenticated user plus global watchlists.
+        """
+        user = self.request.user
+        # Q objects are used to create complex queries, here for OR condition
+        return Watchlist.objects.filter(Q(user=user) | Q(is_global=True)).distinct()
+
+    def perform_create(self, serializer):
+        """
+        Save the watchlist item.
+        The serializer's create method handles setting the user or making it global.
+        """
+        serializer.save(user=self.request.user if not serializer.validated_data.get('is_global') else None)
+
+    def get_permissions(self):
+        """
+        Instantiates and returns the list of permissions that this view requires.
+        Allow admin users to perform any action on global watchlists.
+        Regular users can only modify their own non-global watchlists.
+        """
+        if self.action in ['update', 'partial_update', 'destroy']:
+            # For modifying or deleting, if the item is global, only admin can.
+            # If not global, user must own it.
+            # This check will be more robustly handled by get_object or in perform_destroy/update
+            pass # Further checks in perform_update/destroy
+        elif self.action == 'create':
+            # Serializer handles permission for creating global items
+            pass
+        return super().get_permissions()
+
+    def perform_update(self, serializer):
+        instance = serializer.instance
+        if instance.is_global and not self.request.user.is_staff:
+            raise PermissionDenied("Only admins can modify global watchlist items.")
+        if not instance.is_global and instance.user != self.request.user:
+            raise PermissionDenied("You do not have permission to modify this watchlist item.")
+        
+        # Check if trying to make an item global
+        is_becoming_global = serializer.validated_data.get('is_global', instance.is_global)
+        if is_becoming_global and not instance.is_global and not self.request.user.is_staff:
+            raise PermissionDenied("Only admins can make watchlist items global.")
+
+        # If an admin is making it global, user should be set to None
+        if is_becoming_global and self.request.user.is_staff:
+            serializer.save(user=None)
+        else:
+            serializer.save()
+
+
+    def perform_destroy(self, instance):
+        """
+        Ensure only owners or admins (for global items) can delete.
+        """
+        if instance.is_global and not self.request.user.is_staff:
+            raise PermissionDenied("Only admins can delete global watchlist items.")
+        if not instance.is_global and instance.user != self.request.user:
+            # This check is also implicitly handled by get_object for detail views if queryset is filtered by user
+            # However, explicit check here is good for clarity and safety.
+            raise PermissionDenied("You do not have permission to delete this watchlist item.")
+        instance.delete()
+
+    # Potentially a custom action for admin to make an item global if not done via standard update
+    @action(detail=True, methods=['post'], permission_classes=[IsAdminUser])
+    def make_global(self, request, pk=None):
+        watchlist_item = self.get_object()
+        if not watchlist_item.is_global:
+            watchlist_item.is_global = True
+            watchlist_item.user = None # Global items are not user-specific
+            watchlist_item.save(update_fields=['is_global', 'user'])
+            return Response({'status': 'watchlist item set to global'}, status=status.HTTP_200_OK)
+        return Response({'status': 'watchlist item is already global'}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['post'], permission_classes=[IsAdminUser])
+    def remove_global(self, request, pk=None):
+        watchlist_item = self.get_object()
+        if watchlist_item.is_global:
+            # When removing global, it doesn't automatically assign to a user.
+            # It might be better to just delete it or let admin re-assign.
+            # For now, let's assume removing global means it's no longer global.
+            # It will still be an orphan if no user is set.
+            # Admin might need to assign it to a user or delete it.
+            watchlist_item.is_global = False
+            # watchlist_item.user = request.user # Or some other logic
+            watchlist_item.save(update_fields=['is_global'])
+            return Response({'status': 'watchlist item removed from global'}, status=status.HTTP_200_OK)
+        return Response({'status': 'watchlist item is not global'}, status=status.HTTP_400_BAD_REQUEST)

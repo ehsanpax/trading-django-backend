@@ -97,13 +97,31 @@ class Watchlist(models.Model):
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
-        related_name="watchlist"
+        related_name="watchlist",
+        null=True,  # Allow null for global watchlists
+        blank=True  # Allow blank for global watchlists
     )
     instrument = models.CharField(max_length=100)
+    exchange = models.CharField(max_length=100, null=True, blank=True, help_text="e.g., NASDAQ, NYSE, FXCM")
+    is_global = models.BooleanField(default=False, help_text="If true, this watchlist item is visible to all users.")
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
-        return f"{self.instrument} in {self.user.username or self.user.id}'s watchlist"
+        if self.is_global:
+            return f"{self.instrument} (Global)"
+        elif self.user:
+            return f"{self.instrument} in {self.user.username or self.user.id}'s watchlist"
+        return f"{self.instrument} (Orphaned)"
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['user', 'instrument', 'exchange'], name='unique_user_instrument_exchange_watchlist'),
+            models.UniqueConstraint(fields=['instrument', 'exchange'], condition=models.Q(is_global=True), name='unique_global_instrument_exchange_watchlist')
+        ]
+        indexes = [
+            models.Index(fields=['user', 'is_global']),
+            models.Index(fields=['is_global']),
+        ]
 
 
 class TradePerformance(models.Model):
