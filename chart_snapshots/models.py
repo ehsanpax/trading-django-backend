@@ -22,6 +22,7 @@ class ChartSnapshotConfig(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='chart_snapshot_configs')
     name = models.CharField(max_length=255, help_text=_("User-defined name for this indicator template (e.g., Standard EMAs & DMI)"))
+    is_global = models.BooleanField(default=False, help_text=_("If true, this template is accessible by all users."))
     # symbol = models.CharField(max_length=50, help_text=_("Symbol for the chart in EXCHANGE:SYMBOL format (e.g., OANDA:EURUSD, BINANCE:BTCUSDT, TVC:GOLD)")) # Removed
     # timeframe = models.CharField(max_length=3, choices=TIMEFRAME_CHOICES, default='1D') # Removed
     

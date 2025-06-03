@@ -1,4 +1,4 @@
-from django.db import models # Added for Q objects
+from django.db.models import Q # Updated import for Q objects
 from rest_framework import viewsets, status, generics
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -7,23 +7,30 @@ from .models import ChartSnapshotConfig, ChartSnapshot
 import logging # For diagnostic logging
 from .serializers import ChartSnapshotConfigSerializer, ChartSnapshotSerializer, AdhocChartSnapshotRequestSerializer
 from .tasks import generate_chart_snapshot_task
+from .permissions import IsOwnerOrAdminOrReadOnlyIfGlobal # Import custom permission
 
 logger = logging.getLogger(__name__) # For diagnostic logging
 
 class ChartSnapshotConfigViewSet(viewsets.ModelViewSet):
     """
-    API endpoint for managing Chart Snapshot Configurations.
-    Users can create, view, update, and delete their configurations.
-    They can also trigger the generation of a snapshot from a configuration.
+    API endpoint for managing Chart Snapshot Configurations (Indicator Templates).
+    Users can create private templates. Global templates are viewable by all.
+    Editing/deleting global templates is restricted to owner/admin.
     """
     serializer_class = ChartSnapshotConfigSerializer
-    permission_classes = [IsAuthenticated]
+    # Apply custom permission class for object-level permissions (edit/delete)
+    # IsAuthenticated ensures user is logged in for any access.
+    permission_classes = [IsAuthenticated, IsOwnerOrAdminOrReadOnlyIfGlobal]
+
 
     def get_queryset(self):
         """
-        This view should only return configurations belonging to the currently authenticated user.
+        List global templates and private templates owned by the current user.
         """
-        return ChartSnapshotConfig.objects.filter(user=self.request.user)
+        user = self.request.user
+        return ChartSnapshotConfig.objects.filter(
+            Q(is_global=True) | Q(user=user)
+        ).distinct() # distinct() if a user's own template is somehow also marked global by an admin
 
     def perform_create(self, serializer):
         """
@@ -135,8 +142,8 @@ class ChartSnapshotViewSet(viewsets.ReadOnlyModelViewSet):
         
         # Let's assume TradeJournal.trade.account.user is the path to the user
         qs = ChartSnapshot.objects.filter(
-            models.Q(config__user=self.request.user) |
-            models.Q(journal_entry__trade__account__user=self.request.user)
+            Q(config__user=self.request.user) |
+            Q(journal_entry__trade__account__user=self.request.user)
         ).distinct()
         # If 'trade.account' is not the correct path, this will need adjustment.
         # Fallback to simpler config-based permission if journal path is complex/unknown:
