@@ -1,3 +1,4 @@
+from django.contrib.auth import get_user_model # To get the active User model
 from rest_framework import serializers
 from .models import Account
 
@@ -63,3 +64,13 @@ class ProfitTakingProfileSerializer(serializers.ModelSerializer):
                 )
         return data
 
+User = get_user_model()
+
+class UserSerializer(serializers.ModelSerializer):
+    """
+    Serializer for the User model, to be used for the 'me' endpoint.
+    """
+    class Meta:
+        model = User
+        fields = ('id', 'username', 'email', 'first_name', 'last_name', 'is_staff', 'is_active', 'date_joined')
+        read_only_fields = fields # Make all fields read-only for this specific use case

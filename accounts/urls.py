@@ -7,6 +7,7 @@ from .views import UpdateAccountView
 from .views import DeleteAccountView
 from .views import FetchAccountDetailsView
 from .views import ProfitTakingProfileViewSet
+from .views import MeView # Added MeView import
 
 # bind the viewset actions to view functions
 profit_profile_list = ProfitTakingProfileViewSet.as_view({
@@ -28,6 +29,7 @@ urlpatterns = [
     path("details/<uuid:account_id>/", FetchAccountDetailsView.as_view(), name="fetch-account-details"),
     path('profit-profiles/', profit_profile_list, name='profit-profile-list'),
     path('profit-profiles/<int:pk>/', profit_profile_detail, name='profit-profile-detail'),
+    path('me/', MeView.as_view(), name='me'), # Added 'me' endpoint
     
     # You can add additional endpoints (list, detail, update, delete) here.
 ]

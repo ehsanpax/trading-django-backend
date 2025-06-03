@@ -158,8 +158,18 @@ class FetchAccountDetailsView(APIView):
 
 from rest_framework import viewsets
 from accounts.models import ProfitTakingProfile
-from .serializers import ProfitTakingProfileSerializer
+from .serializers import ProfitTakingProfileSerializer, UserSerializer # Added UserSerializer
 from rest_framework.exceptions import PermissionDenied
+
+class MeView(APIView):
+    """
+    API endpoint to retrieve details of the currently authenticated user.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        serializer = UserSerializer(request.user)
+        return Response(serializer.data)
 
 class ProfitTakingProfileViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
