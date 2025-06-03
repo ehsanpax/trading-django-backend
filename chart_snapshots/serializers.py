@@ -3,12 +3,23 @@ from .models import ChartSnapshotConfig, ChartSnapshot
 from trade_journal.serializers import TradeJournalAttachmentSerializer # Assuming you have this
 
 class ChartSnapshotConfigSerializer(serializers.ModelSerializer):
-    user = serializers.HiddenField(default=serializers.CurrentUserDefault())
+    # To make user field readable in GET responses, while still being auto-set on create.
+    # We can't use HiddenField if we want it in the output.
+    # Instead, we'll make it explicitly read_only for output, and rely on perform_create in view.
+    # Or, for a simpler approach that includes it in output:
+    user = serializers.PrimaryKeyRelatedField(read_only=True, default=serializers.CurrentUserDefault())
+    # Note: default=CurrentUserDefault() on a read_only=True field might seem contradictory.
+    # The default is used by DRF during deserialization if the field isn't provided,
+    # but since it's read_only, it won't be taken from input.
+    # The actual setting of user on create is best handled in view's perform_create.
+    # Let's adjust this to be more standard.
 
     class Meta:
         model = ChartSnapshotConfig
         fields = ['id', 'user', 'name', 'is_global', 'indicator_settings', 'created_at', 'updated_at']
-        read_only_fields = ('id', 'created_at', 'updated_at') # user is HiddenField with CurrentUserDefault
+        read_only_fields = ('id', 'user', 'created_at', 'updated_at') # Add user to read_only_fields
+
+    # perform_create in the ViewSet will handle setting the user.
 
     def validate_indicator_settings(self, value):
         # Add any specific validation for indicator_settings structure if needed
