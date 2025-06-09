@@ -61,6 +61,7 @@ INSTALLED_APPS = [
     'trade_history',
     'chart_snapshots.apps.ChartSnapshotsConfig',
     'analysis', # Added new analysis app
+    'bots',
 ]
 
 
@@ -238,6 +239,13 @@ INDICATOR_TIMEFRAMES = {
 CELERY_BROKER_URL = "redis://localhost:6379/0"
 # CELERY_BEAT_SCHEDULE is now defined in trading_platform/celery_app.py
 # Ensure django-celery-beat is not also scheduling this task via the admin if it's installed.
+
+CELERY_TASK_ROUTES = {
+    'bots.tasks.live_loop': {'queue': 'live_bots'},
+    'bots.tasks.run_backtest': {'queue': 'backtests'},
+    # Define other task routes here if needed, or use a wildcard for default queue
+    # 'myapp.tasks.*': {'queue': 'default_queue'},
+}
 
 CELERY_RESULT_BACKEND = "redis://localhost:6379/0" # Added for analysis app
 DATA_ROOT = BASE_DIR / 'analysis_data' # Added for analysis app
