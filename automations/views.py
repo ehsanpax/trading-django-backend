@@ -15,6 +15,12 @@ from rest_framework.permissions import IsAuthenticated
 from trade_journal.models import TradeJournal, TradeJournalAttachment, Trade
 import requests
 from django.core.files.base import ContentFile
+import uuid # Import uuid for validating trade_id
+
+# Import close_trade_globally
+from trades.services import close_trade_globally
+from rest_framework.exceptions import APIException, PermissionDenied, ValidationError
+from trading.models import Trade # Import Trade model for DoesNotExist exception
 
 class ExecuteAITradeView(APIView):
     """Accepts AI trade payload, injects an account, forwards to ExecuteTradeView."""
@@ -120,3 +126,31 @@ class ExecuteAITradeView(APIView):
                 )
         
         return Response(response.data, status=response.status_code)
+
+class CloseAIPositionView(APIView):
+    """
+    Accepts a trade ID and closes the position using the existing trades app function.
+    """
+    authentication_classes = [TokenAuthentication, SessionAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, trade_id: str, *args, **kwargs):
+        try:
+            valid_trade_id = uuid.UUID(trade_id)
+        except ValueError:
+            return Response({"detail": "Invalid trade ID format."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            result = close_trade_globally(request.user, valid_trade_id)
+            return Response(result, status=status.HTTP_200_OK)
+        except Trade.DoesNotExist:
+            return Response({"detail": "Trade not found."}, status=status.HTTP_404_NOT_FOUND)
+        except PermissionDenied as e:
+            return Response({"detail": str(e)}, status=status.HTTP_403_FORBIDDEN)
+        except ValidationError as e:
+            return Response({"detail": e.detail if hasattr(e, 'detail') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except APIException as e:
+            return Response({"detail": e.detail if hasattr(e, 'detail') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            print(f"Unexpected error in CloseAIPositionView: {e}")
+            return Response({"detail": "An unexpected error occurred while closing the trade."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
