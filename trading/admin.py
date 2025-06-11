@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Account, Trade, Watchlist, TradePerformance, IndicatorData
+from .models import Account, Trade, Watchlist, TradePerformance, IndicatorData, InstrumentSpecification # Added InstrumentSpecification
 # Removed: from trade_journal.models import TradeJournal, TradeJournalAttachment
 from risk.models import RiskManagement
 from accounts.models import MT5Account, CTraderAccount, Account as AccountsAccount # Alias to avoid name clash if Account from .models is different
@@ -32,3 +32,27 @@ class AccountAdmin(admin.ModelAdmin):
     search_fields = ('id__uuid__iexact', 'name__icontains', 'user__username__iexact', 'platform__iexact')
     readonly_fields = ('id', 'created_at')
     # autocomplete_fields = ['user'] # If UserAdmin has search_fields
+
+@admin.register(InstrumentSpecification)
+class InstrumentSpecificationAdmin(admin.ModelAdmin):
+    list_display = ('symbol', 'description', 'source_platform', 'contract_size', 'tick_size', 'tick_value', 'last_updated')
+    list_filter = ('source_platform', 'base_currency', 'quote_currency')
+    search_fields = ('symbol', 'description', 'base_currency', 'quote_currency')
+    readonly_fields = ('symbol', 'created_at', 'last_updated')
+    fieldsets = (
+        (None, {
+            'fields': ('symbol', 'description', 'source_platform')
+        }),
+        ('Contract Details', {
+            'fields': ('contract_size', 'base_currency', 'quote_currency', 'margin_currency')
+        }),
+        ('Volume Details', {
+            'fields': ('min_volume', 'max_volume', 'volume_step')
+        }),
+        ('Price Details', {
+            'fields': ('tick_size', 'tick_value', 'digits')
+        }),
+        ('Timestamps', {
+            'fields': ('created_at', 'last_updated')
+        }),
+    )

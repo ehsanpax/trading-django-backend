@@ -19,7 +19,7 @@ class BotSerializer(serializers.ModelSerializer):
     class Meta:
         model = Bot
         fields = [
-            'id', 'name', 'account', 'account_id', 'strategy_template', 
+            'id', 'name', 'account', 'account_id', 'strategy_template', # instrument_symbol removed
             'is_active', 'created_by', 'created_by_id', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at', 'account', 'created_by']
@@ -73,10 +73,10 @@ class BacktestRunSerializer(serializers.ModelSerializer):
     class Meta:
         model = BacktestRun
         fields = [
-            'id', 'config', 'config_label', 'bot_name', 'data_window_start', 
-            'data_window_end', 'equity_curve', 'stats', 'status', 'created_at'
+            'id', 'config', 'instrument_symbol', 'config_label', 'bot_name', 'data_window_start', 
+            'data_window_end', 'equity_curve', 'stats', 'simulated_trades_log', 'status', 'created_at'
         ]
-        read_only_fields = ['id', 'equity_curve', 'stats', 'created_at', 'config_label', 'bot_name']
+        read_only_fields = ['id', 'instrument_symbol', 'equity_curve', 'stats', 'simulated_trades_log', 'created_at', 'config_label', 'bot_name']
 
 class LiveRunSerializer(serializers.ModelSerializer):
     bot_name = serializers.CharField(source='bot_version.bot.name', read_only=True)
@@ -85,15 +85,16 @@ class LiveRunSerializer(serializers.ModelSerializer):
     class Meta:
         model = LiveRun
         fields = [
-            'id', 'bot_version', 'bot_name', 'bot_version_created_at', 'started_at', 
+            'id', 'bot_version', 'instrument_symbol', 'bot_name', 'bot_version_created_at', 'started_at', 
             'stopped_at', 'status', 'pnl_r', 'drawdown_r', 'last_error'
         ]
-        read_only_fields = ['id', 'started_at', 'stopped_at', 'pnl_r', 'drawdown_r', 'last_error', 'bot_name', 'bot_version_created_at']
+        read_only_fields = ['id', 'instrument_symbol', 'started_at', 'stopped_at', 'pnl_r', 'drawdown_r', 'last_error', 'bot_name', 'bot_version_created_at']
 
 # Serializers for specific actions
 class LaunchBacktestSerializer(serializers.Serializer):
     bot_version_id = serializers.UUIDField()
     backtest_config_id = serializers.UUIDField()
+    instrument_symbol = serializers.CharField(max_length=50)
     data_window_start = serializers.DateTimeField()
     data_window_end = serializers.DateTimeField()
 
@@ -112,3 +113,4 @@ class BotVersionCreateSerializer(serializers.Serializer):
 
 class StartLiveRunSerializer(serializers.Serializer):
     bot_version_id = serializers.UUIDField()
+    instrument_symbol = serializers.CharField(max_length=50)

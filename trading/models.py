@@ -315,3 +315,43 @@ class Order(models.Model):
             "filled_at",
             "updated_at",
         ])
+
+
+class InstrumentSpecification(models.Model):
+    """
+    Stores detailed specifications for a trading instrument, 
+    typically fetched from a broker or data provider.
+    """
+    symbol = models.CharField(max_length=50, primary_key=True, help_text="The trading instrument symbol, e.g., EURUSD, XAUUSD")
+    description = models.CharField(max_length=255, blank=True, default='', help_text="Description of the instrument")
+    source_platform = models.CharField(max_length=50, blank=True, help_text="Platform from which this spec was fetched, e.g., MT5, cTrader")
+    
+    contract_size = models.DecimalField(max_digits=20, decimal_places=5, null=True, blank=True, help_text="Number of units in one standard lot (e.g., 100000 for EURUSD)")
+    base_currency = models.CharField(max_length=20, blank=True, help_text="Base currency of the pair (e.g., EUR for EURUSD)")
+    quote_currency = models.CharField(max_length=20, blank=True, help_text="Quote currency of the pair (e.g., USD for EURUSD)")
+    margin_currency = models.CharField(max_length=20, blank=True, help_text="Currency used for margin calculation")
+    
+    min_volume = models.DecimalField(max_digits=12, decimal_places=5, null=True, blank=True, help_text="Minimum trade volume in lots")
+    max_volume = models.DecimalField(max_digits=12, decimal_places=5, null=True, blank=True, help_text="Maximum trade volume in lots")
+    volume_step = models.DecimalField(max_digits=12, decimal_places=5, null=True, blank=True, help_text="Smallest increment for trade volume in lots")
+    
+    tick_size = models.DecimalField(max_digits=15, decimal_places=10, null=True, blank=True, help_text="Smallest possible price change (e.g., 0.00001 for EURUSD)")
+    tick_value = models.DecimalField(max_digits=15, decimal_places=5, null=True, blank=True, help_text="Value of one 'tick_size' movement for one full lot, in account currency")
+    
+    digits = models.PositiveSmallIntegerField(null=True, blank=True, help_text="Number of decimal places for price display")
+    
+    # Spread, swap, etc., can be added if needed, but might be dynamic
+    # spread = models.DecimalField(max_digits=10, decimal_places=5, null=True, blank=True, help_text="Typical spread in points or price units")
+    # swap_long = models.DecimalField(max_digits=10, decimal_places=5, null=True, blank=True)
+    # swap_short = models.DecimalField(max_digits=10, decimal_places=5, null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_updated = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Instrument Specification"
+        verbose_name_plural = "Instrument Specifications"
+        ordering = ['symbol']
+
+    def __str__(self):
+        return f"{self.symbol} (Spec)"

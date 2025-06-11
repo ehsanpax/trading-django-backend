@@ -14,6 +14,7 @@ class Bot(models.Model):
         blank=True, # Allow bot to be unassigned or assigned later
         related_name="bots"
     )
+    # instrument_symbol removed from Bot model
     strategy_template = models.CharField(max_length=255, help_text="Filename of the strategy template, e.g., footprint_v1.py")
     is_active = models.BooleanField(default=False)
     created_by = models.ForeignKey(
@@ -66,10 +67,12 @@ class BacktestConfig(models.Model):
 class BacktestRun(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     config = models.ForeignKey(BacktestConfig, on_delete=models.CASCADE, related_name="runs")
+    instrument_symbol = models.CharField(max_length=50, help_text="The trading instrument symbol for this backtest run") # Added field
     data_window_start = models.DateTimeField()
     data_window_end = models.DateTimeField()
     equity_curve = JSONField(default=list, help_text="List of equity values over time") # e.g., [{"timestamp": "...", "equity": ...}]
     stats = JSONField(default=dict, help_text="Key performance indicators from the backtest")
+    simulated_trades_log = JSONField(default=list, null=True, blank=True, help_text="Log of all simulated trades")
     created_at = models.DateTimeField(auto_now_add=True)
     # status (e.g., pending, running, completed, failed) could be useful
     status = models.CharField(max_length=50, default="pending") 
@@ -83,6 +86,7 @@ class BacktestRun(models.Model):
 class LiveRun(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     bot_version = models.ForeignKey(BotVersion, on_delete=models.CASCADE, related_name="live_runs")
+    instrument_symbol = models.CharField(max_length=50, help_text="The trading instrument symbol for this live run") # Added field
     started_at = models.DateTimeField(auto_now_add=True)
     stopped_at = models.DateTimeField(null=True, blank=True)
     # Consider more granular status: pending, running, stopping, stopped, error

@@ -140,9 +140,10 @@ def create_default_bot_version(bot: Bot) -> BotVersion:
         return None
 
 
-def start_bot_live_run(bot_version_id: uuid.UUID) -> LiveRun:
+def start_bot_live_run(bot_version_id: uuid.UUID, instrument_symbol: str) -> LiveRun:
     """
-    Creates a LiveRun record for the given BotVersion and triggers the live_loop Celery task.
+    Creates a LiveRun record for the given BotVersion and instrument_symbol, 
+    then triggers the live_loop Celery task.
     """
     try:
         bot_version = BotVersion.objects.select_related('bot').get(id=bot_version_id)
@@ -156,11 +157,15 @@ def start_bot_live_run(bot_version_id: uuid.UUID) -> LiveRun:
         # if existing_active_run:
         #     raise ValidationError(f"Bot {bot_version.bot.name} already has an active live run (ID: {existing_active_run.id}).")
 
+        if not instrument_symbol:
+            raise ValidationError("Instrument symbol must be provided to start a live run.")
+
         live_run = LiveRun.objects.create(
             bot_version=bot_version,
+            instrument_symbol=instrument_symbol, # Added instrument_symbol
             status='PENDING' # Task will set to RUNNING
         )
-        logger.info(f"Created LiveRun {live_run.id} for BotVersion {bot_version_id}. Triggering live_loop task.")
+        logger.info(f"Created LiveRun {live_run.id} for BotVersion {bot_version_id} on {instrument_symbol}. Triggering live_loop task.")
         live_loop.delay(live_run.id)
         return live_run
     except BotVersion.DoesNotExist:
@@ -203,21 +208,26 @@ def stop_bot_live_run(live_run_id: uuid.UUID) -> LiveRun:
 
 
 def launch_backtest(bot_version_id: uuid.UUID, backtest_config_id: uuid.UUID, 
+                    instrument_symbol: str, # Added instrument_symbol
                     data_window_start: timezone.datetime, data_window_end: timezone.datetime) -> BacktestRun:
     """
-    Creates a BacktestRun record and triggers the run_backtest Celery task.
+    Creates a BacktestRun record for the given parameters and triggers the run_backtest Celery task.
     """
     try:
         bot_version = BotVersion.objects.get(id=bot_version_id)
         config = BacktestConfig.objects.get(id=backtest_config_id, bot_version=bot_version)
 
+        if not instrument_symbol:
+            raise ValidationError("Instrument symbol must be provided to launch a backtest.")
+
         backtest_run = BacktestRun.objects.create(
             config=config,
+            instrument_symbol=instrument_symbol, # Added instrument_symbol
             data_window_start=data_window_start,
             data_window_end=data_window_end,
             status='PENDING' # Task will set to RUNNING
         )
-        logger.info(f"Created BacktestRun {backtest_run.id}. Triggering run_backtest task.")
+        logger.info(f"Created BacktestRun {backtest_run.id} for {instrument_symbol}. Triggering run_backtest task.")
         run_backtest.delay(backtest_run.id)
         return backtest_run
     except BotVersion.DoesNotExist:

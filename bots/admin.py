@@ -24,14 +24,14 @@ class BacktestConfigAdmin(admin.ModelAdmin):
 
 @admin.register(BacktestRun)
 class BacktestRunAdmin(admin.ModelAdmin):
-    list_display = ('config', 'status', 'data_window_start', 'data_window_end', 'created_at')
-    list_filter = ('status', 'config__bot_version__bot__name')
-    search_fields = ('config__label', 'config__bot_version__bot__name')
+    list_display = ('id', 'config', 'instrument_symbol', 'status', 'data_window_start', 'data_window_end', 'created_at')
+    list_filter = ('status', 'instrument_symbol', 'config__bot_version__bot__name')
+    search_fields = ('id__iexact', 'instrument_symbol', 'config__label', 'config__bot_version__bot__name')
     readonly_fields = ('id', 'created_at', 'equity_curve', 'stats') # equity_curve and stats are results
 
 @admin.register(LiveRun)
 class LiveRunAdmin(admin.ModelAdmin):
-    list_display = ('bot_version', 'status', 'started_at', 'stopped_at', 'pnl_r', 'drawdown_r')
-    list_filter = ('status', 'bot_version__bot__name')
-    search_fields = ('bot_version__bot__name', 'status')
+    list_display = ('id', 'bot_version', 'instrument_symbol', 'status', 'started_at', 'stopped_at', 'pnl_r', 'drawdown_r')
+    list_filter = ('status', 'instrument_symbol', 'bot_version__bot__name')
+    search_fields = ('id__iexact', 'instrument_symbol', 'bot_version__bot__name', 'status')
     readonly_fields = ('id', 'started_at', 'stopped_at', 'pnl_r', 'drawdown_r', 'last_error')

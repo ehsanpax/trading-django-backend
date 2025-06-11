@@ -208,6 +208,7 @@ class LaunchBacktestAPIView(APIView):
                 backtest_run = services.launch_backtest(
                     bot_version_id=data['bot_version_id'],
                     backtest_config_id=data['backtest_config_id'],
+                    instrument_symbol=data['instrument_symbol'], # Added instrument_symbol
                     data_window_start=data['data_window_start'],
                     data_window_end=data['data_window_end']
                 )
@@ -237,7 +238,10 @@ class StartLiveRunAPIView(APIView):
                      return Response({"detail": "You do not have permission to start a live run for this bot version."},
                                     status=status.HTTP_403_FORBIDDEN)
 
-                live_run = services.start_bot_live_run(bot_version_id)
+                live_run = services.start_bot_live_run(
+                    bot_version_id=bot_version_id,
+                    instrument_symbol=serializer.validated_data['instrument_symbol'] # Added instrument_symbol
+                )
                 response_serializer = LiveRunSerializer(live_run)
                 return Response(response_serializer.data, status=status.HTTP_202_ACCEPTED)
             except BotVersion.DoesNotExist as e:

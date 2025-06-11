@@ -1,6 +1,6 @@
 # trading/serializers.py
 from rest_framework import serializers
-from .models import Account, Trade
+from .models import Account, Trade, InstrumentSpecification # Added InstrumentSpecification
 from risk.models import RiskManagement
 
 class AccountSerializer(serializers.ModelSerializer):
@@ -19,3 +19,8 @@ class RiskManagementSerializer(serializers.ModelSerializer):
         model = RiskManagement
         fields = '__all__'
 
+class InstrumentSpecificationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = InstrumentSpecification
+        fields = '__all__'
+        read_only_fields = ['created_at', 'last_updated']

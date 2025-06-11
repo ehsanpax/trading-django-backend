@@ -71,6 +71,66 @@ def load_m1_data_from_parquet(instrument_symbol: str, start_date: pd.Timestamp, 
         return pd.DataFrame()
 
 
+def load_footprint_data_from_parquet(instrument_symbol: str, start_date: pd.Timestamp, end_date: pd.Timestamp, filename: str = "footprints_1m.parquet") -> pd.DataFrame:
+    """
+    Loads 1-minute footprint data (OHLCV + delta, buy_volume, sell_volume) 
+    from local Parquet files for a given instrument and date range.
+    Data is expected to be stored in data/{symbol}/{filename}.
+    """
+    data_root = Path(settings.DATA_ROOT)
+    parquet_file_path = data_root / instrument_symbol / filename
+
+    logger.info(f"Loading footprint data for {instrument_symbol} from {parquet_file_path}, range: {start_date} to {end_date}")
+
+    if not parquet_file_path.exists():
+        logger.warning(f"Footprint Parquet file not found: {parquet_file_path}")
+        return pd.DataFrame()
+
+    try:
+        start_ts = pd.Timestamp(start_date, tz='UTC' if start_date.tzinfo is None else None)
+        end_ts = pd.Timestamp(end_date, tz='UTC' if end_date.tzinfo is None else None)
+        
+        if end_ts.hour == 0 and end_ts.minute == 0 and end_ts.second == 0: # Adjust to include full end day
+            end_ts = end_ts + pd.Timedelta(days=1) - pd.Timedelta(nanoseconds=1)
+
+        filters = [
+            ('time', '>=', start_ts),
+            ('time', '<=', end_ts)
+        ]
+        
+        logger.debug(f"Applying filters to Parquet read for footprints: {filters}")
+        table = pq.read_table(parquet_file_path, filters=filters)
+        df = table.to_pandas()
+        
+        if df.empty:
+            logger.info(f"No footprint data found for {instrument_symbol} in range {start_date} to {end_date} after filtering.")
+            return df
+
+        if not isinstance(df.index, pd.DatetimeIndex):
+            if 'time' in df.columns:
+                df = df.set_index('time')
+            else:
+                 df.index = pd.to_datetime(df.index)
+        
+        df = df.sort_index()
+        df = df.loc[start_ts : end_ts] # Final pandas filter
+
+        # Expected columns for footprint data (ensure they exist, or log warning)
+        expected_cols = ['open', 'high', 'low', 'close', 'volume', 'delta', 'buy_volume', 'sell_volume']
+        missing_cols = [col for col in expected_cols if col not in df.columns]
+        if missing_cols:
+            logger.warning(f"Footprint data for {instrument_symbol} is missing expected columns: {missing_cols} from file {parquet_file_path}")
+            # Depending on strictness, you might return empty df or raise error
+            # For now, return df as is, strategy will have to handle missing data.
+
+        logger.info(f"Successfully loaded {len(df)} footprint bars for {instrument_symbol} from Parquet.")
+        return df
+
+    except Exception as e:
+        logger.error(f"Error loading footprint data from Parquet for {instrument_symbol}: {e}", exc_info=True)
+        return pd.DataFrame()
+
+
 def resample_data(df_m1: pd.DataFrame, target_timeframe: str) -> pd.DataFrame:
     """
     Resamples M1 Pandas DataFrame to target timeframe (e.g., "M5", "M15", "H1").
@@ -95,6 +155,13 @@ def resample_data(df_m1: pd.DataFrame, target_timeframe: str) -> pd.DataFrame:
         'close': 'last',
         'volume': 'sum'
     }
+    # If footprint data is being resampled, decide how to aggregate delta, buy_volume, sell_volume
+    if 'delta' in df_m1.columns:
+        resampling_rules['delta'] = 'sum'
+    if 'buy_volume' in df_m1.columns:
+        resampling_rules['buy_volume'] = 'sum'
+    if 'sell_volume' in df_m1.columns:
+        resampling_rules['sell_volume'] = 'sum'
 
     # Map common timeframe strings to pandas offset aliases
     timeframe_mapping = {
@@ -154,68 +221,93 @@ if __name__ == '__main__':
     test_symbol_for_processor = "TEST_EURUSD"
     test_parquet_dir = data_root_path / test_symbol_for_processor
     test_parquet_dir.mkdir(parents=True, exist_ok=True)
-    test_parquet_file = test_parquet_dir / "M1.parquet"
-
-    # Create sample M1 data
+    
+    # --- Test M1 OHLCV data ---
+    m1_ohlcv_file = test_parquet_dir / "M1.parquet"
     sample_start_time = pd.Timestamp("2023-01-01 00:00:00", tz='UTC')
     sample_end_time = pd.Timestamp("2023-01-01 03:00:00", tz='UTC')
     sample_index = pd.date_range(start=sample_start_time, end=sample_end_time, freq='1min')
-    sample_data = {
+    sample_data_m1 = {
         'open': [i + 1.0 for i in range(len(sample_index))],
         'high': [i + 1.5 for i in range(len(sample_index))],
         'low': [i + 0.5 for i in range(len(sample_index))],
         'close': [i + 1.2 for i in range(len(sample_index))],
         'volume': [100 + i * 10 for i in range(len(sample_index))]
     }
-    sample_df_m1 = pd.DataFrame(sample_data, index=sample_index)
+    sample_df_m1 = pd.DataFrame(sample_data_m1, index=sample_index)
     sample_df_m1.index.name = 'time'
     
     if not sample_df_m1.empty:
         try:
-            sample_df_m1.to_parquet(test_parquet_file)
-            print(f"Created dummy Parquet file: {test_parquet_file}")
+            sample_df_m1.to_parquet(m1_ohlcv_file)
+            print(f"Created dummy M1 OHLCV Parquet file: {m1_ohlcv_file}")
 
-            # Test load_m1_data_from_parquet
             print(f"\n--- Testing load_m1_data_from_parquet ---")
-            loaded_df = load_m1_data_from_parquet(
+            loaded_m1_df = load_m1_data_from_parquet(
                 test_symbol_for_processor,
                 pd.Timestamp("2023-01-01 00:30:00", tz='UTC'),
                 pd.Timestamp("2023-01-01 01:30:00", tz='UTC')
             )
-            print(f"Loaded {len(loaded_df)} bars from Parquet.")
-            if not loaded_df.empty:
-                print(loaded_df.head())
-                print(loaded_df.tail())
-
-            # Test resample_data
-            if not loaded_df.empty:
-                print(f"\n--- Testing resample_data to M5 ---")
-                resampled_m5_df = resample_data(loaded_df, "M5") # Using "M5"
-                print(f"Resampled to M5, {len(resampled_m5_df)} bars.")
-                if not resampled_m5_df.empty:
-                    print(resampled_m5_df.head())
-                
-                print(f"\n--- Testing resample_data to H1 ---")
-                resampled_h1_df = resample_data(loaded_df, "H1") # Using "H1"
-                print(f"Resampled to H1, {len(resampled_h1_df)} bars.")
-                if not resampled_h1_df.empty:
-                    print(resampled_h1_df.head())
-
-            # Test calculate_all_indicators (placeholder)
-            if not loaded_df.empty:
-                print(f"\n--- Testing calculate_all_indicators ---")
-                indicators_df = calculate_all_indicators(loaded_df.copy()) # Use copy
-                print(f"Indicators DataFrame (placeholder) has {len(indicators_df.columns)} columns.")
-                if not indicators_df.empty:
-                    print(indicators_df.head())
+            print(f"Loaded {len(loaded_m1_df)} M1 OHLCV bars from Parquet.")
+            if not loaded_m1_df.empty:
+                print(loaded_m1_df.head())
         except Exception as e:
-            print(f"Error during data_processor self-test: {e}")
-        finally:
-            # Clean up dummy file
-            if test_parquet_file.exists():
-                # os.remove(test_parquet_file)
-                # print(f"Removed dummy Parquet file: {test_parquet_file}")
-                pass # Keep it for manual inspection if needed
+            print(f"Error during M1 OHLCV self-test: {e}")
 
+    # --- Test Footprint data ---
+    footprint_file = test_parquet_dir / "footprints_1m.parquet"
+    sample_data_footprint = {
+        'open': [i + 1.0 for i in range(len(sample_index))],
+        'high': [i + 1.5 for i in range(len(sample_index))],
+        'low': [i + 0.5 for i in range(len(sample_index))],
+        'close': [i + 1.2 for i in range(len(sample_index))],
+        'volume': [100 + i * 10 for i in range(len(sample_index))],
+        'delta': [ (i % 5) - 2 for i in range(len(sample_index))], # Simple delta
+        'buy_volume': [ (100 + i * 10) // 2 + ((i % 5) - 2) for i in range(len(sample_index))],
+        'sell_volume': [ (100 + i * 10) // 2 for i in range(len(sample_index))]
+    }
+    # Ensure buy_volume - sell_volume = delta (approx)
+    for i in range(len(sample_index)):
+        sample_data_footprint['buy_volume'][i] = sample_data_footprint['sell_volume'][i] + sample_data_footprint['delta'][i]
+
+
+    sample_df_footprint = pd.DataFrame(sample_data_footprint, index=sample_index)
+    sample_df_footprint.index.name = 'time'
+
+    if not sample_df_footprint.empty:
+        try:
+            sample_df_footprint.to_parquet(footprint_file)
+            print(f"Created dummy footprints_1m Parquet file: {footprint_file}")
+
+            print(f"\n--- Testing load_footprint_data_from_parquet ---")
+            loaded_fp_df = load_footprint_data_from_parquet(
+                test_symbol_for_processor,
+                pd.Timestamp("2023-01-01 00:30:00", tz='UTC'),
+                pd.Timestamp("2023-01-01 01:30:00", tz='UTC')
+            )
+            print(f"Loaded {len(loaded_fp_df)} footprint bars from Parquet.")
+            if not loaded_fp_df.empty:
+                print(loaded_fp_df.head())
+                # Check for expected columns
+                print(f"Footprint DF columns: {loaded_fp_df.columns.tolist()}")
+
+            # Test resample_data with footprint data
+            if not loaded_fp_df.empty:
+                print(f"\n--- Testing resample_data (footprint) to M5 ---")
+                resampled_fp_m5_df = resample_data(loaded_fp_df, "M5")
+                print(f"Resampled footprint to M5, {len(resampled_fp_m5_df)} bars.")
+                if not resampled_fp_m5_df.empty:
+                    print(resampled_fp_m5_df.head())
+                    print(f"Resampled Footprint M5 DF columns: {resampled_fp_m5_df.columns.tolist()}")
+
+
+        except Exception as e:
+            print(f"Error during footprint self-test: {e}")
+        # finally:
+            # Clean up dummy files
+            # if m1_ohlcv_file.exists(): os.remove(m1_ohlcv_file)
+            # if footprint_file.exists(): os.remove(footprint_file)
+            # print(f"Removed dummy Parquet files.")
+            # pass
     else:
-        print("Sample M1 DataFrame is empty, skipping Parquet creation and tests.")
+        print("Sample Footprint DataFrame is empty, skipping Parquet creation and tests.")
