@@ -135,13 +135,9 @@ class CloseAIPositionView(APIView):
     permission_classes = [IsAuthenticated]
 
     def delete(self, request, trade_id: str, *args, **kwargs):
-        try:
-            valid_trade_id = uuid.UUID(trade_id)
-        except ValueError:
-            return Response({"detail": "Invalid trade ID format."}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            result = close_trade_globally(request.user, valid_trade_id)
+            result = close_trade_globally(request.user, trade_id)
             return Response(result, status=status.HTTP_200_OK)
         except Trade.DoesNotExist:
             return Response({"detail": "Trade not found."}, status=status.HTTP_404_NOT_FOUND)

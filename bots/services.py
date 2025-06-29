@@ -228,7 +228,12 @@ def launch_backtest(bot_version_id: uuid.UUID, backtest_config_id: uuid.UUID,
             status='PENDING' # Task will set to RUNNING
         )
         logger.info(f"Created BacktestRun {backtest_run.id} for {instrument_symbol}. Triggering run_backtest task.")
-        run_backtest.delay(backtest_run.id)
+        run_backtest.apply_async(
+            kwargs={
+                "backtest_run_id": backtest_run.id,
+            },
+            queue="backtests"
+        )
         return backtest_run
     except BotVersion.DoesNotExist:
         logger.error(f"BotVersion with ID {bot_version_id} not found for backtest.")

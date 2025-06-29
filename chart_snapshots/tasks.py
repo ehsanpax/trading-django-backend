@@ -69,9 +69,9 @@ def generate_chart_snapshot_task(self, config_id=None, journal_entry_id=None, ad
         # Log response content for debugging 422 errors, if possible
         try:
             response_json = response.json()
-            logger.info(f"Chart-img.com API Response (status {response.status_code}): {response_json}")
+            logger.info(f"Chart-img.com API Response (status {response.status_code}):")
         except requests.exceptions.JSONDecodeError:
-            logger.info(f"Chart-img.com API Response (status {response.status_code}, not JSON): {response.text}")
+            logger.info(f"Chart-img.com API Response (status {response.status_code}, not JSON)")
 
         response.raise_for_status()  # Raise HTTPError for bad responses (4XX or 5XX)
     

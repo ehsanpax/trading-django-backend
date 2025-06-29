@@ -15,7 +15,9 @@ router.register(r'live-runs', views.LiveRunViewSet, basename='liverun')
 urlpatterns = [
     path('', include(router.urls)),
     path('strategy-templates/', views.ListStrategyTemplatesAPIView.as_view(), name='list-strategy-templates'),
+    path('strategy-templates/<str:template_filename>/parameters/', views.StrategyTemplateParametersAPIView.as_view(), name='strategy-template-parameters'),
     path('backtests/launch/', views.LaunchBacktestAPIView.as_view(), name='launch-backtest'),
+    path('backtest-runs/<uuid:backtest_run_id>/chart-data/', views.BacktestChartDataAPIView.as_view(), name='backtest-chart-data'),
     path('live-runs/start/', views.StartLiveRunAPIView.as_view(), name='start-liverun'),
     path('live-runs/<uuid:live_run_id>/stop/', views.StopLiveRunAPIView.as_view(), name='stop-liverun'),
 ]

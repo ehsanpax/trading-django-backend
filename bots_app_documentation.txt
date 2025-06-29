@@ -1,0 +1,196 @@
+# Bots App Documentation
+
+## 1. Overview
+
+The `bots` app is a Django application designed to facilitate the creation, backtesting, and live deployment of automated trading strategies within the trading platform. It allows users to define strategy logic in Python files, manage versions of these strategies with different parameters, configure and run backtests against historical data, and manage live trading sessions.
+
+## 2. Core Components & Files
+
+The `bots` app is structured into several key Python modules and a directory for strategy templates:
+
+*   **`models.py`**: Defines the Django data models for storing information about bots, their versions, backtest configurations, backtest results, and live run sessions.
+*   **`strategy_templates/`**: A directory containing Python files, where each file defines the logic for a specific trading strategy (e.g., `ema_crossover_v1.py`, `box_breakout_v1.py`).
+*   **`serializers.py`**: Contains Django Rest Framework (DRF) serializers for converting model instances to JSON (and vice-versa) for the API.
+*   **`views.py`**: Implements the API views (ViewSets and APIView classes) that handle requests to API endpoints, interacting with models and services.
+*   **`urls.py`**: Defines the URL routing for the `bots` app's API endpoints.
+*   **`services.py`**: Contains business logic, helper functions, and service layer operations, such as loading strategy code, creating bot versions, and launching backtests/live runs.
+*   **`tasks.py`**: Defines Celery asynchronous tasks, primarily for running computationally intensive backtests (`run_backtest`) and managing live trading loops (`live_loop`).
+*   **`admin.py`**: Configures how the `bots` app models are displayed and managed in the Django admin interface.
+
+## 3. Data Models (`models.py`)
+
+The core data structures of the `bots` app are:
+
+*   **`Bot`**:
+    *   The top-level entity representing a trading bot.
+    *   Fields: `id` (UUID), `name` (CharField), `account` (ForeignKey to `accounts.Account`, nullable), `strategy_template` (CharField, filename like "ema_crossover_v1.py"), `is_active` (BooleanField), `created_by` (ForeignKey to User), `created_at`, `updated_at`.
+    *   Represents a conceptual trading robot linked to a specific strategy template file.
+
+*   **`BotVersion`**:
+    *   Represents an immutable version of a `Bot`'s strategy, with specific code and parameters.
+    *   Fields: `id` (UUID), `bot` (ForeignKey to `Bot`), `code_hash` (CharField, SHA256 hash of strategy code + params), `params` (JSONField for strategy parameters), `notes` (TextField), `created_at`.
+    *   `unique_together = ('bot', 'code_hash')` ensures a bot cannot have multiple versions with the exact same code and parameters.
+    *   Immutability (once created, a version's code/params shouldn't change) is enforced by the hashing mechanism.
+
+*   **`BacktestConfig`**:
+    *   Configuration settings for a specific backtest run of a `BotVersion`.
+    *   Fields: `id` (UUID), `bot_version` (ForeignKey to `BotVersion`), `risk_json` (JSONField for custom risk settings like max loss, lot size), `slippage_ms` (IntegerField), `slippage_r` (DecimalField for slippage in R-units/percentage), `label` (CharField for user description), `created_at`.
+
+*   **`BacktestRun`**:
+    *   Stores the results and details of a single backtest execution.
+    *   Fields: `id` (UUID), `config` (ForeignKey to `BacktestConfig`), `instrument_symbol` (CharField), `data_window_start` (DateTimeField), `data_window_end` (DateTimeField), `equity_curve` (JSONField), `stats` (JSONField for performance metrics), `simulated_trades_log` (JSONField), `status` (CharField, e.g., "pending", "running", "completed", "failed"), `created_at`.
+
+*   **`LiveRun`**:
+    *   Tracks a live deployment session of a `BotVersion`.
+    *   Fields: `id` (UUID), `bot_version` (ForeignKey to `BotVersion`), `instrument_symbol` (CharField), `started_at` (DateTimeField), `stopped_at` (DateTimeField, nullable), `status` (CharField with choices like "PENDING", "RUNNING", "STOPPED", "ERROR"), `pnl_r` (DecimalField), `drawdown_r` (DecimalField), `last_error` (TextField).
+
+## 4. Strategy Template Structure
+
+Strategy logic is defined in Python files within the `bots/strategy_templates/` directory. Each file typically contains:
+
+*   **Parameters Dataclass**: A `dataclass` (e.g., `EMACrossoverParams`) defining the configurable parameters for the strategy. It should include a `from_dict` class method.
+*   **Strategy Class**:
+    *   The main class implementing the strategy logic. By convention, this class is often named `Strategy` (as in `ema_crossover_v1.py`) or follows a pattern like `ModuleNameStrategy` (e.g., `BoxBreakoutV1Strategy`). The `load_strategy_template` service attempts to find a class by these conventions.
+    *   **`DEFAULT_PARAMS` (class attribute)**: A dictionary specifying default values for the strategy's parameters.
+    *   **`__init__(self, params, risk_settings, instrument_symbol, account_id, instrument_spec, pip_value)`**: Constructor that initializes the strategy with runtime parameters, risk settings (from `BacktestConfig` or live account settings), and instrument details. It uses the `Params` dataclass.
+    *   **`get_min_bars_needed(self, buffer_bars=10)` (method)**: Calculates and returns the minimum number of historical data bars required by the strategy for its indicators and lookbacks. Used by the backtesting task.
+    *   **`_ensure_indicators(self, df_input: pd.DataFrame)` (method)**: Takes a DataFrame of OHLCV data and calculates necessary technical indicators (e.g., EMAs, ATR, MACD) using libraries like `pandas-ta`. It should handle data preparation, index validation, and append indicator columns to the DataFrame.
+    *   **`run_tick(self, df_current_window: pd.DataFrame, account_equity: float)` (method)**: The core logic executed for each new bar of data. It receives the current window of data (including indicators) and current account equity. It should return a list of actions (e.g., dictionaries specifying 'OPEN_TRADE' with trade details).
+    *   **Helper methods** (e.g., `_calculate_lot_size`, `_place_trade_signal`): Internal methods for common tasks like position sizing and formatting trade signals.
+
+## 5. API Endpoints & Views (`urls.py`, `views.py`)
+
+The `bots` app exposes RESTful API endpoints for managing its resources:
+
+*   **Model ViewSets (DRF `DefaultRouter`)**: Provide standard CRUD operations (List, Create, Retrieve, Update, Delete) for:
+    *   `/api/bots/bots/`: `BotViewSet`
+    *   `/api/bots/versions/`: `BotVersionViewSet`
+    *   `/api/bots/backtest-configs/`: `BacktestConfigViewSet`
+    *   `/api/bots/backtest-runs/`: `BacktestRunViewSet` (ReadOnly)
+    *   `/api/bots/live-runs/`: `LiveRunViewSet` (ReadOnly)
+    *   Permissions are generally `IsAuthenticated`, with queryset filtering to ensure users only access their own bot-related data unless they are staff.
+
+*   **Custom API Views**:
+    *   `GET /api/bots/strategy-templates/`: `ListStrategyTemplatesAPIView` - Lists available `.py` strategy template filenames from the `strategy_templates/` directory.
+    *   `POST /api/bots/backtests/launch/`: `LaunchBacktestAPIView` - Accepts `bot_version_id`, `backtest_config_id`, `instrument_symbol`, and date range. Creates a `BacktestRun` and triggers the `run_backtest` Celery task.
+    *   `POST /api/bots/live-runs/start/`: `StartLiveRunAPIView` - Accepts `bot_version_id` and `instrument_symbol`. Creates a `LiveRun` and triggers the `live_loop` Celery task.
+    *   `POST /api/bots/live-runs/<uuid:live_run_id>/stop/`: `StopLiveRunAPIView` - Sets the status of a `LiveRun` to 'STOPPING'.
+
+*   **Serializers (`serializers.py`)**:
+    *   Model serializers (`BotSerializer`, `BotVersionSerializer`, etc.) handle data validation and conversion between Python objects and JSON for API requests/responses.
+    *   Action-specific serializers (`LaunchBacktestSerializer`, `BotVersionCreateSerializer`, `StartLiveRunSerializer`) define the expected payload for custom API actions.
+    *   `BotVersionCreateSerializer` notably expects `strategy_file_content` (the full Python code of the strategy) when creating a new version, which is then used for hashing.
+
+## 6. Service Layer (`services.py`)
+
+The service layer encapsulates business logic and operations related to bots:
+
+*   **`load_strategy_template(strategy_template_name)`**: Dynamically imports a strategy module from `bots/strategy_templates/` and attempts to find the main strategy class within it (looking for `Strategy` or `ModuleNameStrategy` by convention).
+*   **`generate_code_hash(strategy_code, params)`**: Creates a SHA256 hash from the strategy's Python code string and its parameters (sorted for consistency). This hash is used to identify unique `BotVersion`s.
+*   **`create_bot_version(bot, strategy_code, params, notes)`**: Creates a new `BotVersion` instance. It uses `generate_code_hash` and prevents exact duplicates for the same bot.
+*   **`get_strategy_template_content(template_filename)`**: Reads and returns the raw string content of a strategy template file.
+*   **`create_default_bot_version(bot)`**: Called automatically when a new `Bot` is created. It reads the content of the `bot.strategy_template` file and calls `create_bot_version` with empty parameters to create an initial version that uses the strategy's internal defaults.
+*   **`launch_backtest(...)`**: Creates a `BacktestRun` model instance with the provided configuration and triggers the `run_backtest` Celery task.
+*   **`start_bot_live_run(...)`**: Creates a `LiveRun` model instance and triggers the `live_loop` Celery task. Includes validation (e.g., bot active, account assigned).
+*   **`stop_bot_live_run(...)`**: Sets the status of a `LiveRun` to 'STOPPING'. The `live_loop` task is expected to observe this status and terminate gracefully.
+
+## 7. Asynchronous Tasks (`tasks.py`)
+
+Celery tasks handle long-running and periodic operations:
+
+*   **`run_backtest(backtest_run_id)`**:
+    1.  Retrieves `BacktestRun`, `BacktestConfig`, `BotVersion`, and `Bot` details.
+    2.  Sets `BacktestRun` status to 'RUNNING'.
+    3.  Loads historical market data (e.g., M1 OHLCV from Parquet files via `analysis.utils.data_processor`).
+    4.  Loads the strategy class using `services.load_strategy_template`.
+    5.  Initializes the strategy instance with parameters from `BotVersion.params` and risk settings from `BacktestConfig.risk_json`.
+    6.  Calculates `min_bars_needed` using `strategy_instance.get_min_bars_needed()`.
+    7.  Iterates through the historical data, preparing a sliding window (`current_window_df`) for each tick.
+    8.  Calls `strategy_instance.run_tick(current_window_df, current_sim_equity)` to get trading actions.
+    9.  Simulates trade execution:
+        *   Manages a list of `open_sim_positions`.
+        *   Checks for SL/TP hits on open positions at each bar.
+        *   Calculates P&L using instrument specifications (tick size, tick value).
+        *   Updates `current_sim_equity`.
+        *   Logs simulated trades (entry, exit, P&L) to `simulated_trades_log`.
+    10. Records the `simulated_equity_curve`.
+    11. At the end, closes any remaining open positions.
+    12. Calculates final performance `stats` (total trades, P&L, win/loss count).
+    13. Saves all results (`equity_curve`, `stats`, `simulated_trades_log`) to the `BacktestRun` model and sets status to 'COMPLETED' or 'FAILED'.
+
+*   **`live_loop(live_run_id)`**:
+    *   (Conceptual - current implementation is a placeholder)
+    *   Retrieves `LiveRun`, `BotVersion`, `Bot`, and `Account` details.
+    *   Sets `LiveRun` status to 'RUNNING'.
+    *   Loads and initializes the strategy instance.
+    *   Periodically (e.g., driven by Celery Beat or another scheduler):
+        *   Fetches latest market data for the `LiveRun.instrument_symbol`.
+        *   Calls `strategy_instance.run_tick()` with the new data.
+        *   If actions are returned (e.g., 'OPEN_TRADE'):
+            *   Interacts with the platform's trading execution services (e.g., `trades` app) to place real orders.
+            *   Updates `LiveRun` with P&L, status, etc.
+        *   Checks for stop signals (e.g., `LiveRun.status == 'STOPPING'`).
+
+## 8. Key Workflows
+
+### A. Creating a New Bot and Version
+
+1.  **Via API (Bot Creation)**: User POSTs to `/api/bots/bots/` with `name`, `strategy_template` (e.g., "ema_crossover_v1.py"), and optionally `account_id`.
+    *   `BotViewSet` creates a `Bot` instance.
+    *   `perform_create` in `BotViewSet` calls `services.create_default_bot_version(new_bot)`.
+    *   `services.create_default_bot_version` reads the content of `bots/strategy_templates/ema_crossover_v1.py`, generates a hash with empty params, and creates the first `BotVersion`.
+2.  **Via API (Specific Version Creation)**: User POSTs to `/api/bots/versions/` with `bot_id`, `strategy_file_content` (the full Python code as a string), `params` (JSON), and `notes`.
+    *   `BotVersionViewSet` (custom `create` method) calls `services.create_bot_version`.
+    *   `services.create_bot_version` generates a hash of the provided code and params, then creates and saves the `BotVersion`. It avoids creating exact duplicates.
+
+### B. Running a Backtest
+
+1.  **Prerequisites**: A `Bot` and at least one `BotVersion` must exist.
+2.  **User Action (API)**: User creates a `BacktestConfig` via POST to `/api/bots/backtest-configs/`, linking it to a `BotVersion` and specifying `risk_json`, `slippage_ms`, `slippage_r`, and a `label`.
+3.  **User Action (API)**: User POSTs to `/api/bots/backtests/launch/` with:
+    *   `bot_version_id`
+    *   `backtest_config_id`
+    *   `instrument_symbol` (e.g., "XAUUSD")
+    *   `data_window_start` (datetime)
+    *   `data_window_end` (datetime)
+4.  **System Action (`views.LaunchBacktestAPIView`)**:
+    *   Validates the request using `LaunchBacktestSerializer`.
+    *   Calls `services.launch_backtest(...)`.
+5.  **System Action (`services.launch_backtest`)**:
+    *   Creates a new `BacktestRun` record with status 'PENDING'.
+    *   Dispatches the `run_backtest` Celery task with the `BacktestRun.id`.
+6.  **System Action (Celery Worker - `tasks.run_backtest`)**:
+    *   The task executes as described in section 7 ("Asynchronous Tasks").
+    *   Updates the `BacktestRun` record with results and status ('COMPLETED' or 'FAILED').
+
+### C. Running a Live Bot (Conceptual Flow)
+
+1.  **Prerequisites**: A `Bot` (marked `is_active=True`, linked to an `Account`) and a `BotVersion` must exist.
+2.  **User Action (API)**: User POSTs to `/api/bots/live-runs/start/` with `bot_version_id` and `instrument_symbol`.
+3.  **System Action (`views.StartLiveRunAPIView`)**:
+    *   Validates request using `StartLiveRunSerializer`.
+    *   Calls `services.start_bot_live_run(...)`.
+4.  **System Action (`services.start_bot_live_run`)**:
+    *   Creates a `LiveRun` record with status 'PENDING'.
+    *   Dispatches the `live_loop` Celery task with `LiveRun.id`.
+5.  **System Action (Celery Worker - `tasks.live_loop`)**:
+    *   Task starts, sets `LiveRun.status` to 'RUNNING'.
+    *   (If fully implemented) Enters a loop, driven by Celery Beat or internal scheduling:
+        *   Fetches live market data.
+        *   Calls strategy's `run_tick()`.
+        *   If trade signals: interacts with actual trading services (e.g., `trades` app) to execute orders.
+        *   Monitors for stop signals (e.g., user calls `/api/bots/live-runs/<id>/stop/`, which updates `LiveRun.status` via `services.stop_bot_live_run`).
+        *   Updates `LiveRun` P&L, status.
+6.  **Stopping a Live Bot**: User POSTs to `/api/bots/live-runs/<uuid:live_run_id>/stop/`.
+    *   `views.StopLiveRunAPIView` calls `services.stop_bot_live_run`.
+    *   `services.stop_bot_live_run` sets `LiveRun.status` to 'STOPPING'. The `live_loop` task should detect this and terminate.
+
+## 9. Interactions with Other Apps
+
+*   **`accounts`**: The `Bot` model has a ForeignKey to `accounts.Account`, linking a bot to a specific trading account for live trading and potentially for fetching account details like balance during backtesting (though backtests often use a fixed initial equity).
+*   **`trading`**: The `InstrumentSpecification` model from the `trading` app is used by strategies to get details like tick size, contract size, and price digits, which are crucial for accurate P&L calculation and order sizing.
+*   **`analysis.utils.data_processor`**: The `run_backtest` task uses functions like `load_m1_data_from_parquet` from this module to fetch historical OHLCV data for simulations.
+*   **`risk` (Conceptual)**: While `BacktestConfig.risk_json` allows custom risk settings per backtest, live trading would typically integrate with the main `risk` app's `RiskManagement` models associated with the bot's `Account` to enforce live risk rules.
+*   **`trades` (Future for Live Trading)**: For live trading, the `live_loop` task, upon receiving a trade signal from a strategy, would need to interact with services or views in the `trades` app to execute actual market orders.
+
+This document provides a comprehensive overview of the `bots` app.

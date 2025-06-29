@@ -107,10 +107,72 @@ class LaunchBacktestSerializer(serializers.Serializer):
 class BotVersionCreateSerializer(serializers.Serializer):
     bot_id = serializers.UUIDField()
     # strategy_code as a string field, or expect file upload handled by view
-    strategy_file_content = serializers.CharField(write_only=True, help_text="Full content of the strategy's .py file")
+    strategy_file_content = serializers.CharField(write_only=True, help_text="Full content of the strategy's .py file. If empty, uses the bot's default template.", allow_blank=True, required=False)
     params = serializers.JSONField()
     notes = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
 class StartLiveRunSerializer(serializers.Serializer):
     bot_version_id = serializers.UUIDField()
     instrument_symbol = serializers.CharField(max_length=50)
+
+# --- Serializers for Charting Data ---
+
+class BacktestOhlcvDataSerializer(serializers.Serializer):
+    # For ApexCharts, OHLC data is often [{ x: timestamp, y: [o, h, l, c] }]
+    # We can achieve this structure in the view or a custom serializer field if needed,
+    # but for now, let's serialize individual fields.
+    # The view can then structure it.
+    timestamp = serializers.DateTimeField()
+    open = serializers.DecimalField(max_digits=19, decimal_places=8)
+    high = serializers.DecimalField(max_digits=19, decimal_places=8)
+    low = serializers.DecimalField(max_digits=19, decimal_places=8)
+    close = serializers.DecimalField(max_digits=19, decimal_places=8)
+    volume = serializers.IntegerField(required=False, allow_null=True)
+
+    # If we were using a ModelSerializer:
+    # class Meta:
+    #     model = BacktestOhlcvData
+    #     fields = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
+
+class BacktestIndicatorDataSerializer(serializers.Serializer):
+    timestamp = serializers.DateTimeField()
+    indicator_name = serializers.CharField()
+    value = serializers.DecimalField(max_digits=19, decimal_places=8)
+
+    # If we were using a ModelSerializer:
+    # class Meta:
+    #     model = BacktestIndicatorData
+    #     fields = ['timestamp', 'indicator_name', 'value']
+
+
+class BacktestTradeMarkerSerializer(serializers.Serializer):
+    """
+    Serializes trade information from BacktestRun.simulated_trades_log 
+    into a format suitable for chart markers.
+    """
+    entry_timestamp = serializers.DateTimeField()
+    entry_price = serializers.FloatField()
+    exit_timestamp = serializers.DateTimeField(allow_null=True) # Can be null if still open (though not for backtests)
+    exit_price = serializers.FloatField(allow_null=True)
+    direction = serializers.CharField() # BUY or SELL
+    volume = serializers.FloatField()
+    pnl = serializers.FloatField(required=False)
+    closure_reason = serializers.CharField(required=False)
+    # id = serializers.CharField() # Original position ID
+
+class BacktestChartDataSerializer(serializers.Serializer):
+    """
+    Combines OHLCV, indicators, and trade markers for a backtest run.
+    This serializer will be populated in the view.
+    """
+    ohlcv_data = BacktestOhlcvDataSerializer(many=True, read_only=True)
+    indicator_data = serializers.DictField( # Keyed by indicator name, value is list of points
+        child=BacktestIndicatorDataSerializer(many=True, read_only=True),
+        read_only=True
+    )
+    trade_markers = BacktestTradeMarkerSerializer(many=True, read_only=True)
+    # Could also include BacktestRun metadata if needed
+    # backtest_run_id = serializers.UUIDField(read_only=True)
+    # instrument_symbol = serializers.CharField(read_only=True)
+    # data_window_start = serializers.DateTimeField(read_only=True)
+    # data_window_end = serializers.DateTimeField(read_only=True)

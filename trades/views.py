@@ -418,6 +418,7 @@ class AllOpenPositionsLiveView(APIView):
 
         for trade_data in serialized_db_trades:
             trade_data["source"] = "database"
+            trade_data.pop("reason", None)  # Remove 'reason' field if it exists
             if trade_data.get("order_id") is not None:
                 db_trade_order_ids.add(trade_data["order_id"])
             final_all_open_positions.append(trade_data)

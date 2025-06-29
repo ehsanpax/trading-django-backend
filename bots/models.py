@@ -83,6 +83,44 @@ class BacktestRun(models.Model):
     def __str__(self):
         return f"BacktestRun {self.id} for {self.config.label or self.config.id} ({self.status})"
 
+# New models for storing detailed backtest chart data (TimescaleDB hypertables)
+class BacktestOhlcvData(models.Model):
+    id = models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')
+    backtest_run = models.ForeignKey(BacktestRun, on_delete=models.CASCADE, related_name="ohlcv_data")
+    timestamp = models.DateTimeField(db_index=True) # This will be the time dimension for TimescaleDB
+    open = models.DecimalField(max_digits=19, decimal_places=8)
+    high = models.DecimalField(max_digits=19, decimal_places=8)
+    low = models.DecimalField(max_digits=19, decimal_places=8)
+    close = models.DecimalField(max_digits=19, decimal_places=8)
+    volume = models.BigIntegerField(null=True, blank=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['backtest_run', 'timestamp']), # Composite index for faster lookups
+        ]
+        unique_together = ('backtest_run', 'timestamp') # This will be the composite unique index for TimescaleDB
+        verbose_name = "Backtest OHLCV Data"
+        verbose_name_plural = "Backtest OHLCV Data"
+
+class BacktestIndicatorData(models.Model):
+    id = models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')
+    backtest_run = models.ForeignKey(BacktestRun, on_delete=models.CASCADE, related_name="indicator_data")
+    timestamp = models.DateTimeField(db_index=True)
+    indicator_name = models.CharField(max_length=100, db_index=True) # e.g., 'EMA_20', 'MACD_hist'
+    value = models.DecimalField(max_digits=19, decimal_places=8, null=True, blank=True)
+    # For multi-value indicators (like MACD with macd, signal, hist lines),
+    # you could either have multiple rows with different indicator_names (e.g., 'MACD_line', 'MACD_signal')
+    # or add more value fields here (value2, value3, etc.) and adjust indicator_name accordingly.
+    # Sticking to single value per row with distinct indicator_name is often simpler.
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['backtest_run', 'timestamp', 'indicator_name']),
+        ]
+        unique_together = ('backtest_run', 'timestamp', 'indicator_name') # This will be the composite unique index for TimescaleDB
+        verbose_name = "Backtest Indicator Data"
+        verbose_name_plural = "Backtest Indicator Data"
+
 class LiveRun(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     bot_version = models.ForeignKey(BotVersion, on_delete=models.CASCADE, related_name="live_runs")

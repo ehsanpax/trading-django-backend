@@ -2,10 +2,12 @@
 import logging
 import uuid # For generating unique IDs for simulated positions
 from decimal import Decimal # For precise P&L calculations
+import gc # Import garbage collection module
 from celery import shared_task
 from django.utils import timezone
+from django.db import transaction # For atomic operations if needed later
 
-from .models import LiveRun, BacktestRun, BotVersion, BacktestConfig
+from .models import LiveRun, BacktestRun, BotVersion, BacktestConfig, BacktestOhlcvData, BacktestIndicatorData
 from accounts.models import Account
 from risk.models import RiskManagement
 from trading.models import InstrumentSpecification
@@ -18,6 +20,31 @@ from datetime import timedelta
 
 # It's good practice to get a logger instance per module
 logger = logging.getLogger(__name__)
+
+def _bulk_insert_in_batches(model, objects_to_create, batch_size=500, logger=logger):
+    """
+    Helper function to perform bulk_create in smaller batches to reduce memory usage.
+    """
+    total_objects = len(objects_to_create)
+    if not total_objects:
+        logger.info(f"No objects to save for {model.__name__}.")
+        return
+
+    logger.info(f"Saving {total_objects} objects for {model.__name__} in batches of {batch_size}...")
+    for i in range(0, total_objects, batch_size):
+        batch = objects_to_create[i:i + batch_size]
+        try:
+            with transaction.atomic(): # Ensure each batch is atomic
+                model.objects.bulk_create(batch)
+            logger.debug(f"Saved batch {i // batch_size + 1}/{(total_objects + batch_size - 1) // batch_size} for {model.__name__}.")
+        except Exception as e:
+            logger.error(f"Error saving batch for {model.__name__} (batch {i // batch_size + 1}): {e}", exc_info=True)
+            # Depending on criticality, you might re-raise or handle differently.
+            # For now, we log and continue, but the backtest might have incomplete data.
+            raise # Re-raise to ensure the task fails if a batch fails.
+
+    logger.info(f"Finished saving all {total_objects} objects for {model.__name__}.")
+
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=60) # bind=True gives access to self
 def live_loop(self, live_run_id):
@@ -104,7 +131,7 @@ def live_loop(self, live_run_id):
             logger.error(f"Could not update LiveRun status on error: {e_save}")
 
 
-@shared_task(bind=True, max_retries=3, default_retry_delay=300)
+@shared_task(bind=True, max_retries=3)
 def run_backtest(self, backtest_run_id):
     logger.info(f"run_backtest task started for BacktestRun ID: {backtest_run_id}")
     try:
@@ -179,7 +206,29 @@ def run_backtest(self, backtest_run_id):
         
         logger.info(f"Loaded {len(m1_ohlcv_df)} M1 OHLCV bars for backtest.")
 
-        min_bars_needed = strategy_instance.p.lookback + strategy_instance.p.slope_window + strategy_instance.p.atr_length + 10 
+        # --- Save OHLCV Data ---
+        try:
+            logger.info(f"BacktestRun {backtest_run_id}: Preparing to save OHLCV data...")
+            ohlcv_data_to_save = [
+                BacktestOhlcvData(
+                    backtest_run=backtest_run,
+                    timestamp=row.Index, # row.Index is the timestamp
+                    open=row.open,
+                    high=row.high,
+                    low=row.low,
+                    close=row.close,
+                    volume=row.volume if 'volume' in row else None
+                )
+                for row in m1_ohlcv_df.itertuples() # itertuples is generally faster
+            ]
+            _bulk_insert_in_batches(BacktestOhlcvData, ohlcv_data_to_save, batch_size=500, logger=logger)
+            gc.collect() # Explicit garbage collection after saving OHLCV data
+        except Exception as e_ohlcv:
+            logger.error(f"BacktestRun {backtest_run_id}: Error saving OHLCV data: {e_ohlcv}", exc_info=True)
+            # This is a critical error for charting, so re-raise to fail the backtest task.
+            raise 
+
+        min_bars_needed = strategy_instance.get_min_bars_needed(buffer_bars=10) # Use strategy's own calculation
 
         if len(m1_ohlcv_df) < min_bars_needed:
             logger.warning(f"Not enough M1 data ({len(m1_ohlcv_df)}) for lookback ({min_bars_needed}).")
@@ -195,6 +244,26 @@ def run_backtest(self, backtest_run_id):
         current_sim_equity = float(bot.account.balance) if bot.account and bot.account.balance is not None else 100000.0
         initial_equity = current_sim_equity
         
+        # --- Prepare DataFrame with all indicators for the entire period ---
+        # The strategy's _ensure_indicators method typically adds indicator columns to a df
+        # It's often a protected method, but we call it here for efficiency to avoid recalculating in the loop.
+        # Ensure the strategy's _ensure_indicators handles copying internally or pass a copy.
+        # BoxBreakoutV1Strategy._ensure_indicators creates its own copy.
+        df_with_all_indicators = m1_ohlcv_df # Default if strategy doesn't have _ensure_indicators
+        if hasattr(strategy_instance, '_ensure_indicators') and callable(strategy_instance._ensure_indicators):
+            try:
+                logger.info(f"BacktestRun {backtest_run_id}: Calling strategy's _ensure_indicators method for all data.")
+                df_with_all_indicators = strategy_instance._ensure_indicators(m1_ohlcv_df) # Pass the original df
+                logger.info(f"BacktestRun {backtest_run_id}: Strategy's _ensure_indicators method completed.")
+                gc.collect() # Explicit garbage collection after indicator calculation
+            except Exception as e_ensure_ind:
+                logger.error(f"BacktestRun {backtest_run_id}: Error calling _ensure_indicators on full dataset: {e_ensure_ind}", exc_info=True)
+                # Fallback to original m1_ohlcv_df, indicators might be calculated per tick then
+                df_with_all_indicators = m1_ohlcv_df
+        else:
+            logger.warning(f"BacktestRun {backtest_run_id}: Strategy instance does not have an _ensure_indicators method. Indicators might be calculated per tick.")
+
+
         # Use strategy's derived tick_size and tick_value for P&L
         tick_size = Decimal(str(strategy_instance.tick_size))
         tick_value = Decimal(str(strategy_instance.tick_value)) # Value of 1 tick for 1 lot
@@ -210,8 +279,9 @@ def run_backtest(self, backtest_run_id):
 
         logger.info(f"BacktestRun {backtest_run_id}: Starting simulation loop from index {min_bars_needed}.")
         
-        for i in range(min_bars_needed, len(m1_ohlcv_df)): 
-            current_window_df = m1_ohlcv_df.iloc[i - min_bars_needed : i+1] 
+        for i in range(min_bars_needed, len(df_with_all_indicators)): # Iterate using df_with_all_indicators
+            # Slice from df_with_all_indicators to ensure indicators are available if pre-calculated
+            current_window_df = df_with_all_indicators.iloc[i - min_bars_needed : i+1] 
             current_bar = current_window_df.iloc[-1] 
             current_timestamp = current_window_df.index[-1]
 
@@ -276,7 +346,7 @@ def run_backtest(self, backtest_run_id):
                     
                     new_pos_id = uuid.uuid4()
                     new_open_position = {
-                        'id': new_pos_id,
+                        'id': str(new_pos_id), # Convert UUID to string
                         'entry_price': float(trade_details['price']),
                         'volume': float(trade_details['volume']),
                         'direction': trade_details['direction'].upper(),
@@ -290,7 +360,7 @@ def run_backtest(self, backtest_run_id):
                     logger.info(f"Sim OPEN: PosID {new_pos_id} {new_open_position['direction']} {new_open_position['volume']} {new_open_position['symbol']} @{new_open_position['entry_price']} SL:{new_open_position['stop_loss']} TP:{new_open_position['take_profit']}")
 
             simulated_equity_curve.append({'timestamp': current_timestamp.isoformat(), 'equity': round(current_sim_equity, 2)})
-        
+            gc.collect() # Explicit garbage collection after each loop iteration
         # Close any remaining open positions at the end of the backtest period (e.g., with last bar's close)
         if open_sim_positions:
             logger.info(f"End of backtest: Closing {len(open_sim_positions)} remaining open positions.")
@@ -338,6 +408,61 @@ def run_backtest(self, backtest_run_id):
         backtest_run.equity_curve = simulated_equity_curve
         backtest_run.stats = final_stats
         backtest_run.simulated_trades_log = simulated_trades # Save the log of simulated trades
+        
+        # --- Save Indicator Data ---
+        try:
+            logger.info(f"BacktestRun {backtest_run_id}: Preparing to save Indicator data...")
+            indicator_data_to_save = []
+            
+            # Identify indicator columns. This might need to be more robust,
+            # e.g., by having the strategy class provide a list of its indicator column names.
+            # For BoxBreakoutV1Strategy, we can reconstruct them from params.
+            indicator_columns = []
+            if hasattr(strategy_instance, 'p'): # Check if params dataclass 'p' exists
+                p = strategy_instance.p
+                if hasattr(p, 'macd_fast') and hasattr(p, 'macd_slow') and hasattr(p, 'macd_signal'):
+                    indicator_columns.append(f"MACDh_{p.macd_fast}_{p.macd_slow}_{p.macd_signal}")
+                if hasattr(p, 'cmf_length'):
+                    indicator_columns.append(f"CMF_{p.cmf_length}")
+                if hasattr(p, 'atr_length'):
+                    indicator_columns.append(f"ATRr_{p.atr_length}")
+            
+            # Fallback: try to find common indicator patterns if specific names aren't generated
+            if not indicator_columns:
+                for col in df_with_all_indicators.columns:
+                    if col.startswith(('MACD', 'CMF', 'ATR', 'EMA', 'SMA', 'RSI')): # Add other common prefixes
+                        indicator_columns.append(col)
+                indicator_columns = list(set(indicator_columns)) # Unique columns
+
+            logger.info(f"BacktestRun {backtest_run_id}: Identified indicator columns for saving: {indicator_columns}")
+
+            # Ensure the DataFrame index is unique before processing for indicators
+            if not df_with_all_indicators.index.is_unique:
+                logger.warning(f"BacktestRun {backtest_run_id}: Duplicate timestamps found in df_with_all_indicators. Dropping duplicates for indicator saving.")
+                df_with_all_indicators = df_with_all_indicators[~df_with_all_indicators.index.duplicated(keep='first')]
+
+            # Prepare indicator data for bulk_create
+            for col_name in indicator_columns:
+                if col_name in df_with_all_indicators.columns:
+                    # Filter out NaN values for the current indicator column
+                    valid_indicator_series = df_with_all_indicators[col_name].dropna()
+                    for timestamp, value in valid_indicator_series.items():
+                        indicator_data_to_save.append(
+                            BacktestIndicatorData(
+                                backtest_run=backtest_run,
+                                timestamp=timestamp,
+                                indicator_name=col_name,
+                                value=Decimal(str(value)) # Ensure Decimal conversion
+                            )
+                        )
+            
+            _bulk_insert_in_batches(BacktestIndicatorData, indicator_data_to_save, batch_size=500, logger=logger)
+            gc.collect() # Explicit garbage collection after saving Indicator data
+        except Exception as e_indicator:
+            logger.error(f"BacktestRun {backtest_run_id}: Error saving Indicator data: {e_indicator}", exc_info=True)
+            # This is a critical error for charting, so re-raise to fail the backtest task.
+            raise 
+
         backtest_run.status = 'COMPLETED'
         backtest_run.save(update_fields=['equity_curve', 'stats', 'simulated_trades_log', 'status'])
         logger.info(f"BacktestRun {backtest_run_id} completed. Stats: {final_stats}")

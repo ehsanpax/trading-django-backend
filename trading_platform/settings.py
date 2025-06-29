@@ -62,6 +62,7 @@ INSTALLED_APPS = [
     'chart_snapshots.apps.ChartSnapshotsConfig',
     'analysis', # Added new analysis app
     'bots',
+    'ta',  # Technical Analysis app
 ]
 
 
@@ -239,6 +240,10 @@ INDICATOR_TIMEFRAMES = {
 CELERY_BROKER_URL = "redis://localhost:6379/0"
 # CELERY_BEAT_SCHEDULE is now defined in trading_platform/celery_app.py
 # Ensure django-celery-beat is not also scheduling this task via the admin if it's installed.
+
+# Celery Worker Soft/Hard Limits to prevent memory leaks and crashes
+CELERYD_MAX_TASKS_PER_CHILD = 100  # Restart worker process after 100 tasks
+CELERYD_MAX_MEMORY_PER_CHILD = 500000 # Restart worker process if memory exceeds 500MB (in KB)
 
 CELERY_TASK_ROUTES = {
     'bots.tasks.live_loop': {'queue': 'live_bots'},

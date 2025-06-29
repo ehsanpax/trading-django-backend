@@ -12,6 +12,7 @@ from dataclasses import dataclass, fields as dataclass_fields
 from typing import Literal, Optional, Dict, Any, List
 import logging
 from decimal import Decimal # For precise financial calculations
+import io # For logging DataFrame info
 
 import numpy as np
 import pandas as pd
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 class BoxBreakoutParams:
     # range detection
     lookback: int = 20               # bars to define the box
-    max_atr_multiple: float = 0.5    # box height must be < 0.5 × ATR
+    max_atr_multiple: float = 2    # box height must be < 0.5 × ATR
     # divergence detection
     slope_window: int = 5            # bars used to measure indicator slope
     # entry & risk
@@ -53,6 +54,7 @@ class BoxBreakoutParams:
 # ──────────────────────────────────────────────────────────────────────────────
 
 class BoxBreakoutV1Strategy:
+    ParamsDataclass = BoxBreakoutParams # Convention for parameter discovery
     DEFAULT_PARAMS = {
         "lookback": 20, "max_atr_multiple": 0.5, "slope_window": 5,
         "risk_per_trade_percent": 0.005, "tp_multiple": 2.0, "sl_buffer_pips": 1.0,
@@ -109,101 +111,98 @@ class BoxBreakoutV1Strategy:
         self._setup_active = False
         self._waiting_for_retest = False
 
-    def _ensure_indicators(self, df_input: pd.DataFrame) -> pd.DataFrame:
-        df = df_input.copy() # Work on a copy
+    def get_min_bars_needed(self, buffer_bars: int = 0) -> int:
+        """Calculates the minimum number of bars required by the strategy for its indicators and lookbacks."""
+        # Core requirement: sum of lookback for box, slope window for divergence, ATR length, 
+        # plus a small internal buffer (e.g., 5 bars) for calculations.
+        # The run_tick method uses: self.p.lookback + self.p.slope_window + self.p.atr_length + 5
+        core_requirement = self.p.lookback + self.p.slope_window + self.p.atr_length + 5
+        return core_requirement + buffer_bars
 
-        # Ensure required columns exist and are numeric
+    def _ensure_indicators(self, df_input: pd.DataFrame) -> pd.DataFrame:
+        df = df_input.copy()
+
         required_ohlcv = ["high", "low", "close", "volume"]
         for col in required_ohlcv:
             if col not in df.columns:
                 logger.error(f"Missing required column '{col}' for indicator calculation. Symbol: {self.instrument_symbol}")
-                df[col] = np.nan 
+                df[col] = np.nan
             else:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
 
-        # Define expected column names
         macd_hist_col = f"MACDh_{self.p.macd_fast}_{self.p.macd_slow}_{self.p.macd_signal}"
         cmf_col = f"CMF_{self.p.cmf_length}"
         atr_col = f"ATRr_{self.p.atr_length}"
 
-        # Attempt to "clean" the index of the df slice
         try:
-            # Ensure the index is a DatetimeIndex and sorted.
-            # This helps prevent issues with some pandas_ta internal operations.
             if not isinstance(df.index, pd.DatetimeIndex):
                 df.index = pd.to_datetime(df.index, utc=True)
-            
-            # If df.index became a scalar Timestamp (e.g. from a single-row df_input,
-            # or if pd.to_datetime returned a scalar for some reason on a single element)
-            if isinstance(df.index, pd.Timestamp):
-                logger.debug(f"Converting scalar Timestamp index to DatetimeIndex for {self.instrument_symbol} at {df.index}")
-                # Preserve name if it exists, useful for some pandas operations
+            if isinstance(df.index, pd.Timestamp): 
                 original_index_name = df.index.name if hasattr(df.index, 'name') else None
                 df.index = pd.DatetimeIndex([df.index], name=original_index_name)
-
-            if not df.index.is_monotonic_increasing: # Ensure this check is after index is confirmed to be a DatetimeIndex
+            if not df.index.is_monotonic_increasing:
                 df = df.sort_index()
         except Exception as e_idx:
-            logger.error(f"Error refreshing or validating index for indicator calculation: {e_idx}")
-            # If index handling fails, it's risky to proceed with ta-lib, so fill with NaNs
+            logger.error(f"Error refreshing or validating index: {e_idx}", exc_info=True)
             df[macd_hist_col] = np.nan
             df[cmf_col] = np.nan
             df[atr_col] = np.nan
             return df
 
-        # Ensure there are enough rows for basic TA operations.
-        # Specific indicators might require more rows (checked later), but less than 2 rows
-        # can cause issues with pandas-ta's internal DataFrame/Series constructions.
         if len(df.index) < 2:
-            timestamp_info = df.index[-1] if not df.empty and isinstance(df.index, pd.DatetimeIndex) and len(df.index) > 0 else 'N/A (empty or non-DatetimeIndex)'
-            logger.warning(
-                f"DataFrame for {self.instrument_symbol} has {len(df.index)} row(s) at {timestamp_info}, "
-                f"which is less than the minimum of 2 often required for TA operations. "
-                f"Skipping indicator calculations and filling with NaN."
-            )
-            # Ensure indicator columns exist if they were not created yet
+            timestamp_info = df.index[-1] if not df.empty and isinstance(df.index, pd.DatetimeIndex) and len(df.index) > 0 else 'N/A'
+            logger.warning(f"DataFrame for {self.instrument_symbol} has {len(df.index)} row(s) at {timestamp_info}, skipping TA.")
             if macd_hist_col not in df.columns: df[macd_hist_col] = np.nan
             if cmf_col not in df.columns: df[cmf_col] = np.nan
             if atr_col not in df.columns: df[atr_col] = np.nan
             return df
-
+        
         try:
-            # MACD
+            # MACD - Should be working
             if macd_hist_col not in df.columns:
-                if len(df) >= self.p.macd_slow + self.p.macd_signal :
+                if len(df) >= self.p.macd_slow + self.p.macd_signal:
+                    logger.debug(f"DataFrame before MACD for {self.instrument_symbol} at {df.index[-1]}: Index type: {type(df.index)}, Shape: {df.shape}")
                     df.ta.macd(fast=self.p.macd_fast, slow=self.p.macd_slow, signal=self.p.macd_signal, append=True)
-                    if macd_hist_col not in df.columns: 
-                        df[macd_hist_col] = np.nan 
+                    if macd_hist_col not in df.columns:
+                        df[macd_hist_col] = np.nan
                         logger.warning(f"MACD hist column '{macd_hist_col}' not created by ta.macd.")
-                else: # Not enough data
-                     df[macd_hist_col] = np.nan
-
-            # CMF
+                else:
+                    df[macd_hist_col] = np.nan
+            
+            # CMF - Should be working
             if cmf_col not in df.columns:
                 if len(df) >= self.p.cmf_length:
+                    logger.debug(f"DataFrame before CMF for {self.instrument_symbol} at {df.index[-1]}: Index type: {type(df.index)}, Shape: {df.shape}")
                     df.ta.cmf(length=self.p.cmf_length, append=True)
                     if cmf_col not in df.columns:
                         df[cmf_col] = np.nan
                         logger.warning(f"CMF column '{cmf_col}' not created by ta.cmf.")
-                else: # Not enough data
+                else:
                      df[cmf_col] = np.nan
 
-            # ATR
+            # ATR - Testing this now
             if atr_col not in df.columns:
                 if len(df) >= self.p.atr_length:
+                    #logger.info(f"Attempting ATR calculation for {self.instrument_symbol}...")
+                    logger.debug(f"DataFrame before ATR for {self.instrument_symbol} at {df.index[-1]}: Index type: {type(df.index)}, Shape: {df.shape}")
+                    buf = io.StringIO()
+                    df.info(buf=buf)
+                    logger.debug(f"Info before ATR:\n{buf.getvalue()}")
+                    logger.debug(f"Head before ATR:\n{df.head().to_string()}")
+                    
                     df.ta.atr(length=self.p.atr_length, append=True)
-                    if atr_col in df.columns: # Check if column was added
+                    if atr_col in df.columns: 
                         df[atr_col] = df[atr_col].bfill().fillna(self.tick_size * 10)
-                    else: # Column not added by ta.atr
+                    else: 
                         df[atr_col] = np.nan
                         logger.warning(f"ATR column '{atr_col}' not created by ta.atr.")
-                else: # Not enough data
+                else: 
                      df[atr_col] = np.nan
+
         except Exception as e:
-            logger.error(f"Error during pandas_ta indicator calculation for {self.instrument_symbol} at {df.index[-1] if not df.empty else 'N/A'}: {e}", exc_info=True)
-            # Ensure columns exist even if calculation fails, fill with NaN
+            logger.error(f"Error during pandas_ta indicator calculation (ATR focused): {e}", exc_info=True)
             if macd_hist_col not in df.columns: df[macd_hist_col] = np.nan
-            if cmf_col not in df.columns: df[cmf_col] = np.nan
+            if cmf_col not in df.columns: df[cmf_col] = np.nan 
             if atr_col not in df.columns: df[atr_col] = np.nan
             
         return df
@@ -227,8 +226,11 @@ class BoxBreakoutV1Strategy:
         box_low = window["low"].min()
         box_height = box_high - box_low
         
-        atr_col = f"ATRr_{self.p.atr_length}"
-        current_atr = window[atr_col].iloc[-1] if atr_col in window.columns else np.nan
+        atr_col = f"ATRr_{self.p.atr_length}" 
+        macd_hist_col = f"MACDh_{self.p.macd_fast}_{self.p.macd_slow}_{self.p.macd_signal}"
+        cmf_col = f"CMF_{self.p.cmf_length}"
+
+        current_atr = window[atr_col].iloc[-1] if atr_col in window.columns and not window[atr_col].empty else np.nan
         
         if pd.isna(current_atr) or current_atr == 0:
             logger.debug(f"Invalid ATR ({current_atr}) for setup check. Symbol: {self.instrument_symbol}")
@@ -239,11 +241,9 @@ class BoxBreakoutV1Strategy:
         if not in_box_condition: return
 
         if len(window) < self.p.slope_window: return
-        macd_hist_col = f"MACDh_{self.p.macd_fast}_{self.p.macd_slow}_{self.p.macd_signal}"
-        cmf_col = f"CMF_{self.p.cmf_length}"
-
+        
         if not all(col in window.columns for col in [macd_hist_col, cmf_col, "close"]):
-            logger.debug(f"Missing indicator columns for divergence check. Symbol: {self.instrument_symbol}")
+            logger.debug(f"Missing indicator columns for divergence check. Columns: {window.columns}. Symbol: {self.instrument_symbol}")
             return
 
         macd_series = window[macd_hist_col].tail(self.p.slope_window)
@@ -312,6 +312,12 @@ class BoxBreakoutV1Strategy:
         if not lot_size or lot_size <= 0:
             logger.warning(f"[{self.instrument_symbol}] Invalid lot size: {lot_size}. No trade signal.")
             return None
+        
+        atr_col = f"ATRr_{self.p.atr_length}" 
+        atr_at_setup_val = np.nan
+        if atr_col in df.columns and not df[atr_col].iloc[-self.p.lookback:].empty:
+             atr_at_setup_val = round(df[atr_col].iloc[-self.p.lookback:].mean(), self.price_digits)
+
 
         trade_details = {
             "symbol": self.instrument_symbol, "direction": "BUY", "order_type": "MARKET",
@@ -323,7 +329,7 @@ class BoxBreakoutV1Strategy:
                 "box_high": round(self._box_high, self.price_digits), 
                 "box_low": round(self._box_low, self.price_digits), 
                 "box_height": round(box_height, self.price_digits),
-                "atr_at_setup": round(df[f"ATRr_{self.p.atr_length}"].iloc[-self.p.lookback:].mean(), self.price_digits)
+                "atr_at_setup": atr_at_setup_val
             }
         }
         logger.info(f"[{self.instrument_symbol}@{df.index[-1]}] Signaling LONG trade: SL {sl_price:.{self.price_digits}f}, TP {tp_price:.{self.price_digits}f}, Vol {lot_size}")
@@ -373,7 +379,7 @@ class BoxBreakoutV1Strategy:
                         if trade_signal: actions.append(trade_signal)
                         self._reset_setup()
                     elif retest_touch_condition:
-                         logger.debug(f"[{self.instrument_symbol}@{df_with_indicators.index[-1]}] Retest touch of {self._box_high:.{self.price_digits}f}. Waiting for bounce confirmation.")
+                        logger.debug(f"[{self.instrument_symbol}@{df_with_indicators.index[-1]}] Retest touch of {self._box_high:.{self.price_digits}f}. Waiting for bounce confirmation.")
             else: 
                 if breakout_confirmed:
                     logger.info(f"[{self.instrument_symbol}@{df_with_indicators.index[-1]}] Breakout confirmed (no retest required). Signaling trade.")
@@ -390,7 +396,8 @@ if __name__ == "__main__":
 
         symbol_yf = "EURUSD=X"; symbol_platform = "EURUSD"
         data_yf = yf.download(symbol_yf, interval="15m", period="120d")
-        if data_yf.empty: print(f"No data for {symbol_yf}")
+        if data_yf.empty:
+            print(f"No data for {symbol_yf}")
         else:
             data_yf.rename(columns=str.lower, inplace=True)
             print(f"Data for {symbol_yf}: {len(data_yf)} bars from {data_yf.index.min()} to {data_yf.index.max()}")
@@ -418,13 +425,15 @@ if __name__ == "__main__":
 
             for i in range(min_data_needed, len(data_yf)):
                 current_window_df = data_yf.iloc[i - min_data_needed : i+1]
-                if current_window_df.empty: continue
+                if current_window_df.empty:
+                    continue
                 
                 actions = bot.run_tick(df_current_window=current_window_df, account_equity=10000.0)
                 if actions:
                     print(f"Time: {current_window_df.index[-1]}, Actions: {actions}")
             print("Example run finished.")
-    except ImportError: print("yfinance or pandas_ta not installed.")
+    except ImportError:
+        print("yfinance or pandas_ta not installed.")
     except Exception as e:
         print(f"Error in example: {e}")
         import traceback
