@@ -1,0 +1,25 @@
+# trading-django-bakend/Dockerfile
+FROM python:3.9
+
+# set workdir
+WORKDIR /app
+
+# install system deps
+RUN apt-get update && apt-get install -y build-essential libpq-dev && rm -rf /var/lib/apt/lists/*
+
+# copy requirements first (for caching)
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# copy application code
+COPY . .
+
+# collect static (if needed)
+RUN python manage.py collectstatic --no-input
+
+# expose port
+EXPOSE 80
+
+# startup
+RUN python manage.py setup_project
+CMD ["python", "manage.py", "run_prod_server"]

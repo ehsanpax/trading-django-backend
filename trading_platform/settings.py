@@ -59,6 +59,7 @@ INSTALLED_APPS = [
     'indicators',
     'calculators',
     'trade_history',
+    'control',
     'chart_snapshots.apps.ChartSnapshotsConfig',
     'analysis', # Added new analysis app
     'bots',

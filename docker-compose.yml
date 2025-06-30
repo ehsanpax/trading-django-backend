@@ -1,0 +1,11 @@
+version: '3.8'
+
+services:
+  celery_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.Celery
+    volumes:
+      - .:/app
+
+

@@ -44,6 +44,7 @@ urlpatterns = [
     path('api/chart-snapshots/', include('chart_snapshots.urls')),
     path('api/analysis/', include('analysis.urls')), # Added analysis app urls
     path('api/bots/', include('bots.urls')), # Added bots app urls
+    path('api/ta/', include('ta.urls')),
 
 ]
 if settings.DEBUG:

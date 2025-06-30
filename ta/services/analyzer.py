@@ -5,8 +5,8 @@
 from datetime import datetime, timezone, timedelta
 from typing import Tuple
 
-from .models import TAAnalysis
-from .utils import fetch_ohlcv, save_chart_snapshot, sha256_bytes, calc_ttl
+from ta.models import TAAnalysis
+from ta.utils import fetch_ohlcv, save_chart_snapshot, sha256_bytes, calc_ttl
 
 CURRENT_PROMPT_VER = 1
 
