@@ -222,7 +222,7 @@ def run_backtest(self, backtest_run_id):
                 for row in m1_ohlcv_df.itertuples() # itertuples is generally faster
             ]
             _bulk_insert_in_batches(BacktestOhlcvData, ohlcv_data_to_save, batch_size=500, logger=logger)
-            gc.collect() # Explicit garbage collection after saving OHLCV data
+            #gc.collect() # Explicit garbage collection after saving OHLCV data
         except Exception as e_ohlcv:
             logger.error(f"BacktestRun {backtest_run_id}: Error saving OHLCV data: {e_ohlcv}", exc_info=True)
             # This is a critical error for charting, so re-raise to fail the backtest task.
@@ -255,7 +255,7 @@ def run_backtest(self, backtest_run_id):
                 logger.info(f"BacktestRun {backtest_run_id}: Calling strategy's _ensure_indicators method for all data.")
                 df_with_all_indicators = strategy_instance._ensure_indicators(m1_ohlcv_df) # Pass the original df
                 logger.info(f"BacktestRun {backtest_run_id}: Strategy's _ensure_indicators method completed.")
-                gc.collect() # Explicit garbage collection after indicator calculation
+                #gc.collect() # Explicit garbage collection after indicator calculation
             except Exception as e_ensure_ind:
                 logger.error(f"BacktestRun {backtest_run_id}: Error calling _ensure_indicators on full dataset: {e_ensure_ind}", exc_info=True)
                 # Fallback to original m1_ohlcv_df, indicators might be calculated per tick then
@@ -360,7 +360,7 @@ def run_backtest(self, backtest_run_id):
                     logger.info(f"Sim OPEN: PosID {new_pos_id} {new_open_position['direction']} {new_open_position['volume']} {new_open_position['symbol']} @{new_open_position['entry_price']} SL:{new_open_position['stop_loss']} TP:{new_open_position['take_profit']}")
 
             simulated_equity_curve.append({'timestamp': current_timestamp.isoformat(), 'equity': round(current_sim_equity, 2)})
-            gc.collect() # Explicit garbage collection after each loop iteration
+            #gc.collect() # Explicit garbage collection after each loop iteration
         # Close any remaining open positions at the end of the backtest period (e.g., with last bar's close)
         if open_sim_positions:
             logger.info(f"End of backtest: Closing {len(open_sim_positions)} remaining open positions.")
@@ -457,7 +457,7 @@ def run_backtest(self, backtest_run_id):
                         )
             
             _bulk_insert_in_batches(BacktestIndicatorData, indicator_data_to_save, batch_size=500, logger=logger)
-            gc.collect() # Explicit garbage collection after saving Indicator data
+            #gc.collect() # Explicit garbage collection after saving Indicator data
         except Exception as e_indicator:
             logger.error(f"BacktestRun {backtest_run_id}: Error saving Indicator data: {e_indicator}", exc_info=True)
             # This is a critical error for charting, so re-raise to fail the backtest task.

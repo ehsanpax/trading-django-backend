@@ -3,7 +3,8 @@
 from rest_framework import viewsets, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
-
+from rest_framework.authentication import TokenAuthentication, SessionAuthentication
+from rest_framework.permissions import IsAuthenticated
 from .models import TAAnalysis
 from .serializers import TAAnalysisSerializer
 
@@ -12,6 +13,8 @@ class TAAnalysisViewSet(viewsets.ModelViewSet):
     """CRUD + helper endpoint to fetch latest analysis per timeframe."""
 
     serializer_class = TAAnalysisSerializer
+    authentication_classes = [TokenAuthentication, SessionAuthentication]
+    permission_classes = [IsAuthenticated]
     queryset = TAAnalysis.objects.all()
     filter_backends = [filters.OrderingFilter, filters.SearchFilter]
     search_fields = ("symbol", "timeframe")
