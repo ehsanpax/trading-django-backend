@@ -66,6 +66,7 @@ INSTALLED_APPS = [
     'ta',  # Technical Analysis app
 ]
 
+MT5_API_BASE_URL = "http://192.168.1.5:8000/api/mt5"
 
 
 MIDDLEWARE = [
@@ -110,9 +111,9 @@ ASGI_APPLICATION = 'trading_platform.asgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'trading',
-        'USER': 'paksisadmin',
-        'PASSWORD': 'P4ks1s_90fT2&2',
+        'NAME': 'trader_ai_db',              
+        'USER': 'postgres',
+        'PASSWORD': 'admin1234',  
         'HOST': 'localhost',
         'PORT': '5432',
     }
@@ -230,10 +231,10 @@ SYMBOL_EXCHANGE_MAP = {
 }
 
 # ─── Which timeframes to compute ────────────────────
-from tvDatafeed import Interval
+from tradingview_ta import Interval
 INDICATOR_TIMEFRAMES = {
-    "M1":  Interval.in_1_minute,
-    "M5":  Interval.in_5_minute,
+    "M1": Interval.INTERVAL_1_MINUTE,
+    "M5": Interval.INTERVAL_5_MINUTES,
     # add more as needed…
 }
 
