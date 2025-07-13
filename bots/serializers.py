@@ -57,14 +57,15 @@ class BotVersionSerializer(serializers.ModelSerializer):
 
 class BacktestConfigSerializer(serializers.ModelSerializer):
     bot_version_info = serializers.CharField(source='bot_version.__str__', read_only=True)
+    timeframe_display = serializers.CharField(source='get_timeframe_display', read_only=True)
 
     class Meta:
         model = BacktestConfig
         fields = [
-            'id', 'bot_version', 'bot_version_info', 'risk_json', 
+            'id', 'bot_version', 'bot_version_info', 'timeframe', 'timeframe_display', 'risk_json', 
             'slippage_ms', 'slippage_r', 'label', 'created_at'
         ]
-        read_only_fields = ['id', 'created_at', 'bot_version_info']
+        read_only_fields = ['id', 'created_at', 'bot_version_info', 'timeframe_display']
 
 class BacktestRunSerializer(serializers.ModelSerializer):
     config_label = serializers.CharField(source='config.label', read_only=True, allow_null=True)
@@ -97,11 +98,20 @@ class LaunchBacktestSerializer(serializers.Serializer):
     instrument_symbol = serializers.CharField(max_length=50)
     data_window_start = serializers.DateTimeField()
     data_window_end = serializers.DateTimeField()
+    # Timeframe is now part of BacktestConfig, so we don't need to pass it here directly
+    # but we might want to validate that the config's timeframe is appropriate for the data.
 
     def validate(self, data):
         if data['data_window_start'] >= data['data_window_end']:
             raise serializers.ValidationError("data_window_end must be after data_window_start.")
-        # Could add validation to check if BotVersion and BacktestConfig exist and are related
+        
+        # Validate that the BacktestConfig exists and retrieve its timeframe
+        try:
+            backtest_config = BacktestConfig.objects.get(id=data['backtest_config_id'])
+            data['timeframe'] = backtest_config.timeframe # Add timeframe to validated data for service layer
+        except BacktestConfig.DoesNotExist:
+            raise serializers.ValidationError("BacktestConfig with provided ID does not exist.")
+
         return data
 
 class BotVersionCreateSerializer(serializers.Serializer):
@@ -150,12 +160,12 @@ class BacktestTradeMarkerSerializer(serializers.Serializer):
     Serializes trade information from BacktestRun.simulated_trades_log 
     into a format suitable for chart markers.
     """
-    entry_timestamp = serializers.DateTimeField()
+    entry_timestamp = serializers.IntegerField()
     entry_price = serializers.FloatField()
-    exit_timestamp = serializers.DateTimeField(allow_null=True) # Can be null if still open (though not for backtests)
+    exit_timestamp = serializers.IntegerField(allow_null=True) # Can be null if still open (though not for backtests)
     exit_price = serializers.FloatField(allow_null=True)
     direction = serializers.CharField() # BUY or SELL
-    volume = serializers.FloatField()
+    volume = serializers.FloatField(required=False, allow_null=True)
     pnl = serializers.FloatField(required=False)
     closure_reason = serializers.CharField(required=False)
     # id = serializers.CharField() # Original position ID

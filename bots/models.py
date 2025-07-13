@@ -53,8 +53,24 @@ class BotVersion(models.Model):
 
 
 class BacktestConfig(models.Model):
+    TIMEframe_CHOICES = [
+        ('M1', '1 Minute'),
+        ('M5', '5 Minutes'),
+        ('M15', '15 Minutes'),
+        ('M30', '30 Minutes'),
+        ('H1', '1 Hour'),
+        ('H4', '4 Hours'),
+        ('D1', '1 Day'),
+    ]
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     bot_version = models.ForeignKey(BotVersion, on_delete=models.CASCADE, related_name="backtest_configs")
+    timeframe = models.CharField(
+        max_length=10,
+        choices=TIMEframe_CHOICES,
+        default='M1',
+        help_text="Chart timeframe for the backtest (e.g., M1, H1, D1)"
+    )
     risk_json = JSONField(default=dict, help_text="Custom risk settings for this backtest")
     slippage_ms = models.IntegerField(default=0, help_text="Slippage in milliseconds")
     slippage_r = models.DecimalField(max_digits=10, decimal_places=5, default=0.0, help_text="Slippage in R (risk units) or percentage")
@@ -62,7 +78,7 @@ class BacktestConfig(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
-        return f"BacktestConfig {self.label or self.id} for {self.bot_version.bot.name} v{self.bot_version.created_at.strftime('%Y%m%d%H%M%S')}"
+        return f"BacktestConfig {self.label or self.id} for {self.bot_version.bot.name} v{self.bot_version.created_at.strftime('%Y%m%d%H%M%S')} ({self.get_timeframe_display()})"
 
 class BacktestRun(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

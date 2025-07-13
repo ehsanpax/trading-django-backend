@@ -191,22 +191,39 @@ def run_backtest(self, backtest_run_id):
         logger.info(f"BacktestRun {backtest_run_id}: Retrieving M1 OHLCV data for {instrument_symbol} from "
                     f"{backtest_run.data_window_start} to {backtest_run.data_window_end}.")
         
-        m1_ohlcv_df = load_m1_data_from_parquet(
+        # Load raw M1 data
+        raw_m1_ohlcv_df = load_m1_data_from_parquet(
             instrument_symbol=instrument_symbol,
             start_date=backtest_run.data_window_start,
             end_date=backtest_run.data_window_end
         )
 
-        if m1_ohlcv_df.empty:
+        if raw_m1_ohlcv_df.empty:
             logger.warning(f"No M1 OHLCV data loaded for {instrument_symbol} for backtest {backtest_run_id}.")
             backtest_run.status = 'FAILED'
             backtest_run.stats = {'error': "No historical M1 OHLCV data for the period/symbol."}
             backtest_run.save(update_fields=['status', 'stats'])
             return
         
-        logger.info(f"Loaded {len(m1_ohlcv_df)} M1 OHLCV bars for backtest.")
+        logger.info(f"Loaded {len(raw_m1_ohlcv_df)} raw M1 OHLCV bars.")
 
-        # --- Save OHLCV Data ---
+        # Resample data to the desired timeframe if not M1
+        target_timeframe = config.timeframe
+        if target_timeframe != 'M1':
+            logger.info(f"Resampling M1 data to {target_timeframe} for backtest {backtest_run_id}.")
+            ohlcv_df = resample_data(raw_m1_ohlcv_df, target_timeframe)
+            if ohlcv_df.empty:
+                logger.warning(f"Resampling to {target_timeframe} resulted in empty DataFrame for backtest {backtest_run_id}.")
+                backtest_run.status = 'FAILED'
+                backtest_run.stats = {'error': f"Resampling to {target_timeframe} resulted in no data."}
+                backtest_run.save(update_fields=['status', 'stats'])
+                return
+            logger.info(f"Resampled to {len(ohlcv_df)} {target_timeframe} bars.")
+        else:
+            ohlcv_df = raw_m1_ohlcv_df
+            logger.info(f"Using original M1 data for backtest {backtest_run_id}.")
+
+        # --- Save OHLCV Data (now using the potentially resampled ohlcv_df) ---
         try:
             logger.info(f"BacktestRun {backtest_run_id}: Preparing to save OHLCV data...")
             ohlcv_data_to_save = [
@@ -219,7 +236,7 @@ def run_backtest(self, backtest_run_id):
                     close=row.close,
                     volume=row.volume if 'volume' in row else None
                 )
-                for row in m1_ohlcv_df.itertuples() # itertuples is generally faster
+                for row in ohlcv_df.itertuples() # itertuples is generally faster
             ]
             _bulk_insert_in_batches(BacktestOhlcvData, ohlcv_data_to_save, batch_size=500, logger=logger)
             #gc.collect() # Explicit garbage collection after saving OHLCV data
@@ -230,10 +247,10 @@ def run_backtest(self, backtest_run_id):
 
         min_bars_needed = strategy_instance.get_min_bars_needed(buffer_bars=10) # Use strategy's own calculation
 
-        if len(m1_ohlcv_df) < min_bars_needed:
-            logger.warning(f"Not enough M1 data ({len(m1_ohlcv_df)}) for lookback ({min_bars_needed}).")
+        if len(ohlcv_df) < min_bars_needed:
+            logger.warning(f"Not enough {target_timeframe} data ({len(ohlcv_df)}) for lookback ({min_bars_needed}).")
             backtest_run.status = 'FAILED'
-            backtest_run.stats = {'error': "Not enough historical data for strategy lookback."}
+            backtest_run.stats = {'error': f"Not enough historical {target_timeframe} data for strategy lookback."}
             backtest_run.save(update_fields=['status', 'stats'])
             return
 
@@ -249,17 +266,17 @@ def run_backtest(self, backtest_run_id):
         # It's often a protected method, but we call it here for efficiency to avoid recalculating in the loop.
         # Ensure the strategy's _ensure_indicators handles copying internally or pass a copy.
         # BoxBreakoutV1Strategy._ensure_indicators creates its own copy.
-        df_with_all_indicators = m1_ohlcv_df # Default if strategy doesn't have _ensure_indicators
+        df_with_all_indicators = ohlcv_df # Default if strategy doesn't have _ensure_indicators
         if hasattr(strategy_instance, '_ensure_indicators') and callable(strategy_instance._ensure_indicators):
             try:
                 logger.info(f"BacktestRun {backtest_run_id}: Calling strategy's _ensure_indicators method for all data.")
-                df_with_all_indicators = strategy_instance._ensure_indicators(m1_ohlcv_df) # Pass the original df
+                df_with_all_indicators = strategy_instance._ensure_indicators(ohlcv_df) # Pass the potentially resampled df
                 logger.info(f"BacktestRun {backtest_run_id}: Strategy's _ensure_indicators method completed.")
                 #gc.collect() # Explicit garbage collection after indicator calculation
             except Exception as e_ensure_ind:
                 logger.error(f"BacktestRun {backtest_run_id}: Error calling _ensure_indicators on full dataset: {e_ensure_ind}", exc_info=True)
-                # Fallback to original m1_ohlcv_df, indicators might be calculated per tick then
-                df_with_all_indicators = m1_ohlcv_df
+                # Fallback to original ohlcv_df, indicators might be calculated per tick then
+                df_with_all_indicators = ohlcv_df
         else:
             logger.warning(f"BacktestRun {backtest_run_id}: Strategy instance does not have an _ensure_indicators method. Indicators might be calculated per tick.")
 
@@ -268,11 +285,11 @@ def run_backtest(self, backtest_run_id):
         tick_size = Decimal(str(strategy_instance.tick_size))
         tick_value = Decimal(str(strategy_instance.tick_value)) # Value of 1 tick for 1 lot
 
-        if m1_ohlcv_df.index.is_monotonic_increasing:
-             first_processing_timestamp = m1_ohlcv_df.index[min_bars_needed -1]
+        if ohlcv_df.index.is_monotonic_increasing:
+             first_processing_timestamp = ohlcv_df.index[min_bars_needed -1]
              simulated_equity_curve.append({'timestamp': first_processing_timestamp.isoformat(), 'equity': current_sim_equity})
         else:
-            logger.warning("M1 OHLCV DataFrame index is not monotonically increasing. Equity curve might be incorrect.")
+            logger.warning("OHLCV DataFrame index is not monotonically increasing. Equity curve might be incorrect.")
             # Fallback or error handling for non-monotonic index
             simulated_equity_curve.append({'timestamp': "N/A", 'equity': current_sim_equity})
 
@@ -364,7 +381,7 @@ def run_backtest(self, backtest_run_id):
         # Close any remaining open positions at the end of the backtest period (e.g., with last bar's close)
         if open_sim_positions:
             logger.info(f"End of backtest: Closing {len(open_sim_positions)} remaining open positions.")
-            last_bar_close = Decimal(str(m1_ohlcv_df.iloc[-1]['close']))
+            last_bar_close = Decimal(str(ohlcv_df.iloc[-1]['close']))
             for open_pos in list(open_sim_positions): # Iterate over a copy
                 entry_price = Decimal(str(open_pos['entry_price']))
                 volume = Decimal(str(open_pos['volume']))
@@ -380,7 +397,7 @@ def run_backtest(self, backtest_run_id):
                 simulated_trades.append({
                     **open_pos,
                     'exit_price': float(last_bar_close),
-                    'exit_timestamp': m1_ohlcv_df.index[-1].isoformat(),
+                    'exit_timestamp': ohlcv_df.index[-1].isoformat(),
                     'pnl': float(pnl),
                     'status': 'CLOSED',
                     'closure_reason': 'END_OF_BACKTEST'
@@ -388,10 +405,10 @@ def run_backtest(self, backtest_run_id):
                 open_sim_positions.remove(open_pos)
                 logger.info(f"Sim EOB CLOSE: PosID {open_pos.get('id', 'N/A')} P&L: {pnl:.2f}. Equity: {current_sim_equity:.2f}")
             # Add final equity point after closing all EOB positions
-            simulated_equity_curve.append({'timestamp': m1_ohlcv_df.index[-1].isoformat(), 'equity': round(current_sim_equity, 2)})
+            simulated_equity_curve.append({'timestamp': ohlcv_df.index[-1].isoformat(), 'equity': round(current_sim_equity, 2)})
 
 
-        logger.info(f"BacktestRun {backtest_run_id}: Simulation loop finished. Processed {len(m1_ohlcv_df) - min_bars_needed +1} bars.")
+        logger.info(f"BacktestRun {backtest_run_id}: Simulation loop finished. Processed {len(ohlcv_df) - min_bars_needed +1} bars.")
 
         final_stats = {
             "total_trades": len(simulated_trades),
@@ -414,27 +431,31 @@ def run_backtest(self, backtest_run_id):
             logger.info(f"BacktestRun {backtest_run_id}: Preparing to save Indicator data...")
             indicator_data_to_save = []
             
-            # Identify indicator columns. This might need to be more robust,
-            # e.g., by having the strategy class provide a list of its indicator column names.
-            # For BoxBreakoutV1Strategy, we can reconstruct them from params.
+            # Identify indicator columns by asking the strategy instance directly.
+            # This is the most robust way, as the strategy knows what it calculates.
             indicator_columns = []
-            if hasattr(strategy_instance, 'p'): # Check if params dataclass 'p' exists
-                p = strategy_instance.p
-                if hasattr(p, 'macd_fast') and hasattr(p, 'macd_slow') and hasattr(p, 'macd_signal'):
-                    indicator_columns.append(f"MACDh_{p.macd_fast}_{p.macd_slow}_{p.macd_signal}")
-                if hasattr(p, 'cmf_length'):
-                    indicator_columns.append(f"CMF_{p.cmf_length}")
-                if hasattr(p, 'atr_length'):
-                    indicator_columns.append(f"ATRr_{p.atr_length}")
-            
-            # Fallback: try to find common indicator patterns if specific names aren't generated
-            if not indicator_columns:
+            if hasattr(strategy_instance, 'get_indicator_column_names') and callable(strategy_instance.get_indicator_column_names):
+                try:
+                    indicator_columns = strategy_instance.get_indicator_column_names()
+                    logger.info(f"BacktestRun {backtest_run_id}: Strategy provided indicator columns: {indicator_columns}")
+                except Exception as e:
+                    logger.error(f"BacktestRun {backtest_run_id}: Error calling get_indicator_column_names on strategy: {e}", exc_info=True)
+                    # Fallback to heuristic if strategy method fails
+                    for col in df_with_all_indicators.columns:
+                        if col.startswith(('MACD', 'CMF', 'ATR', 'EMA', 'SMA', 'RSI', 'BBAND', 'STOCH', 'ADX')):
+                            indicator_columns.append(col)
+                    indicator_columns = list(set(indicator_columns))
+                    logger.warning(f"BacktestRun {backtest_run_id}: Falling back to heuristic indicator identification: {indicator_columns}")
+            else:
+                logger.warning(f"BacktestRun {backtest_run_id}: Strategy instance does not have 'get_indicator_column_names' method. Falling back to heuristic identification.")
+                # Fallback to heuristic if method is not present
                 for col in df_with_all_indicators.columns:
-                    if col.startswith(('MACD', 'CMF', 'ATR', 'EMA', 'SMA', 'RSI')): # Add other common prefixes
+                    if col.startswith(('MACD', 'CMF', 'ATR', 'EMA', 'SMA', 'RSI', 'BBAND', 'STOCH', 'ADX')):
                         indicator_columns.append(col)
-                indicator_columns = list(set(indicator_columns)) # Unique columns
+                indicator_columns = list(set(indicator_columns))
+                logger.warning(f"BacktestRun {backtest_run_id}: Falling back to heuristic indicator identification: {indicator_columns}")
 
-            logger.info(f"BacktestRun {backtest_run_id}: Identified indicator columns for saving: {indicator_columns}")
+            logger.info(f"BacktestRun {backtest_run_id}: Final list of indicator columns for saving: {indicator_columns}")
 
             # Ensure the DataFrame index is unique before processing for indicators
             if not df_with_all_indicators.index.is_unique:

@@ -1,7 +1,9 @@
+
 import os # For listing strategy templates
 from pathlib import Path # For constructing path to strategy templates
 from django.conf import settings # To get BASE_DIR
 import dataclasses # For inspecting dataclass fields
+from datetime import datetime # Added for timestamp conversion
 
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
@@ -15,21 +17,48 @@ from .serializers import (
     BotSerializer, BotVersionSerializer, BacktestConfigSerializer,
     BacktestRunSerializer, LiveRunSerializer, LaunchBacktestSerializer,
     BotVersionCreateSerializer, StartLiveRunSerializer,
-    BacktestChartDataSerializer, BacktestOhlcvDataSerializer, # Added
-    BacktestIndicatorDataSerializer, BacktestTradeMarkerSerializer # Added
+    BacktestChartDataSerializer, BacktestOhlcvDataSerializer,
+    BacktestIndicatorDataSerializer, BacktestTradeMarkerSerializer
 )
-from .models import BacktestOhlcvData, BacktestIndicatorData # Added
+from .models import BacktestOhlcvData, BacktestIndicatorData
 from . import services
-from accounts.models import Account # For assigning account to bot
+from accounts.models import Account
 
 # Add logger to views
 import logging
 logger = logging.getLogger(__name__)
 from rest_framework.exceptions import PermissionDenied
+import json # Added for debug export
+
+def validate_ohlcv_bars(bars, logger=None, label="OHLCV"):
+    prev_time = None
+    seen_times = set()
+    problems = 0
+    for idx, bar in enumerate(bars):
+        cur_time = bar["time"]
+        # Check strictly increasing
+        if prev_time is not None and cur_time <= prev_time:
+            if logger:
+                logger.error(
+                    f"{label}: Non-increasing time at idx={idx}: time={cur_time}, prev={prev_time}"
+                )
+            problems += 1
+        # Check duplicate times
+        if cur_time in seen_times:
+            if logger:
+                logger.error(
+                    f"{label}: Duplicate time at idx={idx}: time={cur_time}"
+                )
+            problems += 1
+        seen_times.add(cur_time)
+        prev_time = cur_time
+    if logger:
+        logger.info(f"{label}: Validated {len(bars)} bars, {problems} problems found.")
+        logger.info(f"{label}: First 30 times: {[bar['time'] for bar in bars[:30]]}")
 
 
 class ListStrategyTemplatesAPIView(APIView):
-    permission_classes = [permissions.IsAuthenticated] 
+    permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, *args, **kwargs):
         try:
@@ -43,9 +72,9 @@ class ListStrategyTemplatesAPIView(APIView):
                 if item.endswith(".py") and item != "__init__.py":
                     templates.append({
                         "filename": item,
-                        "display_name": item.replace(".py", "").replace("_", " ").title() 
+                        "display_name": item.replace(".py", "").replace("_", " ").title()
                     })
-            
+
             return Response(templates, status=status.HTTP_200_OK)
         except Exception as e:
             logger.error(f"Error listing strategy templates: {e}", exc_info=True)
@@ -90,7 +119,7 @@ class StrategyTemplateParametersAPIView(APIView):
 
             ParamsDataclass = StrategyClass.ParamsDataclass
             default_param_values = StrategyClass.DEFAULT_PARAMS if hasattr(StrategyClass, 'DEFAULT_PARAMS') else {}
-            
+
             parameters_info = []
             for field in dataclasses.fields(ParamsDataclass):
                 param_info = {
@@ -101,7 +130,7 @@ class StrategyTemplateParametersAPIView(APIView):
                     "help_text": field.metadata.get("help_text", "") # Assuming help_text in metadata
                 }
                 parameters_info.append(param_info)
-            
+
             return Response(parameters_info, status=status.HTTP_200_OK)
 
         except FileNotFoundError:
@@ -117,7 +146,7 @@ class StrategyTemplateParametersAPIView(APIView):
 class BotViewSet(viewsets.ModelViewSet):
     queryset = Bot.objects.all()
     serializer_class = BotSerializer
-    permission_classes = [permissions.IsAuthenticated] 
+    permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
         user = self.request.user
@@ -126,7 +155,7 @@ class BotViewSet(viewsets.ModelViewSet):
         return Bot.objects.filter(created_by=user)
 
     def perform_create(self, serializer):
-        bot_instance = serializer.save() 
+        bot_instance = serializer.save()
         if bot_instance:
             try:
                 logger.info(f"Bot {bot_instance.id} created. Attempting to create default BotVersion.")
@@ -145,7 +174,7 @@ class BotVersionViewSet(viewsets.ModelViewSet):
             qs = BotVersion.objects.select_related('bot').all()
         else:
             qs = BotVersion.objects.select_related('bot').filter(bot__created_by=user)
-        
+
         bot_id = self.request.query_params.get('bot_id')
         if bot_id:
             qs = qs.filter(bot_id=bot_id)
@@ -181,14 +210,14 @@ class BotVersionViewSet(viewsets.ModelViewSet):
                         return Response({"detail": f"Error reading default strategy template: {str(e_get_content)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
                 else:
                     actual_strategy_code = strategy_code_input
-                
+
                 if actual_strategy_code is None: # Should not happen if logic above is correct, but as a safeguard
                     logger.error(f"Strategy code could not be determined for BotVersion creation for bot {bot.id}.")
                     return Response({"detail": "Strategy code could not be determined."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
                 bot_version = services.create_bot_version(
                     bot=bot,
-                    strategy_code=actual_strategy_code, 
+                    strategy_code=actual_strategy_code,
                     params=data['params'],
                     notes=data.get('notes')
                 )
@@ -212,12 +241,12 @@ class BacktestConfigViewSet(viewsets.ModelViewSet):
         qs = BacktestConfig.objects.select_related('bot_version__bot').all()
         if not (user.is_staff or user.is_superuser):
             qs = qs.filter(bot_version__bot__created_by=user)
-        
+
         bot_version_id = self.request.query_params.get('bot_version_id')
         if bot_version_id:
             qs = qs.filter(bot_version_id=bot_version_id)
         return qs
-    
+
     def perform_create(self, serializer):
         bot_version = serializer.validated_data.get('bot_version')
         user = self.request.user
@@ -226,7 +255,7 @@ class BacktestConfigViewSet(viewsets.ModelViewSet):
         serializer.save()
 
 
-class BacktestRunViewSet(viewsets.ReadOnlyModelViewSet): 
+class BacktestRunViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = BacktestRun.objects.all()
     serializer_class = BacktestRunSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -245,7 +274,7 @@ class BacktestRunViewSet(viewsets.ReadOnlyModelViewSet):
             qs = qs.filter(config__bot_version_id=bot_version_id)
         return qs
 
-class LiveRunViewSet(viewsets.ReadOnlyModelViewSet): 
+class LiveRunViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = LiveRun.objects.all()
     serializer_class = LiveRunSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -255,7 +284,7 @@ class LiveRunViewSet(viewsets.ReadOnlyModelViewSet):
         qs = LiveRun.objects.select_related('bot_version__bot').all()
         if not (user.is_staff or user.is_superuser):
             qs = qs.filter(bot_version__bot__created_by=user)
-        
+
         bot_version_id = self.request.query_params.get('bot_version_id')
         if bot_version_id:
             qs = qs.filter(bot_version_id=bot_version_id)
@@ -275,13 +304,14 @@ class LaunchBacktestAPIView(APIView):
                 if not (request.user.is_staff or request.user.is_superuser or bot_version.bot.created_by == request.user):
                     return Response({"detail": "You do not have permission for this bot version."},
                                     status=status.HTTP_403_FORBIDDEN)
-                
+
                 backtest_run = services.launch_backtest(
                     bot_version_id=data['bot_version_id'],
                     backtest_config_id=data['backtest_config_id'],
-                    instrument_symbol=data['instrument_symbol'], 
+                    instrument_symbol=data['instrument_symbol'],
                     data_window_start=data['data_window_start'],
-                    data_window_end=data['data_window_end']
+                    data_window_end=data['data_window_end'],
+                    timeframe=data['timeframe'] # Pass the timeframe from validated data
                 )
                 response_serializer = BacktestRunSerializer(backtest_run)
                 return Response(response_serializer.data, status=status.HTTP_202_ACCEPTED)
@@ -310,13 +340,13 @@ class StartLiveRunAPIView(APIView):
 
                 live_run = services.start_bot_live_run(
                     bot_version_id=bot_version_id,
-                    instrument_symbol=serializer.validated_data['instrument_symbol'] 
+                    instrument_symbol=serializer.validated_data['instrument_symbol']
                 )
                 response_serializer = LiveRunSerializer(live_run)
                 return Response(response_serializer.data, status=status.HTTP_202_ACCEPTED)
             except BotVersion.DoesNotExist as e:
                  return Response({"detail": str(e)}, status=status.HTTP_404_NOT_FOUND)
-            except DjangoValidationError as ve: 
+            except DjangoValidationError as ve:
                 return Response({"detail": str(ve)}, status=status.HTTP_400_BAD_REQUEST)
             except Exception as e:
                 logger.error(f"Error starting live run: {e}", exc_info=True)
@@ -327,7 +357,7 @@ class StartLiveRunAPIView(APIView):
 class StopLiveRunAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
-    def post(self, request, live_run_id, *args, **kwargs): 
+    def post(self, request, live_run_id, *args, **kwargs):
         try:
             live_run = get_object_or_404(LiveRun, id=live_run_id)
             if not (request.user.is_staff or request.user.is_superuser or live_run.bot_version.bot.created_by == request.user):
@@ -358,60 +388,120 @@ class BacktestChartDataAPIView(APIView):
 
         try:
             # 1. Fetch OHLCV data
+            # Order by timestamp initially from the database
             ohlcv_queryset = BacktestOhlcvData.objects.filter(backtest_run=backtest_run).order_by('timestamp')
-            # For ApexCharts, OHLC data is often [{ x: timestamp, y: [o, h, l, c] }]
-            # We'll format this here for simplicity, though it could also be done in the serializer or frontend
-            ohlcv_data_apex = [
-                {"x": int(o.timestamp.timestamp() * 1000), "y": [o.open, o.high, o.low, o.close]} 
-                for o in ohlcv_queryset
-            ]
-            # If not formatting for Apex here, use the serializer directly:
-            # ohlcv_data_serialized = BacktestOhlcvDataSerializer(ohlcv_queryset, many=True).data
+
+            # Process OHLCV data for Lightweight Charts (LWC)
+            # LWC requires: [{ time: seconds, open, high, low, close }]
+            # And strict ascending order by 'time' with no duplicates.
+
+            # Using a dictionary to handle potential duplicates after flooring to seconds
+            # We'll keep the 'last' encountered bar for a given second if duplicates exist after conversion.
+            ohlcv_data_lwc_map = {}
+            for o in ohlcv_queryset:
+                # Convert timestamp to Unix seconds (integer).
+                # Use int() to ensure it's a whole number of seconds, as required by LWC.
+                time_in_seconds = int(o.timestamp.timestamp())
+
+                # Store the bar. If a duplicate time_in_seconds occurs, this will overwrite
+                # the previous one, effectively keeping the last bar for that second.
+                ohlcv_data_lwc_map[time_in_seconds] = {
+                    "time": time_in_seconds,
+                    "open": float(o.open), # Ensure numeric types (float or int)
+                    "high": float(o.high),
+                    "low": float(o.low),
+                    "close": float(o.close),
+                    # "volume": float(o.volume) if hasattr(o, 'volume') else 0.0, # Include if volume is in your model
+                }
+
+            # Convert map values to a list and sort explicitly by time.
+            # This ensures strict ascending order and that no duplicates remain,
+            # as map keys are unique.
+            ohlcv_data_lwc = sorted(ohlcv_data_lwc_map.values(), key=lambda k: k['time'])
+
+            # Optional: Add a backend validation check to log any remaining issues
+            for i in range(1, len(ohlcv_data_lwc)):
+                if ohlcv_data_lwc[i]['time'] <= ohlcv_data_lwc[i-1]['time']:
+                    logger.error(
+                        f"Backend OHLCV data sorting issue: Index {i}, Time {ohlcv_data_lwc[i]['time']}, "
+                        f"Prev Time {ohlcv_data_lwc[i-1]['time']}. This should not happen after map & sort."
+                    )
+
+            logger.info(f"Prepared {len(ohlcv_data_lwc)} OHLCV bars for frontend.")
 
 
             # 2. Fetch Indicator data and group by indicator_name
             indicator_queryset = BacktestIndicatorData.objects.filter(backtest_run=backtest_run).order_by('indicator_name', 'timestamp')
-            
+
             indicator_data_grouped = {}
             for record in indicator_queryset:
-                # ApexCharts usually expects [{ x: timestamp, y: value }] for simple line series
-                point = {"x": int(record.timestamp.timestamp() * 1000), "y": record.value}
+                # Lightweight Charts also expects seconds for time series
+                point = {"time": int(record.timestamp.timestamp()), "value": float(record.value)}
                 if record.indicator_name not in indicator_data_grouped:
                     indicator_data_grouped[record.indicator_name] = [point]
                 else:
                     indicator_data_grouped[record.indicator_name].append(point)
-            # If not formatting for Apex here, serialize directly and group later or pass flat list:
-            # indicator_data_serialized = BacktestIndicatorDataSerializer(indicator_queryset, many=True).data
+
+            # Ensure each indicator series is also sorted by time and de-duplicated (optional but good practice)
+            for key in indicator_data_grouped:
+                # Use a dict for de-duplication within each indicator series, keeping the last value for a given second
+                series_map = {p['time']: p for p in indicator_data_grouped[key]}
+                indicator_data_grouped[key] = sorted(series_map.values(), key=lambda k: k['time'])
 
 
             # 3. Fetch and serialize Trade Markers from simulated_trades_log
-            # The BacktestRun.simulated_trades_log is already a list of dicts.
-            # We can pass it directly to the BacktestTradeMarkerSerializer if its structure matches.
-            # The serializer expects fields like 'entry_timestamp', 'entry_price', etc.
             raw_trades_log = backtest_run.simulated_trades_log or []
-            trade_markers_serialized = BacktestTradeMarkerSerializer(raw_trades_log, many=True).data
-            
-            # Prepare data for the main BacktestChartDataSerializer
-            # Note: The BacktestChartDataSerializer expects specific structures.
-            # We are manually constructing the dict here to match ApexCharts common formats.
-            # If BacktestChartDataSerializer was designed to take querysets and do this formatting,
-            # that would be an alternative.
-            
+
+            # Pre-process markers to ensure timestamps are in seconds and numeric values are floats
+            processed_trade_markers = []
+            for t in raw_trades_log:
+                try:
+                    # Convert ISO format string to datetime object, handle 'Z' for UTC, then to Unix timestamp in seconds
+                    entry_dt = datetime.fromisoformat(t['entry_timestamp'].replace('Z', '+00:00'))
+                    entry_time_s = int(entry_dt.timestamp())
+
+                    exit_time_s = None
+                    if t.get('exit_timestamp'):
+                        exit_dt = datetime.fromisoformat(t['exit_timestamp'].replace('Z', '+00:00'))
+                        exit_time_s = int(exit_dt.timestamp())
+
+                    processed_trade_markers.append({
+                        "entry_timestamp": entry_time_s,
+                        "entry_price": float(t['entry_price']),
+                        "direction": t['direction'],
+                        "exit_timestamp": exit_time_s,
+                        "exit_price": float(t['exit_price']) if t.get('exit_price') is not None else None,
+                        "pnl": float(t['pnl']) if t.get('pnl') is not None else None,
+                        # Add other fields if needed by BacktestTradeMarkerSerializer
+                    })
+                except (ValueError, KeyError, TypeError) as e:
+                    logger.error(f"Error processing trade marker: {t} - {e}", exc_info=True)
+                    continue # Skip malformed markers
+
+            trade_markers_serialized = BacktestTradeMarkerSerializer(processed_trade_markers, many=True).data
+
+            # Prepare data for the main chart_data response
             chart_data = {
-                "ohlcv_data": ohlcv_data_apex, # Using pre-formatted data
-                "indicator_data": indicator_data_grouped, # Using pre-formatted and grouped data
+                "ohlcv_data": ohlcv_data_lwc, # Using LWC-compatible data
+                "indicator_data": indicator_data_grouped,
                 "trade_markers": trade_markers_serialized,
-                # Optional: Add metadata
-                "backtest_run_id": backtest_run.id,
+                "backtest_run_id": str(backtest_run.id), # Convert UUID to string for JSON serialization
                 "instrument_symbol": backtest_run.instrument_symbol,
                 "data_window_start": backtest_run.data_window_start.isoformat(),
                 "data_window_end": backtest_run.data_window_end.isoformat()
             }
-            
-            # We are not using BacktestChartDataSerializer directly here because we pre-formatted
-            # for Apex. If we were, it would be:
-            # final_serializer = BacktestChartDataSerializer(data_for_main_serializer_instance)
-            # return Response(final_serializer.data, status=status.HTTP_200_OK)
+
+            # --- DEBUG EXPORT ---
+            # Use the string representation of the UUID for the filename
+            debug_file_path = Path(settings.BASE_DIR) / 'analysis_data' / f'backtest_chart_data_{str(backtest_run.id)}.json'
+            try:
+                debug_file_path.parent.mkdir(parents=True, exist_ok=True) # Ensure directory exists
+                with open(debug_file_path, 'w') as f:
+                    json.dump(chart_data, f, indent=4)
+                logger.info(f"Debug: Exported chart data to {debug_file_path}")
+            except Exception as e:
+                logger.error(f"Debug: Failed to export chart data to file {debug_file_path}: {e}", exc_info=True)
+            # --- END DEBUG EXPORT ---
 
             return Response(chart_data, status=status.HTTP_200_OK)
 

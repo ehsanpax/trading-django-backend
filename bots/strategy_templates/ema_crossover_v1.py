@@ -155,6 +155,18 @@ class Strategy: # Renamed class
             
         return df
 
+    def get_indicator_column_names(self) -> List[str]:
+        """
+        Returns a list of column names that this strategy adds as indicators
+        to the DataFrame. This is used by the backtesting engine to know
+        which columns to store as indicator data.
+        """
+        return [
+            f"EMA_{self.p.ema_short_period}",
+            f"EMA_{self.p.ema_long_period}",
+            f"ATRr_{self.p.atr_length}"
+        ]
+
     def _calculate_lot_size(self, account_equity: float, sl_pips: float) -> Optional[float]:
         if account_equity <= 0 or self.p.risk_per_trade_percent <= 0 or sl_pips <= 0:
             return None

@@ -208,8 +208,9 @@ def stop_bot_live_run(live_run_id: uuid.UUID) -> LiveRun:
 
 
 def launch_backtest(bot_version_id: uuid.UUID, backtest_config_id: uuid.UUID, 
-                    instrument_symbol: str, # Added instrument_symbol
-                    data_window_start: timezone.datetime, data_window_end: timezone.datetime) -> BacktestRun:
+                    instrument_symbol: str, 
+                    data_window_start: timezone.datetime, data_window_end: timezone.datetime,
+                    timeframe: str) -> BacktestRun: # Added timeframe parameter
     """
     Creates a BacktestRun record for the given parameters and triggers the run_backtest Celery task.
     """
@@ -219,18 +220,26 @@ def launch_backtest(bot_version_id: uuid.UUID, backtest_config_id: uuid.UUID,
 
         if not instrument_symbol:
             raise ValidationError("Instrument symbol must be provided to launch a backtest.")
+        
+        # Ensure the timeframe from the config matches the one passed (if any, though serializer handles this)
+        if config.timeframe != timeframe:
+            logger.warning(f"Timeframe mismatch: Config has {config.timeframe}, but {timeframe} was passed. Using config's timeframe.")
+            timeframe = config.timeframe
 
         backtest_run = BacktestRun.objects.create(
             config=config,
-            instrument_symbol=instrument_symbol, # Added instrument_symbol
+            instrument_symbol=instrument_symbol,
             data_window_start=data_window_start,
             data_window_end=data_window_end,
             status='PENDING' # Task will set to RUNNING
         )
-        logger.info(f"Created BacktestRun {backtest_run.id} for {instrument_symbol}. Triggering run_backtest task.")
+        logger.info(f"Created BacktestRun {backtest_run.id} for {instrument_symbol} ({timeframe}). Triggering run_backtest task.")
         run_backtest.apply_async(
             kwargs={
                 "backtest_run_id": backtest_run.id,
+                # The timeframe is now part of the BacktestConfig, which is linked to BacktestRun.
+                # The task can retrieve it directly from backtest_run.config.timeframe.
+                # No need to pass it explicitly here.
             },
             queue="backtests"
         )
