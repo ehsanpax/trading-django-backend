@@ -5,7 +5,10 @@ from decimal import Decimal # For precise P&L calculations
 import gc # Import garbage collection module
 from celery import shared_task
 from django.utils import timezone
-from django.db import transaction # For atomic operations if needed later
+from django.db import transaction
+#from asgiref.sync import async_to_sync
+#from channels.layers import get_channel_layer
+import time
 
 from .models import LiveRun, BacktestRun, BotVersion, BacktestConfig, BacktestOhlcvData, BacktestIndicatorData
 from accounts.models import Account
@@ -16,7 +19,6 @@ from trading.models import InstrumentSpecification
 from analysis.utils.data_processor import load_footprint_data_from_parquet, load_m1_data_from_parquet, resample_data
 import pandas as pd
 from datetime import timedelta
-
 
 # It's good practice to get a logger instance per module
 logger = logging.getLogger(__name__)
@@ -47,10 +49,13 @@ def _bulk_insert_in_batches(model, objects_to_create, batch_size=500, logger=log
 
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=60) # bind=True gives access to self
-def live_loop(self, live_run_id):
+def live_loop(self, live_run_id, strategy_name, strategy_params, indicator_configs, instrument_symbol, account_id, risk_settings):
     """
     Celery task for the live trading loop of a bot.
     """
+    # Import StrategyManager locally to break circular dependency
+    from bots.services import StrategyManager
+
     logger.info(f"live_loop task started for LiveRun ID: {live_run_id}")
     try:
         live_run = LiveRun.objects.select_related('bot_version__bot__account').get(id=live_run_id)
@@ -66,8 +71,7 @@ def live_loop(self, live_run_id):
 
         bot_version = live_run.bot_version
         bot = bot_version.bot
-        account = bot.account
-        instrument_symbol = live_run.instrument_symbol
+        account = bot.account # This is the Django Account model instance
 
         if not instrument_symbol:
             live_run.status = 'ERROR'
@@ -85,10 +89,6 @@ def live_loop(self, live_run_id):
             logger.error(f"LiveRun {live_run.id}: Bot {bot.name} has no account assigned. Stopping.")
             return
 
-        from .services import load_strategy_template
-        
-        StrategyClass = load_strategy_template(bot.strategy_template)
-        
         instrument_spec = None
         try:
             instrument_spec = InstrumentSpecification.objects.get(symbol=instrument_symbol)
@@ -96,22 +96,17 @@ def live_loop(self, live_run_id):
         except InstrumentSpecification.DoesNotExist:
             logger.warning(f"LiveRun {live_run_id}: InstrumentSpecification not found for {instrument_symbol}. Using defaults.")
 
-        strategy_init_kwargs = {
-            "params": bot_version.params,
-            "risk_settings": {}, 
-            "instrument_symbol": instrument_symbol,
-            "account_id": str(account.id) if account else None,
-        }
-        if instrument_spec:
-            strategy_init_kwargs["instrument_spec"] = instrument_spec
-        else:
-            default_pip_value = 0.0001 
-            if instrument_symbol and ("JPY" in instrument_symbol.upper()):
-                default_pip_value = 0.01
-            strategy_init_kwargs["pip_value"] = default_pip_value
-
-        strategy_instance = StrategyClass(**strategy_init_kwargs)
-        logger.info(f"LiveRun {live_run_id}: Loaded strategy {bot.strategy_template} for {instrument_symbol}")
+        # Instantiate the strategy using StrategyManager
+        strategy_instance = StrategyManager.instantiate_strategy(
+            strategy_name=strategy_name,
+            instrument_symbol=instrument_symbol,
+            account_id=account_id, # This is the external account ID string
+            instrument_spec=instrument_spec,
+            strategy_params=strategy_params,
+            indicator_configs=indicator_configs,
+            risk_settings=risk_settings
+        )
+        logger.info(f"LiveRun {live_run_id}: Loaded strategy {strategy_name} for {instrument_symbol}")
         
         logger.info(f"live_loop for LiveRun ID: {live_run_id} on {instrument_symbol} completed one placeholder cycle.")
 
@@ -132,7 +127,10 @@ def live_loop(self, live_run_id):
 
 
 @shared_task(bind=True, max_retries=3)
-def run_backtest(self, backtest_run_id):
+def run_backtest(self, backtest_run_id, strategy_name, strategy_params, indicator_configs, instrument_symbol, timeframe, data_window_start, data_window_end, risk_settings, slippage_ms, slippage_r):
+    # Import StrategyManager locally to break circular dependency
+    from bots.services import StrategyManager
+
     logger.info(f"run_backtest task started for BacktestRun ID: {backtest_run_id}")
     try:
         backtest_run = BacktestRun.objects.select_related(
@@ -146,7 +144,6 @@ def run_backtest(self, backtest_run_id):
         bot_version = config.bot_version
         bot = bot_version.bot
         
-        instrument_symbol = backtest_run.instrument_symbol
         if not instrument_symbol:
             logger.error(f"BacktestRun {backtest_run.id} is missing an instrument_symbol. Cannot run backtest.")
             backtest_run.status = 'FAILED'
@@ -154,48 +151,33 @@ def run_backtest(self, backtest_run_id):
             backtest_run.save(update_fields=['status', 'stats'])
             return
 
-        from .services import load_strategy_template
-        
         instrument_spec_instance = None # Renamed to avoid conflict with model name
         try:
-            StrategyClass = load_strategy_template(bot.strategy_template)
-            try:
-                instrument_spec_instance = InstrumentSpecification.objects.get(symbol=instrument_symbol)
-                logger.info(f"Found InstrumentSpecification for {instrument_symbol}")
-            except InstrumentSpecification.DoesNotExist:
-                logger.warning(f"InstrumentSpecification not found for {instrument_symbol}. Using defaults. Lot size/P&L may be inaccurate.")
+            instrument_spec_instance = InstrumentSpecification.objects.get(symbol=instrument_symbol)
+            logger.info(f"Found InstrumentSpecification for {instrument_symbol}")
+        except InstrumentSpecification.DoesNotExist:
+            logger.warning(f"InstrumentSpecification not found for {instrument_symbol}. Using defaults. Lot size/P&L may be inaccurate.")
 
-            strategy_init_kwargs = {
-                "params": bot_version.params,
-                "risk_settings": config.risk_json,
-                "instrument_symbol": instrument_symbol,
-                "account_id": str(bot.account.id) if bot.account else None,
-            }
-            if instrument_spec_instance:
-                strategy_init_kwargs["instrument_spec"] = instrument_spec_instance
-            else:
-                default_pip_value = 0.0001 
-                if instrument_symbol and ("JPY" in instrument_symbol.upper()):
-                    default_pip_value = 0.01
-                strategy_init_kwargs["pip_value"] = default_pip_value
-
-            strategy_instance = StrategyClass(**strategy_init_kwargs)
-            logger.info(f"Successfully loaded strategy: {bot.strategy_template} for symbol {instrument_symbol}")
-        except Exception as e:
-            logger.error(f"Failed to load strategy {bot.strategy_template} for backtest {backtest_run_id}: {e}", exc_info=True)
-            backtest_run.status = 'FAILED'
-            backtest_run.stats = {'error': f"Strategy loading failed: {str(e)}"}
-            backtest_run.save(update_fields=['status', 'stats'])
-            return
-
+        # Instantiate the strategy using StrategyManager
+        strategy_instance = StrategyManager.instantiate_strategy(
+            strategy_name=strategy_name,
+            instrument_symbol=instrument_symbol,
+            account_id="BACKTEST_ACCOUNT", # Placeholder for backtesting
+            instrument_spec=instrument_spec_instance,
+            strategy_params=strategy_params,
+            indicator_configs=indicator_configs,
+            risk_settings=risk_settings
+        )
+        logger.info(f"Successfully loaded strategy: {strategy_name} for symbol {instrument_symbol}")
+        
         logger.info(f"BacktestRun {backtest_run_id}: Retrieving M1 OHLCV data for {instrument_symbol} from "
-                    f"{backtest_run.data_window_start} to {backtest_run.data_window_end}.")
+                    f"{data_window_start} to {data_window_end}.")
         
         # Load raw M1 data
         raw_m1_ohlcv_df = load_m1_data_from_parquet(
             instrument_symbol=instrument_symbol,
-            start_date=backtest_run.data_window_start,
-            end_date=backtest_run.data_window_end
+            start_date=data_window_start,
+            end_date=data_window_end
         )
 
         if raw_m1_ohlcv_df.empty:
@@ -204,11 +186,11 @@ def run_backtest(self, backtest_run_id):
             backtest_run.stats = {'error': "No historical M1 OHLCV data for the period/symbol."}
             backtest_run.save(update_fields=['status', 'stats'])
             return
-        
+
         logger.info(f"Loaded {len(raw_m1_ohlcv_df)} raw M1 OHLCV bars.")
 
         # Resample data to the desired timeframe if not M1
-        target_timeframe = config.timeframe
+        target_timeframe = timeframe
         if target_timeframe != 'M1':
             logger.info(f"Resampling M1 data to {target_timeframe} for backtest {backtest_run_id}.")
             ohlcv_df = resample_data(raw_m1_ohlcv_df, target_timeframe)
@@ -296,11 +278,34 @@ def run_backtest(self, backtest_run_id):
 
         logger.info(f"BacktestRun {backtest_run_id}: Starting simulation loop from index {min_bars_needed}.")
         
-        for i in range(min_bars_needed, len(df_with_all_indicators)): # Iterate using df_with_all_indicators
+        total_bars = len(df_with_all_indicators)
+        processed_bars = 0
+        last_progress_update = time.time()
+
+        for i in range(min_bars_needed, total_bars): # Iterate using df_with_all_indicators
             # Slice from df_with_all_indicators to ensure indicators are available if pre-calculated
             current_window_df = df_with_all_indicators.iloc[i - min_bars_needed : i+1] 
             current_bar = current_window_df.iloc[-1] 
             current_timestamp = current_window_df.index[-1]
+
+            processed_bars += 1
+            
+            # --- Progress Update ---
+            current_time = time.time()
+            if current_time - last_progress_update > 2:  # Update every 2 seconds
+                progress = int((processed_bars / (total_bars - min_bars_needed)) * 100)
+                backtest_run.progress = progress
+                backtest_run.save(update_fields=['progress'])
+                
+                """channel_layer = get_channel_layer()
+                async_to_sync(channel_layer.group_send)(
+                    f"backtest_{backtest_run_id}",
+                    {
+                        "type": "backtest_progress",
+                        "progress": progress,
+                    }
+                )"""
+                last_progress_update = current_time
 
             # --- Check SL/TP for open positions ---
             positions_to_remove_indices = []
@@ -485,8 +490,20 @@ def run_backtest(self, backtest_run_id):
             raise 
 
         backtest_run.status = 'COMPLETED'
-        backtest_run.save(update_fields=['equity_curve', 'stats', 'simulated_trades_log', 'status'])
+        backtest_run.progress = 100
+        backtest_run.save(update_fields=['equity_curve', 'stats', 'simulated_trades_log', 'status', 'progress'])
         logger.info(f"BacktestRun {backtest_run_id} completed. Stats: {final_stats}")
+        
+        #Final progress update
+        """channel_layer = get_channel_layer()
+        async_to_sync(channel_layer.group_send)(
+            f"backtest_{backtest_run_id}",
+            {
+                "type": "backtest_progress",
+                "progress": 100,
+                "status": "COMPLETED"
+            }
+        )"""
 
     except BacktestRun.DoesNotExist:
         logger.error(f"BacktestRun with ID {backtest_run_id} does not exist.")

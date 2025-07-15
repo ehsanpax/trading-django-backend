@@ -1,8 +1,7 @@
 import os
 import uuid
+import subprocess
 from django.core.management.base import BaseCommand
-
-
 
 class Command(BaseCommand):
     help = "Starts the Celery worker"
@@ -38,8 +37,9 @@ class Command(BaseCommand):
             "--loglevel=info",
             f"--concurrency={concurrency}",
             "-P",
-            "threads",
+            "gevent",
             f"--hostname={hostname}",
+            "--logfile=logs/celery_backtest_ge.log"
         ]
 
         # Log the command for debugging purposes (optional)
@@ -47,7 +47,5 @@ class Command(BaseCommand):
             f"Starting celery worker with command: {' '.join(celery_command)}"
         )
 
-        # Use os.execvp to replace the current process with the celery process.
-        # This way celery becomes the main process and will directly receive signals.
-        os.execvp(celery_command[0], celery_command)
-
+        # Use subprocess.Popen to run the celery worker in a separate process.
+        subprocess.Popen(celery_command)

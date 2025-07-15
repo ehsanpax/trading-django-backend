@@ -64,6 +64,7 @@ INSTALLED_APPS = [
     'analysis', # Added new analysis app
     'bots',
     'ta',  # Technical Analysis app
+    'AI', # AI Prompts app
 ]
 
 
@@ -102,7 +103,17 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'trading_platform.wsgi.application'
-ASGI_APPLICATION = 'trading_platform.asgi.application'
+ASGI_APPLICATION = 'trading_platform.routing.application'
+
+# Channels
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "CONFIG": {
+            "hosts": [("localhost", 6379)],
+        },
+    },
+}
 
 # Database
 # https://docs.djangoproject.com/en/5.1/ref/settings/#databases

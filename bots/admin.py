@@ -3,17 +3,17 @@ from .models import Bot, BotVersion, BacktestConfig, BacktestRun, LiveRun
 
 @admin.register(Bot)
 class BotAdmin(admin.ModelAdmin):
-    list_display = ('name', 'account', 'strategy_template', 'is_active', 'created_by', 'created_at', 'updated_at')
-    list_filter = ('is_active', 'strategy_template', 'created_by', 'account')
-    search_fields = ('name', 'strategy_template', 'account__name', 'created_by__username')
+    list_display = ('name', 'account', 'is_active', 'created_by', 'created_at', 'updated_at')
+    list_filter = ('is_active', 'created_by', 'account')
+    search_fields = ('name', 'account__name', 'created_by__username')
     readonly_fields = ('id', 'created_at', 'updated_at')
 
 @admin.register(BotVersion)
 class BotVersionAdmin(admin.ModelAdmin):
-    list_display = ('bot', 'code_hash', 'created_at', 'notes')
-    list_filter = ('bot__name',)
-    search_fields = ('bot__name', 'code_hash', 'notes')
-    readonly_fields = ('id', 'created_at', 'code_hash') # code_hash should be immutable after creation
+    list_display = ('bot', 'strategy_name', 'created_at', 'notes')
+    list_filter = ('bot__name', 'strategy_name')
+    search_fields = ('bot__name', 'strategy_name', 'notes')
+    readonly_fields = ('id', 'created_at', 'strategy_name', 'strategy_params', 'indicator_configs')
 
 @admin.register(BacktestConfig)
 class BacktestConfigAdmin(admin.ModelAdmin):

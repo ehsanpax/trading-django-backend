@@ -45,6 +45,7 @@ urlpatterns = [
     path('api/analysis/', include('analysis.urls')), # Added analysis app urls
     path('api/bots/', include('bots.urls')), # Added bots app urls
     path('api/ta/', include('ta.urls')),
+    path('api/ai/', include('AI.urls')), # Added AI app urls
 
 ]
 if settings.DEBUG:

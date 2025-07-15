@@ -29,9 +29,15 @@ def load_m1_data_from_parquet(instrument_symbol: str, start_date: pd.Timestamp, 
         # Ensure start_date and end_date are timezone-aware if the Parquet data is.
         # Assuming Parquet 'time' column is already a timestamp.
         
-        # Convert start_date and end_date to pd.Timestamp if they are not already (e.g. datetime.date)
-        start_ts = pd.Timestamp(start_date, tz='UTC' if start_date.tzinfo is None else None)
-        end_ts = pd.Timestamp(end_date, tz='UTC' if end_date.tzinfo is None else None)
+        # Convert start_date and end_date to pd.Timestamp. If they are strings, pandas will parse them.
+        # Then, if the resulting timestamp is naive, localize it to UTC.
+        start_ts = pd.Timestamp(start_date)
+        if start_ts.tzinfo is None:
+            start_ts = start_ts.tz_localize('UTC')
+        
+        end_ts = pd.Timestamp(end_date)
+        if end_ts.tzinfo is None:
+            end_ts = end_ts.tz_localize('UTC')
         
         # Adjust end_ts to be inclusive for the entire day if it's just a date
         if end_ts.hour == 0 and end_ts.minute == 0 and end_ts.second == 0:
@@ -87,8 +93,15 @@ def load_footprint_data_from_parquet(instrument_symbol: str, start_date: pd.Time
         return pd.DataFrame()
 
     try:
-        start_ts = pd.Timestamp(start_date, tz='UTC' if start_date.tzinfo is None else None)
-        end_ts = pd.Timestamp(end_date, tz='UTC' if end_date.tzinfo is None else None)
+        # Convert start_date and end_date to pd.Timestamp. Pandas handles ISO strings (including timezone).
+        start_ts = pd.Timestamp(start_date)
+        end_ts = pd.Timestamp(end_date)
+
+        # If, after conversion, the timestamp is naive (e.g., from a date object), localize to UTC.
+        if start_ts.tzinfo is None:
+            start_ts = start_ts.tz_localize('UTC')
+        if end_ts.tzinfo is None:
+            end_ts = end_ts.tz_localize('UTC')
         
         if end_ts.hour == 0 and end_ts.minute == 0 and end_ts.second == 0: # Adjust to include full end day
             end_ts = end_ts + pd.Timedelta(days=1) - pd.Timedelta(nanoseconds=1)

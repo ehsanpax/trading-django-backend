@@ -15,7 +15,6 @@ class Bot(models.Model):
         related_name="bots"
     )
     # instrument_symbol removed from Bot model
-    strategy_template = models.CharField(max_length=255, help_text="Filename of the strategy template, e.g., footprint_v1.py")
     is_active = models.BooleanField(default=False)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -32,13 +31,16 @@ class Bot(models.Model):
 class BotVersion(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     bot = models.ForeignKey(Bot, on_delete=models.CASCADE, related_name="versions")
-    code_hash = models.CharField(max_length=64, help_text="SHA256 hash of the strategy code and params")
-    params = JSONField(default=dict, help_text="Parameters for this version of the bot strategy")
+    strategy_name = models.CharField(max_length=255, default="", help_text="Name of the strategy from the registry, e.g., 'ema_crossover_v1'")
+    strategy_params = JSONField(default=dict, help_text="Parameters for the chosen strategy")
+    indicator_configs = JSONField(default=list, help_text="List of indicator configurations, e.g., [{'name': 'EMA', 'params': {'length': 20}}]")
     notes = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        unique_together = ('bot', 'code_hash') # A bot can't have two versions with the exact same code and params
+        # Temporarily remove unique_together to allow migration to pass due to existing duplicate default values.
+        # A more robust solution for uniqueness with JSONFields might involve hashing the JSON content.
+        # unique_together = ('bot', 'strategy_name', 'strategy_params', 'indicator_configs')
         ordering = ['-created_at']
 
     def __str__(self):
@@ -91,7 +93,8 @@ class BacktestRun(models.Model):
     simulated_trades_log = JSONField(default=list, null=True, blank=True, help_text="Log of all simulated trades")
     created_at = models.DateTimeField(auto_now_add=True)
     # status (e.g., pending, running, completed, failed) could be useful
-    status = models.CharField(max_length=50, default="pending") 
+    status = models.CharField(max_length=50, default="pending")
+    progress = models.IntegerField(default=0, help_text="Backtest progress percentage")
 
     class Meta:
         ordering = ['-created_at']

@@ -1,181 +1,313 @@
-# Bots services
-import hashlib
-import importlib
 import logging
 import uuid
-from pathlib import Path # Added for path operations
-from django.conf import settings # Added to get BASE_DIR
+from typing import Dict, Any, List, Type, Optional
 from django.utils import timezone
 from django.core.exceptions import ValidationError
 
 from .models import Bot, BotVersion, LiveRun, BacktestRun, BacktestConfig
 from .tasks import live_loop, run_backtest # Import Celery tasks
+from bots.registry import STRATEGY_REGISTRY, INDICATOR_REGISTRY, get_strategy_class, get_indicator_class
+from bots.base import BaseStrategy, BaseIndicator, BotParameter
 
 logger = logging.getLogger(__name__)
 
-def load_strategy_template(strategy_template_name: str):
+class StrategyManager:
     """
-    Dynamically loads a strategy module/class from bots/strategy_templates/.
-    Assumes strategy templates are Python files and contain a class named
-    like 'StrategyNameStrategy' or a main 'Strategy' class.
-    Example: 'footprint_v1.py' might contain 'FootprintV1Strategy'.
+    Manages the loading, validation, and instantiation of strategies and indicators.
     """
+
+    @staticmethod
+    def get_available_strategies_metadata() -> List[Dict[str, Any]]:
+        """Returns metadata for all registered strategies, including their parameters."""
+        metadata = []
+        for name, strategy_cls in STRATEGY_REGISTRY.items():
+            params_metadata = []
+            for param in strategy_cls.PARAMETERS:
+                params_metadata.append({
+                    "name": param.name,
+                    "parameter_type": param.parameter_type,
+                    "display_name": param.display_name,
+                    "description": param.description,
+                    "default_value": param.default_value,
+                    "min_value": param.min_value,
+                    "max_value": param.max_value,
+                    "step": param.step,
+                    "options": param.options,
+                })
+            metadata.append({
+                "name": strategy_cls.NAME,
+                "display_name": strategy_cls.DISPLAY_NAME,
+                "parameters": params_metadata,
+                "required_indicators": strategy_cls.REQUIRED_INDICATORS,
+            })
+        return metadata
+
+    @staticmethod
+    def get_available_indicators_metadata() -> List[Dict[str, Any]]:
+        """Returns metadata for all registered indicators, including their parameters."""
+        metadata = []
+        for name, indicator_cls in INDICATOR_REGISTRY.items():
+            params_metadata = []
+            for param in indicator_cls.PARAMETERS:
+                params_metadata.append({
+                    "name": param.name,
+                    "parameter_type": param.parameter_type,
+                    "display_name": param.display_name,
+                    "description": param.description,
+                    "default_value": param.default_value,
+                    "min_value": param.min_value,
+                    "max_value": param.max_value,
+                    "step": param.step,
+                    "options": param.options,
+                })
+            metadata.append({
+                "name": indicator_cls.NAME,
+                "display_name": indicator_cls.DISPLAY_NAME,
+                "parameters": params_metadata,
+            })
+        return metadata
+
+    @staticmethod
+    def validate_parameters(param_definitions: List[BotParameter], provided_params: Dict[str, Any]):
+        """Validates provided parameters against their definitions."""
+        for param_def in param_definitions:
+            param_name = param_def.name
+            if param_name not in provided_params:
+                # Use default value if not provided and a default exists
+                if param_def.default_value is not None:
+                    provided_params[param_name] = param_def.default_value
+                else:
+                    raise ValidationError(f"Missing required parameter: '{param_name}'")
+
+            value = provided_params[param_name]
+
+            # Type validation
+            if param_def.parameter_type == "int":
+                if not isinstance(value, int):
+                    try:
+                        provided_params[param_name] = int(value)
+                    except (ValueError, TypeError):
+                        raise ValidationError(f"Parameter '{param_name}' must be an integer.")
+            elif param_def.parameter_type == "float":
+                if not isinstance(value, (int, float)):
+                    try:
+                        provided_params[param_name] = float(value)
+                    except (ValueError, TypeError):
+                        raise ValidationError(f"Parameter '{param_name}' must be a float.")
+            elif param_def.parameter_type == "bool":
+                if not isinstance(value, bool):
+                    raise ValidationError(f"Parameter '{param_name}' must be a boolean.")
+            elif param_def.parameter_type == "enum":
+                if param_def.options and value not in param_def.options:
+                    raise ValidationError(f"Parameter '{param_name}' must be one of {param_def.options}.")
+            # Add more type checks as needed (e.g., str)
+
+            # Range validation
+            if param_def.min_value is not None and provided_params[param_name] < param_def.min_value:
+                raise ValidationError(f"Parameter '{param_name}' must be at least {param_def.min_value}.")
+            if param_def.max_value is not None and provided_params[param_name] > param_def.max_value:
+                raise ValidationError(f"Parameter '{param_name}' must be at most {param_def.max_value}.")
+
+    @staticmethod
+    def instantiate_strategy(
+        strategy_name: str,
+        instrument_symbol: str,
+        account_id: str,
+        instrument_spec: Any,
+        strategy_params: Dict[str, Any],
+        indicator_configs: List[Dict[str, Any]],
+        risk_settings: Dict[str, Any]
+    ) -> BaseStrategy:
+        """
+        Loads and instantiates a strategy with its parameters and required indicators.
+        """
+        strategy_cls = get_strategy_class(strategy_name)
+        if not strategy_cls:
+            raise ValueError(f"Strategy '{strategy_name}' not found in registry.")
+        
+        # Validate strategy parameters
+        StrategyManager.validate_parameters(strategy_cls.PARAMETERS, strategy_params)
+
+        # Prepare indicator parameters for the strategy instance
+        # This assumes indicator_params will be a flat dict of indicator_name: {param_name: value}
+        # Or, if the strategy needs to instantiate indicators itself, it will use get_indicator_class
+        # For now, we'll pass the raw indicator_configs and let the strategy resolve them.
+        
+        # Instantiate the strategy
+        strategy_instance = strategy_cls(
+            instrument_symbol=instrument_symbol,
+            account_id=account_id,
+            instrument_spec=instrument_spec,
+            strategy_params=strategy_params,
+            indicator_params=indicator_configs, # Pass the full configs for strategy to manage
+            risk_settings=risk_settings
+        )
+        return strategy_instance
+
+def create_bot_version(
+    bot: Bot,
+    strategy_name: str,
+    strategy_params: Dict[str, Any],
+    indicator_configs: List[Dict[str, Any]],
+    notes: str = None
+) -> BotVersion:
+    """
+    Creates a new BotVersion, validating strategy and indicator parameters.
+    """
+    # Validate strategy and indicator parameters before saving
     try:
-        module_name = f"bots.strategy_templates.{strategy_template_name.replace('.py', '')}"
-        strategy_module = importlib.import_module(module_name)
+        strategy_cls = get_strategy_class(strategy_name)
+        if not strategy_cls:
+            raise ValidationError(f"Strategy '{strategy_name}' not found in registry.")
         
-        # Attempt to find a class that likely represents the strategy
-        # This is a heuristic; a more robust way is to define a convention,
-        # e.g., all strategy files must have a class named 'Strategy'.
-        strategy_class_name = None
-        if hasattr(strategy_module, 'Strategy'): # Convention: class named Strategy
-            strategy_class_name = 'Strategy'
-        else: # Heuristic: ClassNameStrategy from filename (e.g. FootprintV1Strategy from footprint_v1.py)
-            class_name_parts = [part.capitalize() for part in strategy_template_name.replace('.py', '').split('_')]
-            potential_class_name = "".join(class_name_parts) + "Strategy"
-            if hasattr(strategy_module, potential_class_name):
-                strategy_class_name = potential_class_name
-        
-        if not strategy_class_name and hasattr(strategy_module, 'FootprintV1Strategy'): # Specific fallback for known strategy
-             strategy_class_name = 'FootprintV1Strategy'
+        # Validate strategy's own parameters
+        StrategyManager.validate_parameters(strategy_cls.PARAMETERS, strategy_params.copy()) # Pass a copy as validation might modify defaults
 
+        # Validate parameters for each required indicator
+        for ind_config in indicator_configs:
+            ind_name = ind_config.get("name")
+            ind_params = ind_config.get("params", {})
+            indicator_cls = get_indicator_class(ind_name)
+            if not indicator_cls:
+                raise ValidationError(f"Indicator '{ind_name}' not found in registry.")
+            StrategyManager.validate_parameters(indicator_cls.PARAMETERS, ind_params.copy()) # Pass a copy
 
-        if strategy_class_name:
-            return getattr(strategy_module, strategy_class_name)
-        else:
-            logger.error(f"Could not find a suitable strategy class in module {module_name}.")
-            raise ImportError(f"No suitable strategy class found in {strategy_template_name}")
-
-    except ImportError as e:
-        logger.error(f"Error loading strategy template '{strategy_template_name}': {e}")
+    except ValidationError as ve:
+        logger.error(f"Validation error creating BotVersion: {ve}")
         raise
     except Exception as e:
-        logger.error(f"Unexpected error loading strategy template '{strategy_template_name}': {e}")
-        raise
+        logger.error(f"Unexpected error during BotVersion validation: {e}", exc_info=True)
+        raise ValidationError(f"An unexpected error occurred during validation: {e}")
 
-def generate_code_hash(strategy_code: str, params: dict) -> str:
-    """
-    Generates a SHA256 hash of the strategy code content and its parameters.
-    Ensures that params are sorted for consistent hashing.
-    """
-    hasher = hashlib.sha256()
-    hasher.update(strategy_code.encode('utf-8'))
-    
-    # Sort params by key to ensure consistent hash for the same params regardless of order
-    # Convert all param values to string to be safe
-    sorted_params_str = "&".join([f"{k}={str(params[k])}" for k in sorted(params.keys())])
-    hasher.update(sorted_params_str.encode('utf-8'))
-    
-    return hasher.hexdigest()
-
-def create_bot_version(bot: Bot, strategy_code: str, params: dict, notes: str = None) -> BotVersion:
-    """
-    Creates a new BotVersion, calculating its code_hash.
-    Prevents duplicate versions for the same bot with identical code & params.
-    """
-    code_hash = generate_code_hash(strategy_code, params)
-    
-    existing_version = BotVersion.objects.filter(bot=bot, code_hash=code_hash).first()
-    if existing_version:
-        logger.info(f"BotVersion with hash {code_hash} already exists for bot {bot.name} (ID: {existing_version.id}). Returning existing.")
-        return existing_version # Or raise an error if duplicates are strictly forbidden even if found
+    # Check for existing version with identical configuration (if unique_together was re-enabled)
+    # For now, with unique_together commented out, we allow duplicates.
+    # If re-enabled, this check would be important.
+    # existing_version = BotVersion.objects.filter(
+    #     bot=bot,
+    #     strategy_name=strategy_name,
+    #     strategy_params=strategy_params,
+    #     indicator_configs=indicator_configs
+    # ).first()
+    # if existing_version:
+    #     logger.info(f"BotVersion already exists for bot {bot.name} with this configuration. Returning existing.")
+    #     return existing_version
 
     bot_version = BotVersion.objects.create(
         bot=bot,
-        code_hash=code_hash,
-        params=params,
+        strategy_name=strategy_name,
+        strategy_params=strategy_params,
+        indicator_configs=indicator_configs,
         notes=notes
     )
-    logger.info(f"Created new BotVersion {bot_version.id} for bot {bot.name} with hash {code_hash}")
+    logger.info(f"Created new BotVersion {bot_version.id} for bot {bot.name} using strategy '{strategy_name}'")
     return bot_version
 
-
-def get_strategy_template_content(template_filename: str) -> str:
-    """
-    Reads and returns the content of a strategy template file.
-    """
-    try:
-        template_path = Path(settings.BASE_DIR) / 'bots' / 'strategy_templates' / template_filename
-        if not template_path.is_file():
-            logger.error(f"Strategy template file not found: {template_path}")
-            raise FileNotFoundError(f"Strategy template file '{template_filename}' not found on server.")
-        
-        with open(template_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        return content
-    except Exception as e:
-        logger.error(f"Error reading strategy template file '{template_filename}': {e}", exc_info=True)
-        raise # Re-raise to be handled by caller
 
 def create_default_bot_version(bot: Bot) -> BotVersion:
     """
     Creates an initial, default BotVersion for a given Bot.
-    This version uses the Bot's specified strategy_template file content
-    and empty parameters (so the strategy uses its internal defaults).
+    This version uses a default strategy (e.g., 'ema_crossover_v1') with its default parameters.
     """
-    logger.info(f"Attempting to create default BotVersion for Bot ID: {bot.id}, Template: {bot.strategy_template}")
-    if not bot.strategy_template:
-        logger.warning(f"Bot {bot.id} has no strategy_template specified. Cannot create default version.")
-        return None 
-
+    logger.info(f"Attempting to create default BotVersion for Bot ID: {bot.id}")
+    
+    # For now, hardcode a default strategy and its default parameters
+    # In a real system, this might be configurable or chosen from a list of "starter" strategies.
+    default_strategy_name = "ema_crossover_v1"
+    
     try:
-        strategy_code_content = get_strategy_template_content(bot.strategy_template)
-        default_params = {} # Use empty params to trigger strategy's internal defaults
+        strategy_cls = get_strategy_class(default_strategy_name)
+        if not strategy_cls:
+            raise ValueError(f"Default strategy '{default_strategy_name}' not found in registry.")
+        
+        default_strategy_params = {param.name: param.default_value for param in strategy_cls.PARAMETERS}
+        
+        # For required indicators, we need to resolve their default parameters too
+        default_indicator_configs = []
+        for req_ind in strategy_cls.REQUIRED_INDICATORS:
+            ind_name = req_ind["name"]
+            indicator_cls = get_indicator_class(ind_name)
+            if not indicator_cls:
+                logger.warning(f"Required indicator '{ind_name}' for default strategy not found. Skipping.")
+                continue
+            
+            # Resolve dynamic parameters from strategy_params for required_history
+            resolved_ind_params = {}
+            for k, v in req_ind["params"].items():
+                if isinstance(v, str) and v in default_strategy_params:
+                    resolved_ind_params[k] = default_strategy_params[v]
+                else:
+                    resolved_ind_params[k] = v
+            
+            default_indicator_configs.append({
+                "name": ind_name,
+                "params": resolved_ind_params
+            })
+
         notes = "Initial default version automatically created with bot."
 
-        # Call the existing service to create the version
         default_version = create_bot_version(
             bot=bot,
-            strategy_code=strategy_code_content,
-            params=default_params,
+            strategy_name=default_strategy_name,
+            strategy_params=default_strategy_params,
+            indicator_configs=default_indicator_configs,
             notes=notes
         )
         logger.info(f"Successfully created default BotVersion {default_version.id} for Bot {bot.id}")
         return default_version
-    except FileNotFoundError:
-        logger.warning(f"Could not create default BotVersion for Bot {bot.id} because template file '{bot.strategy_template}' was not found.")
-        return None
     except Exception as e:
         logger.error(f"Failed to create default BotVersion for Bot {bot.id}: {e}", exc_info=True)
         return None
 
 
-def start_bot_live_run(bot_version_id: uuid.UUID, instrument_symbol: str) -> LiveRun:
+def start_bot_live_run(live_run_id: uuid.UUID) -> LiveRun:
     """
-    Creates a LiveRun record for the given BotVersion and instrument_symbol, 
-    then triggers the live_loop Celery task.
+    Triggers the live_loop Celery task for an existing LiveRun record.
+    The LiveRun record should already be created with bot_version_id and instrument_symbol.
     """
     try:
-        bot_version = BotVersion.objects.select_related('bot').get(id=bot_version_id)
+        live_run = LiveRun.objects.select_related('bot_version__bot').get(id=live_run_id)
+        bot_version = live_run.bot_version
+
         if not bot_version.bot.is_active:
             raise ValidationError(f"Bot {bot_version.bot.name} is not active. Cannot start live run.")
         if not bot_version.bot.account:
             raise ValidationError(f"Bot {bot_version.bot.name} is not assigned to an account. Cannot start live run.")
 
-        # Check for existing active run for this bot version or bot to prevent multiple active runs if desired
-        # existing_active_run = LiveRun.objects.filter(bot_version__bot=bot_version.bot, status='RUNNING').first()
-        # if existing_active_run:
-        #     raise ValidationError(f"Bot {bot_version.bot.name} already has an active live run (ID: {existing_active_run.id}).")
-
-        if not instrument_symbol:
-            raise ValidationError("Instrument symbol must be provided to start a live run.")
-
-        live_run = LiveRun.objects.create(
-            bot_version=bot_version,
-            instrument_symbol=instrument_symbol, # Added instrument_symbol
-            status='PENDING' # Task will set to RUNNING
+        # Instantiate the strategy using the StrategyManager
+        strategy_instance = StrategyManager.instantiate_strategy(
+            strategy_name=bot_version.strategy_name,
+            instrument_symbol=live_run.instrument_symbol,
+            account_id=bot_version.bot.account.account_id, # Assuming account_id is available here
+            instrument_spec=None, # This needs to be fetched dynamically in the live_loop task or passed from a higher level
+            strategy_params=bot_version.strategy_params,
+            indicator_configs=bot_version.indicator_configs,
+            risk_settings={} # Risk settings might come from Bot or LiveRun config
         )
-        logger.info(f"Created LiveRun {live_run.id} for BotVersion {bot_version_id} on {instrument_symbol}. Triggering live_loop task.")
-        live_loop.delay(live_run.id)
+        
+        # Update status and trigger task
+        live_run.status = 'PENDING' # Task will set to RUNNING
+        live_run.save(update_fields=['status'])
+        logger.info(f"Created LiveRun {live_run.id} for BotVersion {bot_version.id} on {live_run.instrument_symbol}. Triggering live_loop task.")
+        
+        # Pass necessary info to the Celery task
+        live_loop.delay(
+            live_run_id=live_run.id,
+            strategy_name=bot_version.strategy_name,
+            strategy_params=bot_version.strategy_params,
+            indicator_configs=bot_version.indicator_configs,
+            instrument_symbol=live_run.instrument_symbol,
+            account_id=bot_version.bot.account.account_id,
+            risk_settings={} # Placeholder, needs to be properly sourced
+        )
         return live_run
-    except BotVersion.DoesNotExist:
-        logger.error(f"BotVersion with ID {bot_version_id} not found.")
+    except LiveRun.DoesNotExist:
+        logger.error(f"LiveRun with ID {live_run_id} not found.")
         raise
     except ValidationError as ve:
-        logger.error(f"Validation error starting live run for BotVersion {bot_version_id}: {ve}")
+        logger.error(f"Validation error starting live run for LiveRun {live_run_id}: {ve}")
         raise
     except Exception as e:
-        logger.error(f"Error starting live run for BotVersion {bot_version_id}: {e}")
+        logger.error(f"Error starting live run for LiveRun {live_run_id}: {e}", exc_info=True)
         raise
 
 def stop_bot_live_run(live_run_id: uuid.UUID) -> LiveRun:
@@ -187,13 +319,8 @@ def stop_bot_live_run(live_run_id: uuid.UUID) -> LiveRun:
         live_run = LiveRun.objects.get(id=live_run_id)
         if live_run.status in ['RUNNING', 'PENDING', 'ERROR']: # Allow stopping if error to mark as user-stopped
             live_run.status = 'STOPPING' # Task should observe this and shut down gracefully
-            # live_run.stopped_at = timezone.now() # Or set by task when it actually stops
             live_run.save(update_fields=['status'])
             logger.info(f"LiveRun {live_run.id} status set to STOPPING.")
-            # Here, you might need a mechanism to signal the running Celery task if it's long-lived.
-            # For periodic tasks, it will simply not be rescheduled or will exit on next run.
-            # If live_loop is a very long running task, Celery's revoke might be an option,
-            # but it's often better for tasks to be designed to check a stop flag.
         elif live_run.status == 'STOPPING':
              logger.info(f"LiveRun {live_run.id} is already in STOPPING state.")
         else:
@@ -207,54 +334,59 @@ def stop_bot_live_run(live_run_id: uuid.UUID) -> LiveRun:
         raise
 
 
-def launch_backtest(bot_version_id: uuid.UUID, backtest_config_id: uuid.UUID, 
-                    instrument_symbol: str, 
-                    data_window_start: timezone.datetime, data_window_end: timezone.datetime,
-                    timeframe: str) -> BacktestRun: # Added timeframe parameter
+def launch_backtest(backtest_run_id: uuid.UUID) -> BacktestRun:
     """
-    Creates a BacktestRun record for the given parameters and triggers the run_backtest Celery task.
+    Triggers the run_backtest Celery task for an existing BacktestRun record.
+    The BacktestRun record should already be created with config, instrument_symbol, data_window_start, data_window_end.
     """
     try:
-        bot_version = BotVersion.objects.get(id=bot_version_id)
-        config = BacktestConfig.objects.get(id=backtest_config_id, bot_version=bot_version)
+        backtest_run = BacktestRun.objects.select_related('config__bot_version__bot').get(id=backtest_run_id)
+        bot_version = backtest_run.config.bot_version
 
-        if not instrument_symbol:
-            raise ValidationError("Instrument symbol must be provided to launch a backtest.")
-        
-        # Ensure the timeframe from the config matches the one passed (if any, though serializer handles this)
-        if config.timeframe != timeframe:
-            logger.warning(f"Timeframe mismatch: Config has {config.timeframe}, but {timeframe} was passed. Using config's timeframe.")
-            timeframe = config.timeframe
-
-        backtest_run = BacktestRun.objects.create(
-            config=config,
-            instrument_symbol=instrument_symbol,
-            data_window_start=data_window_start,
-            data_window_end=data_window_end,
-            status='PENDING' # Task will set to RUNNING
+        # Instantiate the strategy using the StrategyManager
+        strategy_instance = StrategyManager.instantiate_strategy(
+            strategy_name=bot_version.strategy_name,
+            instrument_symbol=backtest_run.instrument_symbol,
+            account_id="BACKTEST_ACCOUNT", # Placeholder for backtesting
+            instrument_spec=None, # This needs to be fetched dynamically in the backtest task or mocked
+            strategy_params=bot_version.strategy_params,
+            indicator_configs=bot_version.indicator_configs,
+            risk_settings=backtest_run.config.risk_json # Use risk settings from BacktestConfig
         )
-        logger.info(f"Created BacktestRun {backtest_run.id} for {instrument_symbol} ({timeframe}). Triggering run_backtest task.")
+        
+        # Update status and trigger task
+        backtest_run.status = 'PENDING' # Task will set to RUNNING
+        backtest_run.save(update_fields=['status'])
+        logger.info(f"Created BacktestRun {backtest_run.id} for {backtest_run.instrument_symbol} ({backtest_run.config.timeframe}). Triggering run_backtest task.")
+        
         run_backtest.apply_async(
             kwargs={
                 "backtest_run_id": backtest_run.id,
-                # The timeframe is now part of the BacktestConfig, which is linked to BacktestRun.
-                # The task can retrieve it directly from backtest_run.config.timeframe.
-                # No need to pass it explicitly here.
+                "strategy_name": bot_version.strategy_name,
+                "strategy_params": bot_version.strategy_params,
+                "indicator_configs": bot_version.indicator_configs,
+                "instrument_symbol": backtest_run.instrument_symbol,
+                "timeframe": backtest_run.config.timeframe,
+                "data_window_start": backtest_run.data_window_start.isoformat(),
+                "data_window_end": backtest_run.data_window_end.isoformat(),
+                "risk_settings": backtest_run.config.risk_json,
+                "slippage_ms": backtest_run.config.slippage_ms,
+                "slippage_r": float(backtest_run.config.slippage_r),
             },
             queue="backtests"
         )
         return backtest_run
-    except BotVersion.DoesNotExist:
-        logger.error(f"BotVersion with ID {bot_version_id} not found for backtest.")
+    except BacktestRun.DoesNotExist:
+        logger.error(f"BacktestRun with ID {backtest_run_id} not found.")
         raise
-    except BacktestConfig.DoesNotExist:
-        logger.error(f"BacktestConfig with ID {backtest_config_id} not found or not linked to BotVersion {bot_version_id}.")
+    except ValidationError as ve:
+        logger.error(f"Validation error launching backtest for BacktestRun {backtest_run_id}: {ve}")
         raise
     except Exception as e:
-        logger.error(f"Error launching backtest for BotVersion {bot_version_id}, Config {backtest_config_id}: {e}")
+        logger.error(f"Error launching backtest for BacktestRun {backtest_run_id}: {e}", exc_info=True)
         raise
 
-# --- Helper/Getter services (placeholders) ---
+# --- Helper/Getter services ---
 
 def get_bot_details(bot_id: uuid.UUID):
     try:

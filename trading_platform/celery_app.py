@@ -16,6 +16,11 @@ app.config_from_object('django.conf:settings', namespace='CELERY')
 # Load task modules from all registered Django app configs.
 app.autodiscover_tasks()
 
+app.conf.update(
+    worker_pool='gevent',
+    worker_concurrency=10,
+)
+
 # Define the beat schedule
 app.conf.beat_schedule = {
     'monitor-mt5-stop-losses': {
