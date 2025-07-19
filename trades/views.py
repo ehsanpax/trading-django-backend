@@ -21,8 +21,8 @@ from .helpers import fetch_symbol_info_for_platform, fetch_live_price_for_platfo
 # Import risk management functions (assumed refactored for Django)
 from risk.management import validate_trade_request, fetch_risk_settings
 from asgiref.sync import async_to_sync
-# Import the MT5Connector service from the mt5 app
-from mt5.services import MT5Connector
+# Import the MT5APIClient
+from trading_platform.mt5_api_client import MT5APIClient
 from risk.models import RiskManagement
 from rest_framework.authentication import TokenAuthentication, SessionAuthentication
 from risk.management import (
@@ -249,14 +249,14 @@ class OpenPositionsLiveView(APIView):
                 # If no MT5 account, we just return DB trades for this account
                 return Response({"open_positions": final_open_positions}, status=status.HTTP_200_OK)
 
-            connector = MT5Connector(mt5_account.account_number, mt5_account.broker_server)
-            login_result = connector.connect(mt5_account.encrypted_password)
-            if "error" in login_result:
-                # Log error or handle, but still return DB trades found so far
-                print(f"MT5 login error for account {account_id}: {login_result['error']}")
-                return Response({"open_positions": final_open_positions}, status=status.HTTP_200_OK)
-
-            mt5_positions_result = connector.get_open_positions()
+            client = MT5APIClient(
+                base_url=settings.MT5_API_BASE_URL,
+                account_id=mt5_account.account_number,
+                password=mt5_account.encrypted_password,
+                broker_server=mt5_account.broker_server
+            )
+            
+            mt5_positions_result = client.get_open_positions()
             if "error" in mt5_positions_result:
                 print(f"MT5 get_open_positions error for account {account_id}: {mt5_positions_result['error']}")
                 return Response({"open_positions": final_open_positions}, status=status.HTTP_200_OK)
@@ -432,13 +432,14 @@ class AllOpenPositionsLiveView(APIView):
                 except MT5Account.DoesNotExist:
                     continue # Skip to next account
 
-                connector = MT5Connector(mt5_account.account_number, mt5_account.broker_server)
-                login_result = connector.connect(mt5_account.encrypted_password)
-                if "error" in login_result:
-                    print(f"MT5 login error for account {account.id}: {login_result['error']}")
-                    continue
-
-                mt5_positions_result = connector.get_open_positions()
+                client = MT5APIClient(
+                    base_url=settings.MT5_API_BASE_URL,
+                    account_id=mt5_account.account_number,
+                    password=mt5_account.encrypted_password,
+                    broker_server=mt5_account.broker_server
+                )
+                
+                mt5_positions_result = client.get_open_positions()
                 if "error" in mt5_positions_result:
                     print(f"MT5 get_open_positions error for account {account.id}: {mt5_positions_result['error']}")
                     continue

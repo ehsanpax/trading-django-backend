@@ -1,5 +1,5 @@
 # trading-django-bakend/Dockerfile
-FROM python:3.9
+FROM python:3.11
 
 # set workdir
 WORKDIR /app
@@ -14,12 +14,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 # copy application code
 COPY . .
 
-# collect static (if needed)
-RUN python manage.py collectstatic --no-input
-
 # expose port
-EXPOSE 80
-
-# startup
-RUN python manage.py setup_project
-CMD ["python", "manage.py", "run_prod_server"]
+EXPOSE 8000

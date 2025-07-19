@@ -9,6 +9,8 @@ class RSI(BaseIndicator):
     """
     NAME = "RSI"
     DISPLAY_NAME = "Relative Strength Index"
+    PANE_TYPE = "pane"
+    SCALE_TYPE = "percentage"
     PARAMETERS = [
         BotParameter(
             name="length",

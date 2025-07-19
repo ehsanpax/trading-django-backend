@@ -3,6 +3,7 @@ from .models import Prompt
 from .serializers import PromptSerializer
 
 class PromptViewSet(viewsets.ModelViewSet):
+    queryset = Prompt.objects.all()
     serializer_class = PromptSerializer
     permission_classes = [permissions.IsAuthenticated]
 

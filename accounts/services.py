@@ -1,7 +1,7 @@
 # accounts/services.py
 from django.shortcuts import get_object_or_404
 from accounts.models import Account, MT5Account, CTraderAccount
-from mt5.services import MT5Connector
+from trading_platform.mt5_api_client import MT5APIClient
 from connectors.ctrader_client import CTraderClient
 from asgiref.sync import async_to_sync
 from django.conf import settings
@@ -19,17 +19,19 @@ def get_account_details(account_id, user):
             mt5_account = MT5Account.objects.get(account=account)
         except MT5Account.DoesNotExist:
             return {"error": "No linked MT5 account found."}
+
+        client = MT5APIClient(
+            base_url=settings.MT5_API_BASE_URL,
+            account_id=mt5_account.account_number,
+            password=mt5_account.encrypted_password,
+            broker_server=mt5_account.broker_server
+        )
         
-        connector = MT5Connector(mt5_account.account_number, mt5_account.broker_server)
-        login_result = connector.connect(mt5_account.encrypted_password)
-        if "error" in login_result:
-            return {"error": login_result["error"]}
-        
-        account_info = connector.get_account_info()
-        positions = connector.get_open_positions()
-        
+        account_info = client.get_account_info()
         if "error" in account_info:
             return {"error": account_info["error"]}
+
+        positions = client.get_open_positions()
         if "error" in positions:
             return {"error": positions["error"]}
         

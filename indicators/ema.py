@@ -11,6 +11,8 @@ logger = logging.getLogger(__name__)
 class EMA(BaseIndicator):
     NAME = "EMA"
     DISPLAY_NAME = "Exponential Moving Average"
+    PANE_TYPE = "overlay"
+    SCALE_TYPE = "price"
     PARAMETERS = [
         BotParameter(
             name="length",

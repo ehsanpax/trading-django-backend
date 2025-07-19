@@ -17,6 +17,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 CTRADER_API_BASE_URL = "http://localhost:8080"
+MT5_API_BASE_URL = "http://host.docker.internal:8001"
 LOG_DIR = BASE_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 # Quick-start development settings - unsuitable for production
@@ -49,7 +50,6 @@ INSTALLED_APPS = [
     'accounts',
     'connectors',
     'corsheaders',
-    'mt5',
     'trades',
     'risk',
     'price',
@@ -65,6 +65,7 @@ INSTALLED_APPS = [
     'bots',
     'ta',  # Technical Analysis app
     'AI', # AI Prompts app
+    'charts',
 ]
 
 
@@ -110,7 +111,7 @@ CHANNEL_LAYERS = {
     "default": {
         "BACKEND": "channels_redis.core.RedisChannelLayer",
         "CONFIG": {
-            "hosts": [("localhost", 6379)],
+            "hosts": [("redis", 6379)],
         },
     },
 }
@@ -124,7 +125,7 @@ DATABASES = {
         'NAME': 'trading',
         'USER': 'paksisadmin',
         'PASSWORD': 'P4ks1s_90fT2&2',
-        'HOST': 'localhost',
+        'HOST': 'db',
         'PORT': '5432',
     }
 }
@@ -241,15 +242,11 @@ SYMBOL_EXCHANGE_MAP = {
 }
 
 # ─── Which timeframes to compute ────────────────────
-from tvDatafeed import Interval
-INDICATOR_TIMEFRAMES = {
-    "M1":  Interval.in_1_minute,
-    "M5":  Interval.in_5_minute,
-    # add more as needed…
-}
+#from tvDatafeed import Interval
+
 
 # ─── Celery broker & beat ───────────────────────────
-CELERY_BROKER_URL = "redis://localhost:6379/0"
+CELERY_BROKER_URL = "redis://redis:6379/0"
 # CELERY_BEAT_SCHEDULE is now defined in trading_platform/celery_app.py
 # Ensure django-celery-beat is not also scheduling this task via the admin if it's installed.
 
@@ -264,7 +261,7 @@ CELERY_TASK_ROUTES = {
     # 'myapp.tasks.*': {'queue': 'default_queue'},
 }
 
-CELERY_RESULT_BACKEND = "redis://localhost:6379/0" # Added for analysis app
+CELERY_RESULT_BACKEND = "redis://redis:6379/0" # Added for analysis app
 DATA_ROOT = BASE_DIR / 'analysis_data' # Added for analysis app
 DATA_ROOT.mkdir(exist_ok=True) # Ensure the directory exists
 
