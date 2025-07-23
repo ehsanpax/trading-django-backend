@@ -1,7 +1,7 @@
 # risk/management.py
 import logging
 from .models import RiskManagement  # Ensure your RiskManagement model is in your accounts app
-from mt5.services import MT5Connector
+from trading_platform.mt5_api_client import MT5APIClient
 from trades.helpers import fetch_symbol_info_for_platform, fetch_live_price_for_platform
 from trading.models import Trade
 from accounts.services import get_account_details

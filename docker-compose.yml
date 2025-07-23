@@ -1,9 +1,65 @@
 version: '3.8'
 
 services:
+  db:
+    image: timescale/timescaledb:latest-pg16
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    environment:
+      - POSTGRES_DB=trading
+      - POSTGRES_USER=paksisadmin
+      - POSTGRES_PASSWORD=P4ks1s_90fT2&2
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: "redis:alpine"
+
+  django:
+    build:
+      context: .
+      dockerfile: Dockerfile.Django
+    volumes:
+      - .:/app
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+      - redis
+    command: python manage.py run_dev_server
+
   celery_worker:
     build:
       context: .
       dockerfile: Dockerfile.Celery
     volumes:
       - .:/app
+    depends_on:
+      - redis
+      - db
+    command: celery -A trading_platform.celery_app worker -l info -Q celery,live_bots
+
+  celery_backtest_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.Celery
+    volumes:
+      - .:/app
+    depends_on:
+      - redis
+      - db
+    command: celery -A trading_platform.celery_app worker -l info -Q backtests -P threads -c 3 --logfile=celery_backtest.log
+
+  celery_beat:
+    build:
+      context: .
+      dockerfile: Dockerfile.Celery
+    volumes:
+      - .:/app
+    depends_on:
+      - redis
+      - db
+    command: celery -A trading_platform.celery_app beat -l info --pidfile=/tmp/celerybeat.pid
+
+volumes:
+  postgres_data:

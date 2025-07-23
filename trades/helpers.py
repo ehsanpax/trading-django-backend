@@ -1,8 +1,13 @@
 # common/helpers.py
 
+import logging
+import requests
 from accounts.models import Account, MT5Account, CTraderAccount
-from mt5.services import MT5Connector
+from trading_platform.mt5_api_client import MT5APIClient
 from django.shortcuts import get_object_or_404
+from django.conf import settings
+
+logger = logging.getLogger(__name__)
 
 
 def fetch_symbol_info_for_platform(account, symbol: str) -> dict:
@@ -21,22 +26,28 @@ def fetch_symbol_info_for_platform(account, symbol: str) -> dict:
         if not mt5_account:
             return {"error": "No linked MT5 account found."}
 
-        connector = MT5Connector(mt5_account.account_number, mt5_account.broker_server)
-        login_result = connector.connect(mt5_account.encrypted_password)
-        if "error" in login_result:
-            return {"error": login_result["error"]}
-
-        symbol_info = connector.get_symbol_info(symbol)
-        return symbol_info  # Might return {"error": "..."} if the symbol is invalid
+        client = MT5APIClient(
+            base_url=settings.MT5_API_BASE_URL,
+            account_id=mt5_account.account_number,
+            password=mt5_account.encrypted_password,
+            broker_server=mt5_account.broker_server,
+            internal_account_id=str(account.id)
+        )
+        try:
+            symbol_info = client.get_symbol_info(symbol)
+            if "error" in symbol_info:
+                logger.error(f"MT5APIClient.get_symbol_info returned error: {symbol_info['error']}")
+                return symbol_info
+            return symbol_info
+        except Exception as e:
+            logger.error(f"Unexpected error calling MT5APIClient.get_symbol_info: {e}", exc_info=True)
+            return {"error": f"Internal error fetching symbol info: {e}"}
 
     elif platform == "CTRADER":
         ctrader_account = getattr(account, "ctrader_account", None)
         if not ctrader_account:
             return {"error": "No linked cTrader account found."}
         
-        import requests
-        from django.conf import settings
-
         payload = {
             "access_token": ctrader_account.access_token,
             "ctid_trader_account_id": ctrader_account.ctid_trader_account_id,
@@ -120,13 +131,22 @@ def fetch_live_price_for_platform(account, symbol: str) -> dict:
         if not mt5_account:
             return {"error": "No linked MT5 account found."}
 
-        connector = MT5Connector(mt5_account.account_number, mt5_account.broker_server)
-        login_result = connector.connect(mt5_account.encrypted_password)
-        if "error" in login_result:
-            return {"error": login_result["error"]}
-
-        price_data = connector.get_live_price(symbol)
-        return price_data  # Expected to be {"bid": ..., "ask": ...} or an error dict
+        client = MT5APIClient(
+            base_url=settings.MT5_API_BASE_URL,
+            account_id=mt5_account.account_number,
+            password=mt5_account.encrypted_password,
+            broker_server=mt5_account.broker_server,
+            internal_account_id=str(account.id)
+        )
+        try:
+            price_data = client.get_live_price(symbol)
+            if "error" in price_data:
+                logger.error(f"MT5APIClient.get_live_price returned error: {price_data['error']}")
+                return price_data
+            return price_data
+        except Exception as e:
+            logger.error(f"Unexpected error calling MT5APIClient.get_live_price: {e}", exc_info=True)
+            return {"error": f"Internal error fetching live price: {e}"}
 
     elif platform == "CTRADER":
         ctrader_account = getattr(account, "ctrader_account", None)

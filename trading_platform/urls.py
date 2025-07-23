@@ -34,7 +34,6 @@ urlpatterns = [
     path("api/accounts/", include("accounts.urls")),  # refresh token
     path("api/trades/", include("trades.urls")),
     path("api/ctrader/", include("ctrader_auth.urls")),
-    path("api/mt5/", include("mt5.urls")),
     path("api/risk/", include("risk.urls")),
     path("api/trade_journal/", include("trade_journal.urls")),
     path("api/connectors/", include("connectors.urls")),

@@ -6,7 +6,8 @@ from decimal import Decimal
 from celery import shared_task
 from trading.models import ProfitTarget, Trade, Order # Added Order import
 from accounts.models import Account, MT5Account, CTraderAccount
-from mt5.services import MT5Connector
+from trading_platform.mt5_api_client import MT5APIClient
+from django.conf import settings
 from connectors.ctrader_client import CTraderClient
 
 
@@ -16,9 +17,12 @@ def get_connector(account: Account):
     """
     if account.platform == "MT5":
         mt5_acc = MT5Account.objects.get(account=account)
-        conn = MT5Connector(mt5_acc.account_number, mt5_acc.broker_server)
-        conn.connect(mt5_acc.encrypted_password)
-        return conn
+        return MT5APIClient(
+            base_url=settings.MT5_API_BASE_URL,
+            account_id=mt5_acc.account_number,
+            password=mt5_acc.encrypted_password,
+            broker_server=mt5_acc.broker_server
+        )
 
     if account.platform == "cTrader":
         ct_acc = CTraderAccount.objects.get(account=account)
@@ -43,8 +47,6 @@ def hit_target(direction: str, price: dict, target_price: Decimal) -> bool:
     return False
 
 
-# Import for MT5 global state management if needed within the task
-import MetaTrader5 as mt5_global 
 from trades.services import synchronize_trade_with_platform
 
 @shared_task(name="trades.tasks.scan_profit_targets")
@@ -220,13 +222,8 @@ def scan_profit_targets():
             traceback.print_exc()
             errors_occurred += len(account_targets) # Count all targets for this account as errored/skipped
         finally:
-            if mt5_session_managed_by_this_loop and mt5_global.terminal_info():
-                print(f"{log_prefix_account}Shutting down MT5 connection for account.")
-                mt5_global.shutdown()
-            elif account_instance.platform == "MT5" and mt5_global.terminal_info():
-                 # Fallback if somehow session was started but flag not set (should not happen)
-                print(f"{log_prefix_account}MT5 terminal active, attempting shutdown (fallback).")
-                mt5_global.shutdown()
+            # No explicit shutdown needed for MT5APIClient as it's stateless HTTP
+            pass
 
 
     print(f"{task_name} finished. Processed successfully: {processed_targets}, Errors/Skipped: {errors_occurred}.")

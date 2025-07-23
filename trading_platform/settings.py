@@ -19,6 +19,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 MEDIA_URL = "/media/"
 MEDIA_ROOT = os.path.join(BASE_DIR, "media")
 CTRADER_API_BASE_URL = "http://localhost:8080"
+MT5_API_BASE_URL = "http://host.docker.internal:8001"
 LOG_DIR = BASE_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 # Quick-start development settings - unsuitable for production
@@ -47,26 +48,26 @@ INSTALLED_APPS = [
     "rest_framework",
     "rest_framework.authtoken",
     # Your apps
-    "trading",
-    "accounts",
-    "connectors",
-    "corsheaders",
-    "mt5",
-    "trades",
-    "risk",
-    "price",
-    "channels",
-    "trade_journal",
-    "automations",
-    "indicators",
-    "calculators",
-    "trade_history",
-    "control",
-    "chart_snapshots.apps.ChartSnapshotsConfig",
-    "analysis",  # Added new analysis app
-    "bots",
-    "ta",  # Technical Analysis app
-    "AI",  # AI Prompts app
+    'trading',
+    'accounts',
+    'connectors',
+    'corsheaders',
+    'trades',
+    'risk',
+    'price',
+    'channels',
+    'trade_journal',
+    'automations',
+    'indicators',
+    'calculators',
+    'trade_history',
+    'control',
+    'chart_snapshots.apps.ChartSnapshotsConfig',
+    'analysis', # Added new analysis app
+    'bots',
+    'ta',  # Technical Analysis app
+    'AI', # AI Prompts app
+    'charts',
 ]
 
 
@@ -112,7 +113,7 @@ CHANNEL_LAYERS = {
     "default": {
         "BACKEND": "channels_redis.core.RedisChannelLayer",
         "CONFIG": {
-            "hosts": [("localhost", 6379)],
+            "hosts": [("redis", 6379)],
         },
     },
 }
@@ -122,13 +123,13 @@ CHANNEL_LAYERS = {
 
 
 DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.postgresql",
-        "NAME": "trading_platform",
-        "USER": "postgres",
-        "PASSWORD": "postgres",
-        "HOST": "localhost",
-        "PORT": "5432",
+    'default': {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': 'trading',
+        'USER': 'paksisadmin',
+        'PASSWORD': 'P4ks1s_90fT2&2',
+        'HOST': 'db',
+        'PORT': '5432',
     }
 }
 
@@ -244,6 +245,7 @@ SYMBOL_EXCHANGE_MAP = {
 }
 
 # ─── Which timeframes to compute ────────────────────
+
 from tvDatafeed import Interval
 
 INDICATOR_TIMEFRAMES = {
@@ -252,8 +254,9 @@ INDICATOR_TIMEFRAMES = {
     # add more as needed…
 }
 
+
 # ─── Celery broker & beat ───────────────────────────
-CELERY_BROKER_URL = "redis://localhost:6379/0"
+CELERY_BROKER_URL = "redis://redis:6379/0"
 # CELERY_BEAT_SCHEDULE is now defined in trading_platform/celery_app.py
 # Ensure django-celery-beat is not also scheduling this task via the admin if it's installed.
 
@@ -270,9 +273,9 @@ CELERY_TASK_ROUTES = {
     # 'myapp.tasks.*': {'queue': 'default_queue'},
 }
 
-CELERY_RESULT_BACKEND = "redis://localhost:6379/0"  # Added for analysis app
-DATA_ROOT = BASE_DIR / "analysis_data"  # Added for analysis app
-DATA_ROOT.mkdir(exist_ok=True)  # Ensure the directory exists
+CELERY_RESULT_BACKEND = "redis://redis:6379/0" # Added for analysis app
+DATA_ROOT = BASE_DIR / 'analysis_data' # Added for analysis app
+DATA_ROOT.mkdir(exist_ok=True) # Ensure the directory exists
 
 OANDA_ACCESS_TOKEN = "8617505e3109641a4bc8b10bcbf546ed-d1a4b2273a700dcbc4840439c9701e42"  # Added for OANDA data fetcher
 OANDA_ENVIRONMENT = "practice"  # Added for OANDA data fetcher

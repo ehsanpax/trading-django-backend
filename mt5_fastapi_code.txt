@@ -1,0 +1,870 @@
+import MetaTrader5 as mt5
+from fastapi import FastAPI, HTTPException, Depends
+from pydantic import BaseModel, Field
+from datetime import datetime, timedelta, timezone
+import time
+from decimal import Decimal
+from typing import Optional, Dict, Any
+import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+app = FastAPI(
+    title="MT5 API Service",
+    description="API for interacting with MetaTrader5 terminals.",
+    version="1.0.0",
+)
+
+# --- MT5Connector Class (Copied and adapted from mt5/services.py) ---
+class MT5Connector:
+    """
+    Handles connection, login, and trade execution for MT5.
+    """
+    def __init__(self, account_id: int, broker_server: str):
+        self.account_id = account_id
+        self.broker_server = broker_server
+        self.terminal_path = rf"C:\MetaTrader 5\{self.account_id}\terminal64.exe"
+
+    def connect(self, password: str) -> dict:
+        """Log into MT5 if not already logged in, using the dedicated terminal instance."""
+        
+        current_terminal_info = mt5.terminal_info()
+
+        if current_terminal_info and current_terminal_info.path == self.terminal_path:
+            account_info = mt5.account_info()
+            if account_info and account_info.login == self.account_id:
+                print(f"Already logged in as {self.account_id} in terminal {self.terminal_path} (path match), skipping re-login.")
+                return {"message": f"Already logged into MT5 account {self.account_id}"}
+        
+        if current_terminal_info and current_terminal_info.path != self.terminal_path:
+            print(f"MT5 currently initialized for a different path ({current_terminal_info.path}). Shutting down before initializing for {self.terminal_path}.")
+            mt5.shutdown()
+            time.sleep(0.5)
+            current_terminal_info = None
+
+        if not current_terminal_info or (mt5.terminal_info() and mt5.terminal_info().path != self.terminal_path):
+            print(f"Initializing MT5 for terminal: {self.terminal_path}")
+            if not mt5.initialize(path=self.terminal_path):
+                init_error = mt5.last_error()
+                error_msg = f"MT5 initialization failed for terminal {self.terminal_path}. Error: {init_error}"
+                print(error_msg)
+                return {"error": error_msg}
+            else:
+                print(f"MT5 initialized successfully for terminal: {self.terminal_path}")
+        
+        account_info = mt5.account_info()
+        current_path_after_init = mt5.terminal_info().path if mt5.terminal_info() else None
+        if account_info and account_info.login == self.account_id and current_path_after_init == self.terminal_path:
+            print(f"Already logged in as {self.account_id} in terminal {self.terminal_path} (verified post-init), skipping re-login.")
+            return {"message": f"Already logged into MT5 account {self.account_id}"}
+
+        print(f"🔹 Attempting login for account: {self.account_id} on server: {self.broker_server} using terminal: {self.terminal_path}")
+        login_status = mt5.login(self.account_id, password, self.broker_server)
+        if not login_status:
+            login_error_code, login_error_message = mt5.last_error()
+            error_msg = f"Login failed for account {self.account_id} on terminal {self.terminal_path}. Error: {login_error_code} - {login_error_message}"
+            print(error_msg)
+            return {"error": error_msg}
+
+        print(f"Successfully Logged into MT5 account {self.account_id} using terminal {self.terminal_path}")
+        return {"message": f"Logged into MT5 account {self.account_id}"}
+
+    def place_trade(
+        self,
+        symbol: str,
+        lot_size: float,
+        direction: str,
+        order_type: str = "MARKET",
+        limit_price: float = None,
+        time_in_force: str = "GTC",
+        stop_loss: float = None,
+        take_profit: float = None,
+    ) -> dict:
+        """
+        Executes a market trade or submits a pending order (limit/stop) on MT5.
+        """
+        if mt5.terminal_info() is None:
+            return {"error": "⚠️ MT5 session lost before trade execution!"}
+
+        account_info = mt5.account_info()
+        if account_info is None or account_info.login != self.account_id:
+            return {"error": "⚠️ MT5 session lost! Please reconnect before trading."}
+
+        symbol_info = mt5.symbol_info(symbol)
+        if not symbol_info:
+            return {"error": f"⚠️ Symbol {symbol} not found or no info available"}
+        tick = mt5.symbol_info_tick(symbol)
+        if not tick:
+            return {"error": f"⚠️ No tick data for {symbol}"}
+
+        direction  = direction.upper()
+        order_type = order_type.upper()
+
+        if order_type in ("LIMIT", "STOP"):
+            if limit_price is None:
+                return {"error": f"Missing 'limit_price' for {order_type} order"}
+
+            try:
+                price_val = float(limit_price)
+            except (TypeError, ValueError):
+                return {"error": f"Invalid limit_price: {limit_price}"}
+
+            limit_price = round(price_val, symbol_info.digits)
+
+            if order_type == "LIMIT":
+                if direction == "BUY" and limit_price >= tick.ask:
+                    return {"error": (
+                        f"Invalid price: BUY_LIMIT {limit_price} ≥ current ask {tick.ask}"
+                    )}
+                if direction == "SELL" and limit_price <= tick.bid:
+                    return {"error": (
+                        f"Invalid price: SELL_LIMIT {limit_price} ≤ current bid {tick.bid}"
+                    )}
+
+            if order_type == "STOP":
+                if direction == "BUY" and limit_price <= tick.ask:
+                    return {"error": (
+                        f"Invalid price: BUY_STOP {limit_price} ≤ current ask {tick.ask}"
+                    )}
+                if direction == "SELL" and limit_price >= tick.bid:
+                    return {"error": (
+                        f"Invalid price: SELL_STOP {limit_price} ≥ current bid {tick.bid}"
+                    )}
+
+        if order_type == "MARKET":
+            action = mt5.TRADE_ACTION_DEAL
+            req_type = mt5.ORDER_TYPE_BUY if direction == "BUY" else mt5.ORDER_TYPE_SELL
+            price = tick.ask if direction == "BUY" else tick.bid
+        elif order_type == "LIMIT":
+            action = mt5.TRADE_ACTION_PENDING
+            req_type = (
+                mt5.ORDER_TYPE_BUY_LIMIT if direction == "BUY" 
+                else mt5.ORDER_TYPE_SELL_LIMIT
+            )
+            price = limit_price
+        else:  # STOP
+            action = mt5.TRADE_ACTION_PENDING
+            req_type = (
+                mt5.ORDER_TYPE_BUY_STOP if direction == "BUY" 
+                else mt5.ORDER_TYPE_SELL_STOP
+            )
+            price = limit_price
+
+        tif_map = {
+            "GTC": mt5.ORDER_TIME_GTC,
+            "DAY": mt5.ORDER_TIME_DAY,
+        }
+        tif = tif_map.get(time_in_force.upper(), mt5.ORDER_TIME_GTC)
+
+        trade_request = {
+            "action":      action,
+            "symbol":      symbol,
+            "volume":      lot_size,
+            "type":        req_type,
+            "price":       price,
+            "sl":          stop_loss or 0,
+            "tp":          take_profit or 0,
+            "deviation":   10,
+            "magic":       0,
+            "comment":     "Trade placed via API",
+            "type_time":   tif,
+            "type_filling": mt5.ORDER_FILLING_IOC,
+        }
+
+        result = mt5.order_send(trade_request)
+        if result is None:
+            err_code, err_msg = mt5.last_error()
+            return {"error": f"❌ Trade execution failed: {err_code} - {err_msg}"}
+        if result.retcode != mt5.TRADE_RETCODE_DONE:
+            return {"error": f"❌ Trade failed: {result.comment}"}
+
+        payload = {
+            "message":   "Trade executed successfully",
+            "order_id":  result.order,
+            "deal_id":   getattr(result, 'deal', None),
+            "volume":    lot_size,
+            "symbol":    symbol,
+            "direction": direction,
+            "price":     price,
+            "status":    "pending",
+            "opened_position_ticket": None
+        }
+
+        if order_type == "MARKET":
+            payload["status"] = "filled"
+            if result.order != 0:
+                payload["opened_position_ticket"] = result.order
+        
+        return payload
+
+    def get_open_position_details_by_ticket(self, position_ticket: int) -> dict:
+        """Fetch details of a specific open position by its ticket."""
+        if mt5.terminal_info() is None:
+            return {"error": "MT5 terminal is not running"}
+
+        account_info = mt5.account_info()
+        if not account_info or account_info.login != self.account_id:
+            return {"error": "Not logged in to the correct MT5 account"}
+
+        positions = mt5.positions_get(ticket=position_ticket)
+        if positions is None:
+            err_code, err_msg = mt5.last_error()
+            return {"error": f"positions_get(ticket={position_ticket}) failed: {err_code} - {err_msg}"}
+
+        if not positions:
+            return {"error": f"No open position found for ticket {position_ticket}"}
+
+        pos = positions[0]
+        return {
+            "ticket": pos.ticket,
+            "symbol": pos.symbol,
+            "volume": pos.volume,
+            "price_open": pos.price_open,
+            "sl": pos.sl,
+            "tp": pos.tp,
+            "profit": pos.profit,
+            "comment": pos.comment,
+            "time": pos.time
+        }
+
+    def get_position_by_order_id(self, order_id: int) -> dict:
+        """Fetch an open position by the ticket of the order that created/modified it."""
+        if mt5.terminal_info() is None:
+            return {"error": "MT5 terminal is not running"}
+
+        account_info = mt5.account_info()
+        if not account_info or account_info.login != self.account_id:
+            return {"error": "Not logged in to the correct MT5 account"}
+
+        from_date = datetime.now(timezone.utc) - timedelta(days=7)
+        to_date = datetime.now(timezone.utc) + timedelta(hours=13)
+        deals = mt5.history_deals_get(from_date, to_date, order=order_id)
+
+        if deals is None:
+            err_code, err_msg = mt5.last_error()
+            return {"error": f"Failed to retrieve deals for order_id {order_id}: {err_code} - {err_msg}"}
+
+        if not deals:
+            return {"error": f"No deals found for order_id {order_id}"}
+
+        position_ticket = None
+        MAX_RETRIES = 3
+        RETRY_DELAY_SECONDS = 0.5
+
+        for attempt in range(MAX_RETRIES):
+            current_deals = mt5.history_deals_get(from_date, to_date, order=order_id)
+
+            if current_deals:
+                for deal in current_deals:
+                    if deal.entry == mt5.DEAL_ENTRY_IN:
+                        if deal.position_id != 0:
+                            position_ticket = deal.position_id
+                            break
+                if position_ticket:
+                    break
+            
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_DELAY_SECONDS)
+            elif not position_ticket:
+                if current_deals:
+                    for deal_idx, deal_fallback in enumerate(current_deals):
+                        if deal_fallback.position_id != 0:
+                            position_ticket = deal_fallback.position_id
+                            break
+                if not position_ticket:
+                    return {"error": f"No opening deal (DEAL_ENTRY_IN) found and no fallback position_id available (no deals with non-zero position_id) for order_id {order_id} after {MAX_RETRIES} retries."}
+
+        if position_ticket is None:
+            return {"error": f"Failed to determine position_id for order_id {order_id} after retries and fallback."}
+
+        positions = mt5.positions_get(ticket=position_ticket)
+        if positions is None:
+            err_code, err_msg = mt5.last_error()
+            return {"error": f"positions_get(ticket={position_ticket}) failed: {err_code} - {err_msg}"}
+
+        if not positions:
+            return {"error": f"No open position found for position ticket {position_ticket} (derived from order_id {order_id})"}
+
+        pos = positions[0]
+        return {
+            "ticket": pos.ticket,
+            "symbol": pos.symbol,
+            "volume": pos.volume,
+            "price_open": pos.price_open,
+            "sl": pos.sl,
+            "tp": pos.tp,
+            "profit": pos.profit,
+            "comment": pos.comment,
+            "time": pos.time
+        }
+
+    def get_account_info(self) -> dict:
+        """Fetches account balance, equity, and margin from MT5."""
+        if mt5.terminal_info() is None:
+            return {"error": "MT5 terminal is not running"}
+
+        account_info = mt5.account_info()
+        if not account_info:
+            return {"error": "Failed to retrieve account info from MT5"}
+
+        return {
+            "balance": account_info.balance,
+            "equity": account_info.equity,
+            "margin": account_info.margin,
+            "free_margin": account_info.margin_free,
+            "leverage": account_info.leverage
+        }
+
+    def get_open_positions(self) -> dict:
+        """Fetches all currently open positions in MT5."""
+        if mt5.terminal_info() is None:
+            return {"error": "MT5 terminal is not running"}
+
+        positions = mt5.positions_get()
+        if positions is None:
+            err_code, err_msg = mt5.last_error()
+            return {"error": f"positions_get() failed: {err_code} - {err_msg}"}
+
+        open_positions = []
+        for pos in positions:
+            open_positions.append({
+                "ticket": pos.ticket,
+                "symbol": pos.symbol,
+                "volume": pos.volume,
+                "price_open": pos.price_open,
+                "profit": pos.profit,
+                "swap": pos.swap,
+                "sl": pos.sl,
+                "tp": pos.tp,
+                "time": pos.time,
+                "direction": "SELL" if pos.type == 1 else "BUY",
+                "comment": pos.comment,
+                "magic": pos.magic
+            })
+
+        return {"open_positions": open_positions}
+
+    def get_live_price(self, symbol: str) -> dict:
+        """Fetch real-time price for a symbol from MT5."""
+        tick = mt5.symbol_info_tick(symbol)
+        if tick:
+            return {"symbol": symbol, "bid": tick.bid, "ask": tick.ask}
+        return {"error": "Failed to retrieve price data"}
+
+    def get_symbol_info(self, symbol: str) -> dict:
+        """Fetches pip size, tick size, and contract size for a symbol."""
+        symbol_info = mt5.symbol_info(symbol)
+        if not symbol_info:
+            return {"error": f"Symbol {symbol} not found"}
+        return {
+            "symbol": symbol,
+            "pip_size": 10 ** -symbol_info.digits,
+            "tick_size": symbol_info.point,
+            "contract_size": symbol_info.trade_contract_size
+        }
+    def close_trade(self, ticket: int, volume: float, symbol: str) -> dict:
+        if mt5.terminal_info() is None:
+            return {"error": "MT5 terminal is not running"}
+
+        account_info = mt5.account_info()
+        if not account_info or account_info.login != self.account_id:
+            return {"error": "Not logged in to the correct MT5 account"}
+
+        price_info = mt5.symbol_info_tick(symbol)
+        if not price_info:
+            return {"error": f"Price not available for {symbol}"}
+
+        position = mt5.positions_get(ticket=ticket)
+        if not position:
+            return {"error": f"No position found for ticket {ticket}"}
+
+        pos = position[0]
+        direction = "SELL" if pos.type == mt5.POSITION_TYPE_BUY else "BUY"
+        close_price = price_info.bid if direction == "SELL" else price_info.ask
+        order_type = mt5.ORDER_TYPE_SELL if direction == "SELL" else mt5.ORDER_TYPE_BUY
+
+        close_request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "position": ticket,
+            "symbol": symbol,
+            "volume": volume,
+            "type": order_type,
+            "price": close_price,
+            "deviation": 10,
+            "magic": 0,
+            "comment": "Trade closed via API",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_IOC,
+        }
+
+        result = mt5.order_send(close_request)
+
+        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            return {"error": f"Failed to close trade: {result.comment if result else 'no result'}", "retcode": result.retcode if result else None}
+
+        return {
+            "message": "Trade closed in MT5",
+            "close_price": close_price,
+            "order_id": result.order,
+            "deal_id": getattr(result, 'deal', None),
+            "retcode": result.retcode,
+            "comment": result.comment
+        }
+
+    def modify_position_protection(self, position_id: int, symbol: str, stop_loss: float = None, take_profit: float = None) -> dict:
+        """
+        Modifies the Stop Loss and/or Take Profit of an open position.
+        """
+        if mt5.terminal_info() is None:
+            return {"error": "MT5 terminal is not running or not initialized."}
+        
+        account_info = mt5.account_info()
+        if not account_info or account_info.login != self.account_id:
+            return {"error": "Not logged in to the correct MT5 account for modifying position."}
+
+        if stop_loss is None and take_profit is None:
+            return {"error": "No stop_loss or take_profit value provided to modify."}
+
+        sl_price = float(stop_loss) if stop_loss is not None else 0.0
+        tp_price = float(take_profit) if take_profit is not None else 0.0
+        
+        if sl_price < 0 or tp_price < 0:
+            return {"error": "Stop Loss or Take Profit prices cannot be negative."}
+
+        request = {
+            "action": mt5.TRADE_ACTION_SLTP,
+            "position": position_id,
+            "symbol": symbol,
+            "sl": sl_price,
+            "tp": tp_price,
+        }
+
+        result = mt5.order_send(request)
+
+        if result is None:
+            err_code, err_msg = mt5.last_error()
+            error_message = f"order_send() failed for TRADE_ACTION_SLTP: {err_code} - {err_msg}"
+            return {"error": error_message}
+
+        if result.retcode != mt5.TRADE_RETCODE_DONE:
+            error_message = f"Failed to modify SL/TP for position {position_id}: {result.comment} (retcode: {result.retcode})"
+            return {"error": error_message, "retcode": result.retcode, "comment": result.comment}
+
+        success_message = f"Successfully modified SL/TP for position {position_id} on {symbol}."
+        return {
+            "message": success_message,
+            "order_id": result.order,
+            "request_id": result.request_id,
+            "retcode": result.retcode,
+            "comment": result.comment
+        }
+    
+    def get_closed_deal_profit(self, ticket: int, max_retries=5, delay=2) -> dict:
+        for attempt in range(max_retries):
+            utc_from = datetime.now(timezone.utc) - timedelta(days=1)
+            utc_to = datetime.now(timezone.utc)
+            deals = mt5.history_deals_get(utc_from, utc_to)
+
+            if deals:
+                for deal in deals:
+                    if deal.position_id == ticket:
+                        return {"profit": deal.profit}
+
+            time.sleep(delay)
+
+        return {"error": f"No closed deal found for ticket {ticket} after {max_retries} retries"}
+
+    def get_latest_deal_ticket(self, order_ticket: int, max_retries=10, delay=1) -> int:
+        """
+        Attempts to retrieve the deal ticket corresponding to the given order ticket.
+        It polls MT5's deal history for a matching deal (by order field) and returns its ticket.
+        """
+        for attempt in range(max_retries):
+            utc_from = datetime.now(timezone.utc) - timedelta(minutes=1)
+            utc_to = datetime.now(timezone.utc)
+            deals = mt5.history_deals_get(utc_from, utc_to)
+            if deals:
+                for d in deals:
+                    if d.order == order_ticket:
+                        return d.ticket
+            time.sleep(delay)
+        return None
+    
+    def get_closed_trade_profit(self, order_ticket: int, max_retries=10, delay=2) -> dict:
+        """
+        Polls MT5 history deals for all deals related to the given order_ticket (using the order filter)
+        and sums up the profit, commission, and swap fields.
+        """
+        for attempt in range(max_retries):
+            utc_from = datetime.now(timezone.utc) - timedelta(days=1)
+            utc_to = datetime.now(timezone.utc)
+            deals = mt5.history_deals_get(utc_from, utc_to, order=order_ticket)
+            if deals:
+                total_profit = sum(deal.profit + deal.commission + deal.swap for deal in deals)
+                return {"profit": total_profit}
+            time.sleep(delay)
+        return {"error": f"No closed deals found for order {order_ticket} after {max_retries} retries"}
+
+    def get_closing_deal_details_for_position(self, position_id: int, days_history=7) -> dict:
+        """
+        Retrieves details of the closing deal(s) for a given position_id.
+        """
+        if not position_id:
+            return {"error": "position_id cannot be None or zero."}
+
+        if mt5.terminal_info() is None:
+            return {"error": "MT5 terminal is not running"}
+        
+        account_info = mt5.account_info()
+        if not account_info or account_info.login != self.account_id:
+            return {"error": "Not logged in to the correct MT5 account"}
+        
+        deals = mt5.history_deals_get(position=position_id)
+
+        if deals is None:
+            err_code, err_msg = mt5.last_error()
+            return {"error": f"history_deals_get(position={position_id}) call failed: {err_code} - {err_msg}"}
+
+        if not deals:
+            return {"error": f"No deals found for position_id {position_id}."}
+        
+        exit_deals = [d for d in deals if d.entry == mt5.DEAL_ENTRY_OUT or d.entry == mt5.DEAL_ENTRY_INOUT]
+
+        if not exit_deals:
+            return {"error": f"No explicit exit deal found for position {position_id}."}
+
+        total_profit = sum(d.profit for d in deals)
+        total_commission = sum(d.commission for d in deals)
+        total_swap = sum(d.swap for d in deals)
+        
+        latest_exit_deal = sorted(exit_deals, key=lambda d: d.time, reverse=True)[0]
+        
+        closure_reason_code = latest_exit_deal.reason
+        close_time_timestamp = latest_exit_deal.time 
+        close_time_dt = datetime.fromtimestamp(close_time_timestamp, tz=timezone.utc)
+
+        is_sl_closure = (closure_reason_code == 3)
+        is_tp_closure = (closure_reason_code == 4)
+        
+        return {
+            "profit": total_profit,
+            "commission": total_commission,
+            "swap": total_swap,
+            "net_profit": total_profit + total_commission + total_swap,
+            "reason_code": closure_reason_code,
+            "close_time": close_time_dt.isoformat(),
+            "closed_by_sl": is_sl_closure,
+            "closed_by_tp": is_tp_closure,
+            "message": f"Closing details found for position {position_id}."
+        }
+
+    def fetch_trade_sync_data(self, position_id: int, instrument_symbol: str) -> dict:
+        """
+        Fetches all necessary data from MT5 for a given position to allow synchronization.
+        """
+        if mt5.terminal_info() is None:
+            return {"error_message": "MT5 terminal is not running or not initialized."}
+        
+        account_info = mt5.account_info()
+        if not account_info or account_info.login != self.account_id:
+            return {"error_message": "Not logged in to the correct MT5 account for sync data fetch."}
+
+        deals_data = []
+        platform_remaining_size = Decimal('0.0')
+        is_closed_on_platform = False
+        latest_deal_timestamp = None
+        final_profit = None
+        final_commission = None
+        final_swap = None
+        error_message = None
+
+        mt5_deals_raw = mt5.history_deals_get(position=position_id)
+
+        if mt5_deals_raw is None:
+            err_code, err_msg = mt5.last_error()
+            error_message = f"history_deals_get(position={position_id}) failed: {err_code} - {err_msg}"
+            return {
+                "deals": [], "is_closed_on_platform": False, "platform_remaining_size": Decimal('0.0'),
+                "latest_deal_timestamp": None, "final_profit": None, "final_commission": None,
+                "final_swap": None, "error_message": error_message
+            }
+
+        if mt5_deals_raw:
+            sorted_deals = sorted(mt5_deals_raw, key=lambda d: d.time)
+            latest_deal_timestamp = sorted_deals[-1].time
+
+            for deal in sorted_deals:
+                deals_data.append({
+                    "ticket": deal.ticket,
+                    "order": deal.order,
+                    "time": deal.time,
+                    "time_msc": deal.time_msc,
+                    "type": deal.type,
+                    "entry": deal.entry,
+                    "magic": deal.magic,
+                    "reason": deal.reason,
+                    "position_id": deal.position_id,
+                    "volume": Decimal(str(deal.volume)),
+                    "price": Decimal(str(deal.price)),
+                    "commission": Decimal(str(deal.commission)),
+                    "swap": Decimal(str(deal.swap)),
+                    "profit": Decimal(str(deal.profit)),
+                    "symbol": deal.symbol,
+                    "comment": deal.comment,
+                })
+                
+                deal_volume = Decimal(str(deal.volume))
+                if deal.entry == mt5.DEAL_ENTRY_IN:
+                    platform_remaining_size += deal_volume
+                elif deal.entry == mt5.DEAL_ENTRY_OUT or deal.entry == mt5.DEAL_ENTRY_INOUT:
+                    platform_remaining_size -= deal_volume
+        
+        if platform_remaining_size <= Decimal('0.0') and mt5_deals_raw:
+            is_closed_on_platform = True
+        
+        open_mt5_positions = mt5.positions_get(symbol=instrument_symbol)
+        if open_mt5_positions is None:
+            err_code, err_msg = mt5.last_error()
+            print(f"Warning: positions_get(symbol={instrument_symbol}) failed: {err_code} - {err_msg}. Relying on deal volume for closure status.")
+        elif isinstance(open_mt5_positions, tuple):
+            found_open_position = any(p.ticket == position_id for p in open_mt5_positions)
+            if not found_open_position and mt5_deals_raw :
+                is_closed_on_platform = True
+            elif found_open_position:
+                 is_closed_on_platform = False
+
+        if is_closed_on_platform and mt5_deals_raw:
+            final_profit = sum(Decimal(str(d.profit)) for d in mt5_deals_raw)
+            final_commission = sum(Decimal(str(d.commission)) for d in mt5_deals_raw)
+            final_swap = sum(Decimal(str(d.swap)) for d in mt5_deals_raw)
+
+        return {
+            "deals": deals_data,
+            "is_closed_on_platform": is_closed_on_platform,
+            "platform_remaining_size": platform_remaining_size,
+            "latest_deal_timestamp": latest_deal_timestamp,
+            "final_profit": final_profit,
+            "final_commission": final_commission,
+            "final_swap": final_swap,
+            "error_message": error_message
+        }
+
+# --- FastAPI Models for Request/Response ---
+class AccountDetails(BaseModel):
+    account_id: int
+    password: str
+    broker_server: str
+
+class PlaceTradeRequest(AccountDetails):
+    symbol: str
+    lot_size: float
+    direction: str
+    order_type: str = "MARKET"
+    limit_price: Optional[float] = None
+    time_in_force: str = "GTC"
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+
+class CloseTradeRequest(AccountDetails):
+    ticket: int
+    volume: float
+    symbol: str
+
+class ModifyProtectionRequest(AccountDetails):
+    position_id: int
+    symbol: str
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+
+class GetPositionDetailsRequest(AccountDetails):
+    position_ticket: int
+
+class GetPositionByOrderRequest(AccountDetails):
+    order_id: int
+
+class GetClosedDealProfitRequest(AccountDetails):
+    ticket: int
+
+class SymbolInfoRequest(AccountDetails):
+    symbol: str
+
+class LivePriceRequest(AccountDetails):
+    symbol: str
+
+class FetchTradeSyncDataRequest(AccountDetails):
+    position_id: int
+    instrument_symbol: str
+
+# --- FastAPI Endpoints ---
+@app.post("/mt5/connect")
+async def connect_mt5(details: AccountDetails):
+    connector = MT5Connector(details.account_id, details.broker_server)
+    result = connector.connect(details.password)
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+@app.post("/mt5/trade")
+async def place_trade(trade_req: PlaceTradeRequest):
+    connector = MT5Connector(trade_req.account_id, trade_req.broker_server)
+    login_result = connector.connect(trade_req.password)
+    if "error" in login_result:
+        raise HTTPException(status_code=401, detail=login_result["error"])
+    
+    result = connector.place_trade(
+        symbol=trade_req.symbol,
+        lot_size=trade_req.lot_size,
+        direction=trade_req.direction,
+        order_type=trade_req.order_type,
+        limit_price=trade_req.limit_price,
+        time_in_force=trade_req.time_in_force,
+        stop_loss=trade_req.stop_loss,
+        take_profit=trade_req.take_profit,
+    )
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+@app.post("/mt5/positions/open")
+async def get_open_positions(details: AccountDetails):
+    connector = MT5Connector(details.account_id, details.broker_server)
+    login_result = connector.connect(details.password)
+    if "error" in login_result:
+        raise HTTPException(status_code=401, detail=login_result["error"])
+    
+    result = connector.get_open_positions()
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+@app.post("/mt5/positions/all")
+async def get_all_open_trades(details: AccountDetails):
+    """
+    New endpoint to get all open trades for a given account.
+    """
+    connector = MT5Connector(details.account_id, details.broker_server)
+    login_result = connector.connect(details.password)
+    if "error" in login_result:
+        raise HTTPException(status_code=401, detail=login_result["error"])
+    
+    result = connector.get_open_positions() # Reusing the existing function
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+@app.post("/mt5/positions/details")
+async def get_position_details(req: GetPositionDetailsRequest):
+    connector = MT5Connector(req.account_id, req.broker_server)
+    login_result = connector.connect(req.password)
+    if "error" in login_result:
+        raise HTTPException(status_code=401, detail=login_result["error"])
+    
+    result = connector.get_open_position_details_by_ticket(req.position_ticket)
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+@app.post("/mt5/positions/by_order")
+async def get_position_by_order(req: GetPositionByOrderRequest):
+    connector = MT5Connector(req.account_id, req.broker_server)
+    login_result = connector.connect(req.password)
+    if "error" in login_result:
+        raise HTTPException(status_code=401, detail=login_result["error"])
+    
+    result = connector.get_position_by_order_id(req.order_id)
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+@app.post("/mt5/positions/close")
+async def close_trade(req: CloseTradeRequest):
+    connector = MT5Connector(req.account_id, req.broker_server)
+    login_result = connector.connect(req.password)
+    if "error" in login_result:
+        raise HTTPException(status_code=401, detail=login_result["error"])
+    
+    result = connector.close_trade(req.ticket, req.volume, req.symbol)
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+@app.post("/mt5/positions/modify_protection")
+async def modify_position_protection(req: ModifyProtectionRequest):
+    connector = MT5Connector(req.account_id, req.broker_server)
+    login_result = connector.connect(req.password)
+    if "error" in login_result:
+        raise HTTPException(status_code=401, detail=login_result["error"])
+    
+    result = connector.modify_position_protection(req.position_id, req.symbol, req.stop_loss, req.take_profit)
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+@app.post("/mt5/account_info")
+async def get_account_info(details: AccountDetails):
+    connector = MT5Connector(details.account_id, details.broker_server)
+    login_result = connector.connect(details.password)
+    if "error" in login_result:
+        raise HTTPException(status_code=401, detail=login_result["error"])
+    
+    result = connector.get_account_info()
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+@app.post("/mt5/symbol_info")
+async def get_symbol_info(req: SymbolInfoRequest):
+    connector = MT5Connector(req.account_id, req.broker_server)
+    login_result = connector.connect(req.password)
+    if "error" in login_result:
+        raise HTTPException(status_code=401, detail=login_result["error"])
+    
+    result = connector.get_symbol_info(req.symbol)
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+@app.post("/mt5/price")
+async def get_live_price(req: LivePriceRequest):
+    connector = MT5Connector(req.account_id, req.broker_server)
+    login_result = connector.connect(req.password)
+    if "error" in login_result:
+        raise HTTPException(status_code=401, detail=login_result["error"])
+    
+    result = connector.get_live_price(req.symbol)
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+@app.post("/mt5/deals/closed_profit")
+async def get_closed_deal_profit(req: GetClosedDealProfitRequest):
+    connector = MT5Connector(req.account_id, req.broker_server)
+    login_result = connector.connect(req.password)
+    if "error" in login_result:
+        raise HTTPException(status_code=401, detail=login_result["error"])
+    
+    result = connector.get_closed_deal_profit(req.ticket)
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+@app.post("/mt5/deals/sync_data")
+async def fetch_trade_sync_data(req: FetchTradeSyncDataRequest):
+    connector = MT5Connector(req.account_id, req.broker_server)
+    login_result = connector.connect(req.password)
+    if "error" in login_result:
+        raise HTTPException(status_code=401, detail=login_result["error"])
+    
+    result = connector.fetch_trade_sync_data(req.position_id, req.instrument_symbol)
+    if "error_message" in result and result["error_message"] is not None:
+        raise HTTPException(status_code=400, detail=result["error_message"])
+    return result
+
+# Shutdown MT5 connection on app shutdown
+@app.on_event("shutdown")
+def shutdown_event():
+    if mt5.terminal_info():
+        print("Shutting down MT5 connection on app shutdown.")
+        mt5.shutdown()

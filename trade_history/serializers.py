@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from trading.models import Trade, Order, ProfitTarget
 from accounts.models import Account # Assuming Account model is in accounts.models
-from mt5.services import get_mt5_deal_reason # Import the MT5 specific function
+from trade_history.utils import get_mt5_deal_reason # Import the MT5 specific function
 
 class HistoricalOrderSerializer(serializers.ModelSerializer):
     deal_reason = serializers.SerializerMethodField()

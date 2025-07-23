@@ -1,5 +1,6 @@
 from decimal import Decimal
-from mt5.services import MT5Connector
+from trading_platform.mt5_api_client import MT5APIClient
+from django.conf import settings
 # If/when available, import a connector for cTrader:
 # from ctrader.services import CTraderConnector
 from accounts.services import get_account_details
@@ -16,13 +17,16 @@ def get_total_open_pnl(account) -> Decimal:
             mt5_account = account.mt5_account
         except Exception:
             return total_open_pnl
+
+        client = MT5APIClient(
+            base_url=settings.MT5_API_BASE_URL,
+            account_id=mt5_account.account_number,
+            password=mt5_account.encrypted_password,
+            broker_server=mt5_account.broker_server,
+            internal_account_id=str(account.id)
+        )
         
-        connector = MT5Connector(mt5_account.account_number, mt5_account.broker_server)
-        login_result = connector.connect(mt5_account.encrypted_password)
-        if "error" in login_result:
-            return total_open_pnl
-        
-        positions_response = connector.get_open_positions()
+        positions_response = client.get_open_positions()
         if "error" in positions_response:
             return total_open_pnl
         
