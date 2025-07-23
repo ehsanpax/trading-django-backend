@@ -9,13 +9,15 @@ https://docs.djangoproject.com/en/5.1/topics/settings/
 For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.1/ref/settings/
 """
+
 import os
 from pathlib import Path
 from datetime import timedelta
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
-MEDIA_URL = '/media/'
-MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
+MEDIA_URL = "/media/"
+MEDIA_ROOT = os.path.join(BASE_DIR, "media")
 CTRADER_API_BASE_URL = "http://localhost:8080"
 LOG_DIR = BASE_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)
@@ -23,7 +25,7 @@ LOG_DIR.mkdir(exist_ok=True)
 # See https://docs.djangoproject.com/en/5.1/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-$u3ceh^n!)-++(v@#0%zku#)p0djp0)z5v4v53&(ensmztfd$)'
+SECRET_KEY = "django-insecure-$u3ceh^n!)-++(v@#0%zku#)p0djp0)z5v4v53&(ensmztfd$)"
 CHART_IMG_API_KEY = "4Bx0ltLxeI3y8irqCiZTJ6A2WvJyuLJl1pmmWix5"
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
@@ -35,75 +37,75 @@ ALLOWED_HOSTS = ["*"]
 
 INSTALLED_APPS = [
     # Default Django apps...
-    'django.contrib.admin',
-    'django.contrib.auth',
-    'django.contrib.contenttypes',
-    'django.contrib.sessions',
-    'django.contrib.messages',
-    'django.contrib.staticfiles',
+    "django.contrib.admin",
+    "django.contrib.auth",
+    "django.contrib.contenttypes",
+    "django.contrib.sessions",
+    "django.contrib.messages",
+    "django.contrib.staticfiles",
     # Third-party apps
-    'rest_framework',
+    "rest_framework",
     "rest_framework.authtoken",
     # Your apps
-    'trading',
-    'accounts',
-    'connectors',
-    'corsheaders',
-    'mt5',
-    'trades',
-    'risk',
-    'price',
-    'channels',
-    'trade_journal',
-    'automations',
-    'indicators',
-    'calculators',
-    'trade_history',
-    'control',
-    'chart_snapshots.apps.ChartSnapshotsConfig',
-    'analysis', # Added new analysis app
-    'bots',
-    'ta',  # Technical Analysis app
-    'AI', # AI Prompts app
+    "trading",
+    "accounts",
+    "connectors",
+    "corsheaders",
+    "mt5",
+    "trades",
+    "risk",
+    "price",
+    "channels",
+    "trade_journal",
+    "automations",
+    "indicators",
+    "calculators",
+    "trade_history",
+    "control",
+    "chart_snapshots.apps.ChartSnapshotsConfig",
+    "analysis",  # Added new analysis app
+    "bots",
+    "ta",  # Technical Analysis app
+    "AI",  # AI Prompts app
 ]
 
 
-
 MIDDLEWARE = [
-    'django.middleware.security.SecurityMiddleware',
-    'django.contrib.sessions.middleware.SessionMiddleware',
-    'django.middleware.common.CommonMiddleware',
-    'django.middleware.csrf.CsrfViewMiddleware',
-    'django.contrib.auth.middleware.AuthenticationMiddleware',
-    'django.contrib.messages.middleware.MessageMiddleware',
-    'django.middleware.clickjacking.XFrameOptionsMiddleware',
-    'corsheaders.middleware.CorsMiddleware',
-    'django.middleware.common.CommonMiddleware',
+    "django.middleware.security.SecurityMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",
+    "django.contrib.sessions.middleware.SessionMiddleware",
+    "django.middleware.common.CommonMiddleware",
+    "django.middleware.csrf.CsrfViewMiddleware",
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "django.contrib.messages.middleware.MessageMiddleware",
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "corsheaders.middleware.CorsMiddleware",
+    "django.middleware.common.CommonMiddleware",
 ]
 
 CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
 
-ROOT_URLCONF = 'trading_platform.urls'
+ROOT_URLCONF = "trading_platform.urls"
 
 TEMPLATES = [
     {
-        'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
-        'APP_DIRS': True,
-        'OPTIONS': {
-            'context_processors': [
-                'django.template.context_processors.debug',
-                'django.template.context_processors.request',
-                'django.contrib.auth.context_processors.auth',
-                'django.contrib.messages.context_processors.messages',
+        "BACKEND": "django.template.backends.django.DjangoTemplates",
+        "DIRS": [],
+        "APP_DIRS": True,
+        "OPTIONS": {
+            "context_processors": [
+                "django.template.context_processors.debug",
+                "django.template.context_processors.request",
+                "django.contrib.auth.context_processors.auth",
+                "django.contrib.messages.context_processors.messages",
             ],
         },
     },
 ]
 
-WSGI_APPLICATION = 'trading_platform.wsgi.application'
-ASGI_APPLICATION = 'trading_platform.routing.application'
+WSGI_APPLICATION = "trading_platform.wsgi.application"
+ASGI_APPLICATION = "trading_platform.routing.application"
 
 # Channels
 CHANNEL_LAYERS = {
@@ -118,14 +120,15 @@ CHANNEL_LAYERS = {
 # Database
 # https://docs.djangoproject.com/en/5.1/ref/settings/#databases
 
+
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'trading',
-        'USER': 'paksisadmin',
-        'PASSWORD': 'P4ks1s_90fT2&2',
-        'HOST': 'localhost',
-        'PORT': '5432',
+    "default": {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": "trading_platform",
+        "USER": "postgres",
+        "PASSWORD": "postgres",
+        "HOST": "localhost",
+        "PORT": "5432",
     }
 }
 
@@ -135,16 +138,16 @@ DATABASES = {
 
 AUTH_PASSWORD_VALIDATORS = [
     {
-        'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
+        "NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator",
     },
     {
-        'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
+        "NAME": "django.contrib.auth.password_validation.MinimumLengthValidator",
     },
     {
-        'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator',
+        "NAME": "django.contrib.auth.password_validation.CommonPasswordValidator",
     },
     {
-        'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator',
+        "NAME": "django.contrib.auth.password_validation.NumericPasswordValidator",
     },
 ]
 
@@ -152,9 +155,9 @@ AUTH_PASSWORD_VALIDATORS = [
 # Internationalization
 # https://docs.djangoproject.com/en/5.1/topics/i18n/
 
-LANGUAGE_CODE = 'en-us'
+LANGUAGE_CODE = "en-us"
 
-TIME_ZONE = 'UTC'
+TIME_ZONE = "UTC"
 
 USE_I18N = True
 
@@ -164,26 +167,26 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.1/howto/static-files/
 
-STATIC_URL = 'static/'
+STATIC_URL = "static/"
+STATIC_ROOT = os.path.join(BASE_DIR, "static")
+STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.1/ref/settings/#default-auto-field
 
-DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 REST_FRAMEWORK = {
-    'DEFAULT_AUTHENTICATION_CLASSES': [
-        'rest_framework_simplejwt.authentication.JWTAuthentication',  # adjust the module path as needed
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "rest_framework_simplejwt.authentication.JWTAuthentication",  # adjust the module path as needed
         # ... other authentication classes if necessary
     ],
-    'DEFAULT_PERMISSION_CLASSES': (
-        'rest_framework.permissions.IsAuthenticated',
-    ),
+    "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
 }
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(hours=8),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
-    'AUTH_HEADER_TYPES': ('Bearer',),
+    "ACCESS_TOKEN_LIFETIME": timedelta(hours=8),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
+    "AUTH_HEADER_TYPES": ("Bearer",),
 }
 
 CTRADER_TOKEN_STORAGE = "ctrader_tokens.json"
@@ -242,9 +245,10 @@ SYMBOL_EXCHANGE_MAP = {
 
 # ─── Which timeframes to compute ────────────────────
 from tvDatafeed import Interval
+
 INDICATOR_TIMEFRAMES = {
-    "M1":  Interval.in_1_minute,
-    "M5":  Interval.in_5_minute,
+    "M1": Interval.in_1_minute,
+    "M5": Interval.in_5_minute,
     # add more as needed…
 }
 
@@ -255,18 +259,20 @@ CELERY_BROKER_URL = "redis://localhost:6379/0"
 
 # Celery Worker Soft/Hard Limits to prevent memory leaks and crashes
 CELERYD_MAX_TASKS_PER_CHILD = 100  # Restart worker process after 100 tasks
-CELERYD_MAX_MEMORY_PER_CHILD = 500000 # Restart worker process if memory exceeds 500MB (in KB)
+CELERYD_MAX_MEMORY_PER_CHILD = (
+    500000  # Restart worker process if memory exceeds 500MB (in KB)
+)
 
 CELERY_TASK_ROUTES = {
-    'bots.tasks.live_loop': {'queue': 'live_bots'},
-    'bots.tasks.run_backtest': {'queue': 'backtests'},
+    "bots.tasks.live_loop": {"queue": "live_bots"},
+    "bots.tasks.run_backtest": {"queue": "backtests"},
     # Define other task routes here if needed, or use a wildcard for default queue
     # 'myapp.tasks.*': {'queue': 'default_queue'},
 }
 
-CELERY_RESULT_BACKEND = "redis://localhost:6379/0" # Added for analysis app
-DATA_ROOT = BASE_DIR / 'analysis_data' # Added for analysis app
-DATA_ROOT.mkdir(exist_ok=True) # Ensure the directory exists
+CELERY_RESULT_BACKEND = "redis://localhost:6379/0"  # Added for analysis app
+DATA_ROOT = BASE_DIR / "analysis_data"  # Added for analysis app
+DATA_ROOT.mkdir(exist_ok=True)  # Ensure the directory exists
 
-OANDA_ACCESS_TOKEN = "8617505e3109641a4bc8b10bcbf546ed-d1a4b2273a700dcbc4840439c9701e42" # Added for OANDA data fetcher
-OANDA_ENVIRONMENT = "practice" # Added for OANDA data fetcher
+OANDA_ACCESS_TOKEN = "8617505e3109641a4bc8b10bcbf546ed-d1a4b2273a700dcbc4840439c9701e42"  # Added for OANDA data fetcher
+OANDA_ENVIRONMENT = "practice"  # Added for OANDA data fetcher

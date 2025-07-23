@@ -6,35 +6,44 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('bots', '0002_backtestconfig_timeframe'),
+        ("bots", "0002_remove_botversion_code_hash_unique_constraint"),
     ]
 
     operations = [
         migrations.RemoveField(
-            model_name='bot',
-            name='strategy_template',
+            model_name="bot",
+            name="strategy_template",
         ),
         migrations.AddField(
-            model_name='botversion',
-            name='indicator_configs',
-            field=models.JSONField(default=list, help_text="List of indicator configurations, e.g., [{'name': 'EMA', 'params': {'length': 20}}]"),
+            model_name="botversion",
+            name="indicator_configs",
+            field=models.JSONField(
+                default=list,
+                help_text="List of indicator configurations, e.g., [{'name': 'EMA', 'params': {'length': 20}}]",
+            ),
         ),
         migrations.AddField(
-            model_name='botversion',
-            name='strategy_name',
-            field=models.CharField(default='', help_text="Name of the strategy from the registry, e.g., 'ema_crossover_v1'", max_length=255),
+            model_name="botversion",
+            name="strategy_name",
+            field=models.CharField(
+                default="",
+                help_text="Name of the strategy from the registry, e.g., 'ema_crossover_v1'",
+                max_length=255,
+            ),
         ),
         migrations.AddField(
-            model_name='botversion',
-            name='strategy_params',
-            field=models.JSONField(default=dict, help_text='Parameters for the chosen strategy'),
+            model_name="botversion",
+            name="strategy_params",
+            field=models.JSONField(
+                default=dict, help_text="Parameters for the chosen strategy"
+            ),
         ),
         migrations.RemoveField(
-            model_name='botversion',
-            name='code_hash',
+            model_name="botversion",
+            name="code_hash",
         ),
         migrations.RemoveField(
-            model_name='botversion',
-            name='params',
+            model_name="botversion",
+            name="params",
         ),
     ]
