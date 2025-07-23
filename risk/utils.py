@@ -22,7 +22,8 @@ def get_total_open_pnl(account) -> Decimal:
             base_url=settings.MT5_API_BASE_URL,
             account_id=mt5_account.account_number,
             password=mt5_account.encrypted_password,
-            broker_server=mt5_account.broker_server
+            broker_server=mt5_account.broker_server,
+            internal_account_id=str(account.id)
         )
         
         positions_response = client.get_open_positions()

@@ -61,7 +61,8 @@ def partially_close_trade(user, trade_id: UUID, volume_to_close: Decimal) -> dic
             base_url=settings.MT5_API_BASE_URL,
             account_id=mt5_account.account_number,
             password=mt5_account.encrypted_password,
-            broker_server=mt5_account.broker_server
+            broker_server=mt5_account.broker_server,
+            internal_account_id=str(trade.account.id)
         )
 
         if not trade.position_id:
@@ -174,7 +175,8 @@ class TradeService:
                 base_url=settings.MT5_API_BASE_URL,
                 account_id=mt5_acc.account_number,
                 password=mt5_acc.encrypted_password,
-                broker_server=mt5_acc.broker_server
+                broker_server=mt5_acc.broker_server,
+                internal_account_id=str(account.id)
             )
 
         if account.platform == "cTrader":
@@ -380,7 +382,8 @@ def close_trade_globally(user, trade_id: UUID) -> dict:
             base_url=settings.MT5_API_BASE_URL,
             account_id=mt5_account.account_number,
             password=mt5_account.encrypted_password,
-            broker_server=mt5_account.broker_server
+            broker_server=mt5_account.broker_server,
+            internal_account_id=str(trade.account.id)
         )
 
         mt5_position_ticket_to_close = trade.position_id
@@ -454,7 +457,8 @@ def synchronize_trade_with_platform(trade_id: UUID, existing_connector: MT5APICl
                 base_url=settings.MT5_API_BASE_URL,
                 account_id=mt5_account_details.account_number,
                 password=mt5_account_details.encrypted_password,
-                broker_server=mt5_account_details.broker_server
+                broker_server=mt5_account_details.broker_server,
+                internal_account_id=str(trade_instance.account.id)
             )
         
         if not connector_to_use:
@@ -608,7 +612,8 @@ def update_trade_protection_levels(user,
             base_url=settings.MT5_API_BASE_URL,
             account_id=mt5_account.account_number,
             password=mt5_account.encrypted_password,
-            broker_server=mt5_account.broker_server
+            broker_server=mt5_account.broker_server,
+            internal_account_id=str(account.id)
         )
 
         if not trade.position_id:
@@ -686,7 +691,8 @@ def update_trade_stop_loss_globally(user,
             base_url=settings.MT5_API_BASE_URL,
             account_id=mt5_account.account_number,
             password=mt5_account.encrypted_password,
-            broker_server=mt5_account.broker_server
+            broker_server=mt5_account.broker_server,
+            internal_account_id=str(account.id)
         )
         
         if not trade.position_id:

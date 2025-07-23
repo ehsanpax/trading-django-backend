@@ -2,17 +2,20 @@ import requests
 from typing import Dict, Any, Optional
 
 class MT5APIClient:
-    def __init__(self, base_url: str, account_id: int, password: str, broker_server: str):
+    def __init__(self, base_url: str, account_id: int, password: str, broker_server: str, internal_account_id: str):
         self.base_url = base_url
         self.account_id = account_id
         self.password = password
         self.broker_server = broker_server
+        self.internal_account_id = internal_account_id
 
     def _get_auth_payload(self) -> Dict[str, Any]:
+        print("Using MT5 API client with account ID:", self.account_id)
         return {
-            "account_id": self.account_id,
+            "account_id": self.account_id, # This is the MT5 account number
             "password": self.password,
             "broker_server": self.broker_server,
+            "internal_account_id": self.internal_account_id, # This is the internal account ID for the trading platform
         }
 
     def _post(self, endpoint: str, json_data: Dict[str, Any]) -> Dict[str, Any]:

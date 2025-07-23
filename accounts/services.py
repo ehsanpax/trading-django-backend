@@ -24,7 +24,8 @@ def get_account_details(account_id, user):
             base_url=settings.MT5_API_BASE_URL,
             account_id=mt5_account.account_number,
             password=mt5_account.encrypted_password,
-            broker_server=mt5_account.broker_server
+            broker_server=mt5_account.broker_server,
+            internal_account_id=str(account.id)
         )
         
         account_info = client.get_account_info()

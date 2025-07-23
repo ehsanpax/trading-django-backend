@@ -30,7 +30,8 @@ def fetch_symbol_info_for_platform(account, symbol: str) -> dict:
             base_url=settings.MT5_API_BASE_URL,
             account_id=mt5_account.account_number,
             password=mt5_account.encrypted_password,
-            broker_server=mt5_account.broker_server
+            broker_server=mt5_account.broker_server,
+            internal_account_id=str(account.id)
         )
         try:
             symbol_info = client.get_symbol_info(symbol)
@@ -134,7 +135,8 @@ def fetch_live_price_for_platform(account, symbol: str) -> dict:
             base_url=settings.MT5_API_BASE_URL,
             account_id=mt5_account.account_number,
             password=mt5_account.encrypted_password,
-            broker_server=mt5_account.broker_server
+            broker_server=mt5_account.broker_server,
+            internal_account_id=str(account.id)
         )
         try:
             price_data = client.get_live_price(symbol)

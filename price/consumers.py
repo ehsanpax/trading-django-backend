@@ -56,7 +56,8 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
                 base_url=settings.MT5_API_BASE_URL,
                 account_id=self.mt5_account.account_number,
                 password=self.mt5_account.encrypted_password,
-                broker_server=self.mt5_account.broker_server
+                broker_server=self.mt5_account.broker_server,
+                internal_account_id=str(self.account.id)
             )
             
             self.price_task = asyncio.create_task(self.price_stream())
@@ -105,6 +106,9 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
 
         elif action == "remove_indicator":
             await self.handle_remove_indicator(content)
+
+        elif action == "unsubscribe":
+            await self.handle_unsubscribe(content)
 
         else:
             logger.warning(f"Received unknown action: {action}")
@@ -178,6 +182,13 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
             await self.send_json({"type": "indicator_removed", "unique_id": unique_id})
         else:
             await self.send_json({"error": f"Indicator with unique_id '{unique_id}' not active"})
+
+    async def handle_unsubscribe(self, content):
+        logger.info(f"Unsubscribing from {self.symbol} for account {self.account_id}")
+        if self.price_task:
+            self.price_task.cancel()
+        await self.send_json({"type": "unsubscribed", "symbol": self.symbol})
+        await self.close()
 
     async def price_stream(self):
         last_candle = None
