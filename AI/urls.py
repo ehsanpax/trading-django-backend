@@ -1,10 +1,17 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import PromptViewSet
+from .views import PromptViewSet, StoreSessionExecutionViewset
 
-router = DefaultRouter()
-router.register(r'prompts', PromptViewSet)
 
 urlpatterns = [
-    path('', include(router.urls)),
+    path(
+        "prompts/",
+        PromptViewSet.as_view({"get": "list", "post": "create"}),
+        name="prompt-list-create",
+    ),
+    path(
+        "session-executions/",
+        StoreSessionExecutionViewset.as_view(),
+        name="session-execution-create",
+    ),
 ]

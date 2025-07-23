@@ -181,4 +181,4 @@ cython_debug/
 #csv and parquet files
 *.csv
 *.parquet
-
+static/*
