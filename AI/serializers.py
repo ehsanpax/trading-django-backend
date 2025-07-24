@@ -49,3 +49,20 @@ class SessionExecutionSerializer(serializers.Serializer):
             execution=execution,
         )
         return session_execution
+
+
+class ChatSessionSerializer(serializers.ModelSerializer):
+
+    class Meta:
+        model = ChatSession
+        fields = [
+            "id",
+            "external_session_id",
+            "user_first_message",
+            "session_data",
+            "user",
+            "created_at",
+        ]
+        read_only_fields = [
+            "user"
+        ]  # User is set by the view, not directly by the client
