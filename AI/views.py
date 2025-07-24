@@ -1,7 +1,12 @@
 from rest_framework import viewsets, permissions
-from .models import Prompt
-from .serializers import PromptSerializer, SessionExecutionSerializer
+from .models import Prompt, ChatSession
+from .serializers import (
+    PromptSerializer,
+    SessionExecutionSerializer,
+    ChatSessionSerializer,
+)
 from rest_framework.views import APIView
+from rest_framework.viewsets import ModelViewSet
 from rest_framework.authentication import TokenAuthentication
 from rest_framework.response import Response
 from rest_framework import status
@@ -46,3 +51,12 @@ class StoreSessionExecutionViewset(APIView):
             },
             status=status.HTTP_201_CREATED,
         )
+
+
+class ChatSessionViewset(ModelViewSet):
+    serializer_class = ChatSessionSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    queryset = ChatSession.objects.all()
+
+    def get_queryset(self):
+        return super().get_queryset().filter(user=self.request.user)
