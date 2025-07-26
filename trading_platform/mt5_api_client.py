@@ -1,4 +1,5 @@
 import requests
+import json
 from typing import Dict, Any, Optional
 
 class MT5APIClient:
@@ -10,7 +11,7 @@ class MT5APIClient:
         self.internal_account_id = internal_account_id
 
     def _get_auth_payload(self) -> Dict[str, Any]:
-        print("Using MT5 API client with account ID:", self.account_id)
+        #print("Using MT5 API client with account ID:", self.account_id)
         return {
             "account_id": self.account_id, # This is the MT5 account number
             "password": self.password,
@@ -20,7 +21,23 @@ class MT5APIClient:
 
     def _post(self, endpoint: str, json_data: Dict[str, Any]) -> Dict[str, Any]:
         try:
-            response = requests.post(f"{self.base_url}{endpoint}", json=json_data, timeout=10)
+            headers = {'Content-Type': 'application/json'}
+            response = requests.post(
+                f"{self.base_url}{endpoint}",
+                json=json_data,
+                headers=headers,
+                timeout=10
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.Timeout:
+            return {"error": "Request to MT5 API service timed out."}
+        except requests.exceptions.RequestException as e:
+            return {"error": f"Request to MT5 API service failed: {e}"}
+
+    def _delete(self, endpoint: str) -> Dict[str, Any]:
+        try:
+            response = requests.delete(f"{self.base_url}{endpoint}", timeout=10)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.Timeout:
@@ -29,10 +46,13 @@ class MT5APIClient:
             return {"error": f"Request to MT5 API service failed: {e}"}
 
     def connect(self) -> Dict[str, Any]:
+        #print("requesing MT5 API to connect at base URL:", self.base_url)
         return self._post("/mt5/connect", self._get_auth_payload())
 
     def get_account_info(self) -> Dict[str, Any]:
+        #print("REQUESTING MT5 API to connect at base URL:", self.base_url)
         return self._post("/mt5/account_info", self._get_auth_payload())
+        
 
     def get_open_positions(self) -> Dict[str, Any]:
         return self._post("/mt5/positions/open", self._get_auth_payload())
@@ -51,6 +71,7 @@ class MT5APIClient:
             "stop_loss": stop_loss,
             "take_profit": take_profit,
         })
+        print("Placing trade with payload:", payload)
         return self._post("/mt5/trade", json_data=payload)
 
     def close_trade(self, ticket: int, volume: float, symbol: str) -> Dict[str, Any]:
@@ -98,3 +119,6 @@ class MT5APIClient:
             "count": count,
         })
         return self._post("/mt5/candles", json_data=payload)
+
+    def delete_instance(self) -> Dict[str, Any]:
+        return self._delete(f"/mt5/instance/{self.internal_account_id}")

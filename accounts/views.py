@@ -23,6 +23,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 import traceback
 from accounts.services import get_account_details
+from trading_platform.mt5_api_client import MT5APIClient
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CTRADER_TOKEN_STORAGE = os.path.join(BASE_DIR, "ctrader_tokens.json")
@@ -126,10 +127,25 @@ class DeleteAccountView(APIView):
         # 1️⃣ Fetch the account and ensure it belongs to the current user
         account = get_object_or_404(Account, id=account_id, user=request.user)
 
-        # 2️⃣ If you want to also delete linked MT5 account
-        #    (assuming OneToOne or reverse relation named `mt5_account`)
-        if hasattr(account, "mt5_account"):
-            account.mt5_account.delete()
+        # 2️⃣ If it's an MT5 account, delete the instance from the MT5 API server
+        if account.platform == "MT5" and hasattr(account, "mt5_account"):
+            mt5_account = account.mt5_account
+            client = MT5APIClient(
+                base_url=settings.MT5_API_BASE_URL,
+                account_id=mt5_account.account_number,
+                password=mt5_account.encrypted_password,  # Assuming this is the password
+                broker_server=mt5_account.broker_server,
+                internal_account_id=str(account.id)
+            )
+            response = client.delete_instance()
+            if "error" in response:
+                logger.error(f"Failed to delete MT5 instance for account {account.id}: {response['error']}")
+                # Decide if you want to stop the deletion process here or just log the error
+                # For now, we'll log and continue
+            else:
+                logger.info(f"Successfully deleted MT5 instance for account {account.id}")
+
+            mt5_account.delete()
 
         # 3️⃣ If you want to also delete linked cTrader account
         #    (assuming OneToOne or reverse relation named `ctrader_account`)
