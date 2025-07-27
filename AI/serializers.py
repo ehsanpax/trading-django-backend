@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from .models import Prompt, Execution, ChatSession, SessionExecution
+from trade_journal.models import TradeJournal
 
 
 class PromptSerializer(serializers.ModelSerializer):
@@ -66,3 +67,9 @@ class ChatSessionSerializer(serializers.ModelSerializer):
         read_only_fields = [
             "user"
         ]  # User is set by the view, not directly by the client
+
+
+class TradeJournalSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TradeJournal
+        fields = "__all__"
