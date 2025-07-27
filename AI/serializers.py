@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from .models import Prompt, Execution, ChatSession, SessionExecution
 from trade_journal.models import TradeJournal
+from django.db import models
 
 
 class PromptSerializer(serializers.ModelSerializer):
@@ -53,6 +54,7 @@ class SessionExecutionSerializer(serializers.Serializer):
 
 
 class ChatSessionSerializer(serializers.ModelSerializer):
+    total_cost = serializers.SerializerMethodField()
 
     class Meta:
         model = ChatSession
@@ -63,10 +65,19 @@ class ChatSessionSerializer(serializers.ModelSerializer):
             "session_data",
             "user",
             "created_at",
+            "total_cost",
         ]
         read_only_fields = [
             "user"
         ]  # User is set by the view, not directly by the client
+
+    def get_total_cost(self, obj):
+        """
+        Calculate the total cost of all executions associated with this chat session.
+        """
+        return obj.executions.aggregate(total_cost=models.Sum("execution__total_cost"))[
+            "total_cost"
+        ]
 
 
 class TradeJournalSerializer(serializers.ModelSerializer):
