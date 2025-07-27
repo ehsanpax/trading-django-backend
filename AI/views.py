@@ -61,7 +61,12 @@ class ChatSessionViewset(ModelViewSet):
     queryset = ChatSession.objects.all()
 
     def get_queryset(self):
-        return super().get_queryset().filter(user=self.request.user)
+        return (
+            super()
+            .get_queryset()
+            .filter(user=self.request.user)
+            .order_by("-created_at")
+        )
 
 
 class TradeJournalViewset(ModelViewSet):
@@ -71,4 +76,9 @@ class TradeJournalViewset(ModelViewSet):
     queryset = TradeJournal.objects.all()
 
     def get_queryset(self):
-        return super().get_queryset().filter(trade__account__user=self.request.user)
+        return (
+            super()
+            .get_queryset()
+            .filter(trade__account__user=self.request.user)
+            .order_by("-created_at")
+        )
