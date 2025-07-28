@@ -7,6 +7,7 @@ class ChartProfile(models.Model):
     symbol = models.CharField(max_length=20)
     timeframe = models.CharField(max_length=10)
     indicators = models.JSONField(default=list)
+    is_default = models.BooleanField(default=False)
 
     def __str__(self):
         return f"{self.name} ({self.symbol} {self.timeframe}) by {self.user.username}"

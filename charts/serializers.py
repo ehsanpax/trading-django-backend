@@ -4,5 +4,5 @@ from .models import ChartProfile
 class ChartProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = ChartProfile
-        fields = ['id', 'name', 'symbol', 'timeframe', 'indicators']
+        fields = ['id', 'name', 'symbol', 'timeframe', 'indicators', 'is_default']
         read_only_fields = ['user']

@@ -174,19 +174,31 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
             await self.send_json({"error": f"Could not fetch historical data for indicator: {candles['error']}"})
             return
 
-        self.historical_data = pd.DataFrame(candles)
+        self.historical_data = pd.DataFrame(candles.get('candles', []))
+        if self.historical_data.empty:
+            await self.send_json({"error": "No historical data returned to calculate indicator."})
+            return
+            
+        self.historical_data.set_index('time', inplace=True)
         
         # Calculate the indicator for the historical data
         self.historical_data = self.indicator_service.calculate_indicator(self.historical_data, indicator_name, params)
         
+        self.historical_data.reset_index(inplace=True)
+
         # Send the historical indicator data to the client
-        indicator_data = self.historical_data[['time', f"{indicator_name}_{params.get('length', '')}"]].to_dict('records')
+        indicator_column_name = f"{indicator_name}_{params.get('length', '')}" # Construct the column name
+        if indicator_column_name not in self.historical_data.columns:
+             await self.send_json({"error": f"Indicator column '{indicator_column_name}' not found after calculation."})
+             return
+
+        indicator_data = self.historical_data[['time', indicator_column_name]].to_dict('records')
         
         await self.send_json({
             "type": "indicator_data",
             "indicator": indicator_name,
-            "unique_id": unique_id, # Include the unique_id
-            "params": params,       # Include the params
+            "unique_id": unique_id,
+            "params": params,
             "data": indicator_data
         })
 
@@ -226,7 +238,7 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
 
     async def send_candle_update(self, candle_data):
         """Callback function to send new candle updates to the client."""
-        #logger.info(f"Received candle update from MT5 for {self.symbol} {self.timeframe} for account {self.account_id}: {json.dumps(candle_data)}")
+        logger.info(f"Received candle update from MT5 for {self.symbol} {self.timeframe} for account {self.account_id}: {json.dumps(candle_data)}")
         payload = {
             "type": "new_candle",
             "data": candle_data
