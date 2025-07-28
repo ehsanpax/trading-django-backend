@@ -78,3 +78,4 @@ websockets==15.0.1
 yarl==1.19.0
 zope.interface==7.2
 whitenoise==6.2.0
+django-environ

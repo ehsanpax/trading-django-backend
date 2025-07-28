@@ -13,25 +13,33 @@ https://docs.djangoproject.com/en/5.1/ref/settings/
 import os
 from pathlib import Path
 from datetime import timedelta
+import environ
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Initialize environment variables
+env = environ.Env(
+    DEBUG=(bool, False)
+)
+environ.Env.read_env(os.path.join(BASE_DIR, ".env"))
+
 MEDIA_URL = "/media/"
 MEDIA_ROOT = os.path.join(BASE_DIR, "media")
-CTRADER_API_BASE_URL = "http://localhost:8080"
-MT5_API_BASE_URL = "http://host.docker.internal:8001"
-LOG_DIR = BASE_DIR / "logs"
+CTRADER_API_BASE_URL = env("CTRADER_API_BASE_URL")
+MT5_API_BASE_URL = env("MT5_API_BASE_URL")
+LOG_DIR = BASE_DIR / env("LOG_DIR", default="logs")
 LOG_DIR.mkdir(exist_ok=True)
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.1/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = "django-insecure-$u3ceh^n!)-++(v@#0%zku#)p0djp0)z5v4v53&(ensmztfd$)"
-CHART_IMG_API_KEY = "4Bx0ltLxeI3y8irqCiZTJ6A2WvJyuLJl1pmmWix5"
+SECRET_KEY = env("SECRET_KEY")
+CHART_IMG_API_KEY = env("CHART_IMG_API_KEY")
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = env.bool("DEBUG", default=False)
 
-ALLOWED_HOSTS = ["*"]
+ALLOWED_HOSTS = env.list("ALLOWED_HOSTS", default=["*"])
 
 
 # Application definition
@@ -124,12 +132,12 @@ CHANNEL_LAYERS = {
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'trading',
-        'USER': 'paksisadmin',
-        'PASSWORD': 'P4ks1s_90fT2&2',
-        'HOST': 'db',
-        'PORT': '5432',
+        'ENGINE': env("DB_ENGINE"),
+        'NAME': env("DB_NAME"),
+        'USER': env("DB_USER"),
+        'PASSWORD': env("DB_PASSWORD"),
+        'HOST': env("DB_HOST"),
+        'PORT': env("DB_PORT"),
     }
 }
 
@@ -190,7 +198,7 @@ SIMPLE_JWT = {
     "AUTH_HEADER_TYPES": ("Bearer",),
 }
 
-CTRADER_TOKEN_STORAGE = "ctrader_tokens.json"
+CTRADER_TOKEN_STORAGE = env("CTRADER_TOKEN_STORAGE", default="ctrader_tokens.json")
 
 LOGGING = {
     "version": 1,
@@ -233,8 +241,8 @@ LOGGING = {
 
 
 # ─── TradingView login ─────────────────────────────
-TV_USERNAME = "your_tv_username"
-TV_PASSWORD = "your_tv_password"
+TV_USERNAME = env("TV_USERNAME")
+TV_PASSWORD = env("TV_PASSWORD")
 
 # ─── Which symbols & where to fetch them ───────────
 INDICATOR_SYMBOLS = ["EURUSD", "GBPUSD", "XAUUSD"]
@@ -249,7 +257,7 @@ SYMBOL_EXCHANGE_MAP = {
 
 
 # ─── Celery broker & beat ───────────────────────────
-CELERY_BROKER_URL = "redis://redis:6379/0"
+CELERY_BROKER_URL = env("CELERY_BROKER_URL")
 # CELERY_BEAT_SCHEDULE is now defined in trading_platform/celery_app.py
 # Ensure django-celery-beat is not also scheduling this task via the admin if it's installed.
 
@@ -266,9 +274,9 @@ CELERY_TASK_ROUTES = {
     # 'myapp.tasks.*': {'queue': 'default_queue'},
 }
 
-CELERY_RESULT_BACKEND = "redis://redis:6379/0" # Added for analysis app
+CELERY_RESULT_BACKEND = env("CELERY_RESULT_BACKEND")
 DATA_ROOT = BASE_DIR / 'analysis_data' # Added for analysis app
 DATA_ROOT.mkdir(exist_ok=True) # Ensure the directory exists
 
-OANDA_ACCESS_TOKEN = "8617505e3109641a4bc8b10bcbf546ed-d1a4b2273a700dcbc4840439c9701e42"  # Added for OANDA data fetcher
-OANDA_ENVIRONMENT = "practice"  # Added for OANDA data fetcher
+OANDA_ACCESS_TOKEN = env("OANDA_ACCESS_TOKEN")
+OANDA_ENVIRONMENT = env("OANDA_ENVIRONMENT")
