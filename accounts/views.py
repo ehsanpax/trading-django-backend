@@ -37,7 +37,7 @@ class CreateAccountView(APIView):
     Creates a new trading account and links it to a platform-specific record (MT5 or cTrader).
     """
     permission_classes = [IsAuthenticated]
-
+    print("TTTTTTESTTTTTTTTTTTTTTTT")
     def post(self, request, format=None):
         serializer = AccountCreateSerializer(data=request.data)
         if serializer.is_valid():
@@ -88,6 +88,7 @@ class ListAccountsView(APIView):
         user = request.user
         accounts = Account.objects.filter(user=user)
         serializer = AccountSerializer(accounts, many=True)
+        print(f"Returning {len(serializer.data)} accounts for user {user.id}")
         return Response(serializer.data, status=status.HTTP_200_OK)
     
 
@@ -126,7 +127,7 @@ class DeleteAccountView(APIView):
     def delete(self, request, account_id):
         # 1️⃣ Fetch the account and ensure it belongs to the current user
         account = get_object_or_404(Account, id=account_id, user=request.user)
-
+        logger.info(f"Deleting accountttttt {account_id} for user {request.user.id}")
         # 2️⃣ If it's an MT5 account, delete the instance from the MT5 API server
         if account.platform == "MT5" and hasattr(account, "mt5_account"):
             mt5_account = account.mt5_account

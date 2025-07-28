@@ -1,3 +1,4 @@
+import logging
 from channels.auth import AuthMiddlewareStack
 from rest_framework_simplejwt.tokens import AccessToken
 from django.contrib.auth.models import AnonymousUser
@@ -5,6 +6,7 @@ from channels.db import database_sync_to_async
 from django.contrib.auth import get_user_model
 
 User = get_user_model()
+logger = logging.getLogger(__name__)
 
 @database_sync_to_async
 def get_user(token_key):
@@ -20,6 +22,7 @@ class TokenAuthMiddleware:
         self.inner = inner
 
     async def __call__(self, scope, receive, send):
+        logger.info(f"WebSocket connection attempt with path: {scope.get('path')}")
         query_string = scope.get("query_string", b"").decode("utf-8")
         if "token" in query_string:
             try:

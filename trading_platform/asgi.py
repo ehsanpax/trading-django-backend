@@ -1,24 +1,13 @@
 # trading_platform/asgi.py
 import os
 import django
-from channels.routing import ProtocolTypeRouter, URLRouter
-from channels.auth import AuthMiddlewareStack
 from django.core.asgi import get_asgi_application
 
-
+# Set the DJANGO_SETTINGS_MODULE environment variable.
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'trading_platform.settings')
 
-application = get_asgi_application()
+# Initialize Django application.
+django.setup()
 
-
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'trading_platform.settings')
-
-import price.routing  # your price app’s routing, for example
-application = ProtocolTypeRouter({
-    "http": get_asgi_application(),
-    "websocket": AuthMiddlewareStack(
-        URLRouter(
-            price.routing.websocket_urlpatterns
-        )
-    ),
-})
+# Import the routing configuration after Django is set up.
+from trading_platform.routing import application

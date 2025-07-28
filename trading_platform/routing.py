@@ -1,14 +1,21 @@
 from channels.routing import ProtocolTypeRouter, URLRouter
+from django.core.asgi import get_asgi_application
 from django.urls import re_path
-import bots.routing
-import price.routing
+from accounts.consumers import AccountConsumer
+from bots.consumers import BacktestConsumer
+from price.consumers import PriceConsumer
 from .token_auth import TokenAuthMiddlewareStack
 
 application = ProtocolTypeRouter({
+    "http": get_asgi_application(),
     "websocket": TokenAuthMiddlewareStack(
-        URLRouter(
-            bots.routing.websocket_urlpatterns +
-            price.routing.websocket_urlpatterns
-        )
+        URLRouter([
+            # Accounts
+            re_path(r'^ws/accounts/(?P<account_id>[0-9a-f-]+)/$', AccountConsumer.as_asgi()),
+            # Bots
+            re_path(r'^ws/backtest/(?P<backtest_run_id>[0-9a-f-]+)/$', BacktestConsumer.as_asgi()),
+            # Prices
+            re_path(r'^ws/prices/(?P<account_id>[^/]*)/(?P<symbol>[^/]+)/?$', PriceConsumer.as_asgi()),
+        ])
     ),
 })

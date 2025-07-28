@@ -6,7 +6,7 @@ import pandas as pd
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
 from asgiref.sync import sync_to_async
 from accounts.models import Account, MT5Account, CTraderAccount
-from trading_platform.mt5_api_client import MT5APIClient
+from trading_platform.mt5_api_client import MT5APIClient, connection_manager
 from django.conf import settings
 import websockets, aiohttp
 from datetime import datetime, timedelta
@@ -22,6 +22,7 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
         self.indicator_service = IndicatorService()
         self.active_indicators = {}
         self.historical_data = pd.DataFrame()
+        self.mt5_client = None
 
     async def connect(self):
         self.account_id = self.scope["url_route"]["kwargs"]["account_id"]
@@ -52,15 +53,21 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
                 await self.close()
                 return
 
-            self.mt5_client = MT5APIClient(
-                base_url=settings.MT5_API_BASE_URL,
-                account_id=self.mt5_account.account_number,
-                password=self.mt5_account.encrypted_password,
-                broker_server=self.mt5_account.broker_server,
-                internal_account_id=str(self.account.id)
-            )
-            
-            self.price_task = asyncio.create_task(self.price_stream())
+            try:
+                self.mt5_client = await connection_manager.get_client(
+                    base_url=settings.MT5_API_BASE_URL,
+                    account_id=self.mt5_account.account_number,
+                    password=self.mt5_account.encrypted_password,
+                    broker_server=self.mt5_account.broker_server,
+                    internal_account_id=str(self.account.id)
+                )
+                self.mt5_client.register_price_listener(self.symbol, self.send_price_update)
+                # The candle listener will be registered when a timeframe is subscribed to.
+                await self.mt5_client.subscribe_price(self.symbol)
+            except ConnectionError as e:
+                await self.send_json({"error": str(e)})
+                await self.close()
+                return
 
         elif self.platform == "CTRADER":
             ctrader_account = await sync_to_async(lambda: self.account.ctrader_account)()
@@ -89,17 +96,31 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
 
     async def disconnect(self, close_code):
         logger.info(f"🔻 WebSocket disconnected for Account: {self.account_id} - {self.symbol}")
-        if self.price_task:
+        if self.platform == "MT5" and self.mt5_client:
+            self.mt5_client.unregister_price_listener(self.symbol, self.send_price_update)
+            if self.timeframe: # If we were subscribed to candles, unregister
+                self.mt5_client.unregister_candle_listener(self.symbol, self.timeframe, self.send_candle_update)
+        elif self.price_task:
             self.price_task.cancel()
         logger.info(f"🔻 WebSocket closed for Account: {self.account_id} - {self.symbol}")
 
     async def receive_json(self, content):
-        logger.info(f"Received JSON message: {content}")
+        logger.info(f"Received message from client for account {self.account_id} - {self.symbol}: {json.dumps(content)}")
         action = content.get("type") or content.get("action")
 
         if action == "subscribe":
-            self.timeframe = content.get("timeframe") or content.get("params", {}).get("timeframe")
-            logger.info(f"Subscribed to timeframe: {self.timeframe}")
+            new_timeframe = content.get("timeframe") or content.get("params", {}).get("timeframe")
+            if new_timeframe and new_timeframe != self.timeframe:
+                # If changing timeframe, unsubscribe from old one first
+                if self.timeframe and self.mt5_client:
+                    await self.mt5_client.unsubscribe_candles(self.symbol, self.timeframe)
+                    self.mt5_client.unregister_candle_listener(self.symbol, self.timeframe, self.send_candle_update)
+
+                self.timeframe = new_timeframe
+                logger.info(f"Subscribed to timeframe: {self.timeframe}")
+                if self.mt5_client:
+                    self.mt5_client.register_candle_listener(self.symbol, self.timeframe, self.send_candle_update)
+                    await self.mt5_client.subscribe_candles(self.symbol, self.timeframe)
 
         elif action == "add_indicator":
             await self.handle_add_indicator(content)
@@ -185,119 +206,48 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
 
     async def handle_unsubscribe(self, content):
         logger.info(f"Unsubscribing from {self.symbol} for account {self.account_id}")
-        if self.price_task:
+        if self.platform == "MT5" and self.mt5_client:
+            await self.mt5_client.unsubscribe_price(self.symbol)
+            if self.timeframe:
+                await self.mt5_client.unsubscribe_candles(self.symbol, self.timeframe)
+        elif self.price_task:
             self.price_task.cancel()
         await self.send_json({"type": "unsubscribed", "symbol": self.symbol})
         await self.close()
 
-    async def price_stream(self):
-        last_candle = None
-        #logger.info("Price stream started")
-        # Populate initial historical data if not already populated
-        if self.timeframe and self.historical_data.empty:
-            candles = await sync_to_async(self.get_historical_candles)(self.symbol, self.timeframe, 200)
-            if "error" not in candles:
-                self.historical_data = pd.DataFrame(candles)
-        try:
-            while True:
-                try:
-                    price_data = await sync_to_async(self.get_mt5_price)(self.symbol)
-                    if "error" in price_data:
-                        logger.error(f"Error fetching MT5 price for {self.symbol}: {price_data['error']}")
-                    else:
-                        await self.send_json(price_data)
+    async def send_price_update(self, price_data):
+        """Callback function to send price updates to the client."""
+        payload = {
+            "type": "live_price",
+            "data": price_data
+        }
+        #logger.info(f"Sending price update for {self.symbol} to client for account {self.account_id}: {json.dumps(payload)}")
+        await self.send_json(payload)
 
-                    if self.timeframe:
-                        #logger.debug(f"Fetching candle data for {self.symbol} with timeframe {self.timeframe}")
-                        candle_data = await sync_to_async(self.get_mt5_candle)(self.symbol, self.timeframe)
-                        #logger.debug(f"Candle data received: {candle_data}")
-
-                        if "error" not in candle_data:
-                            if last_candle:
-                                #logger.debug(f"Comparing new candle {candle_data['time']} with last candle {last_candle['time']}")
-                             if last_candle and candle_data['time'] > last_candle['time']:
-                            
-                            
-                                #logger.info(f"New candle detected. Closing previous candle: {last_candle}")
-                                await self.send_json({'type': 'candle_closed', 'data': last_candle})
-                            
-                            if not last_candle or candle_data['time'] > last_candle['time'] or candle_data['close'] != last_candle['close']:
-                                #logger.info(f"Sending candle update: {candle_data}")
-                                await self.send_json({'type': 'candle_update', 'data': candle_data})
-                                last_candle = candle_data
-
-                                # Update historical data and recalculate indicators
-                                new_candle_df = pd.DataFrame([candle_data])
-                                self.historical_data = pd.concat([self.historical_data, new_candle_df], ignore_index=True)
-                                
-                                # Keep the DataFrame size manageable
-                                self.historical_data = self.historical_data.tail(500) 
-
-                                for unique_id, indicator_info in self.active_indicators.items():
-                                    name = indicator_info["name"]
-                                    params = indicator_info["params"]
-                                    
-                                    self.historical_data = self.indicator_service.calculate_indicator(self.historical_data, name, params)
-                                    latest_indicator_value = self.historical_data.iloc[-1]
-                                    
-                                    indicator_col_name = f"{name}_{params.get('length', '')}"
-                                    
-                                    await self.send_json({
-                                        "type": "indicator_update",
-                                        "indicator": name,
-                                        "unique_id": unique_id, # Include the unique_id
-                                        "params": params,       # Include the params
-                                        "data": {
-                                            "time": latest_indicator_value['time'],
-                                            "value": latest_indicator_value[indicator_col_name]
-                                        }
-                                    })
-                            else:
-                                logger.debug("No new candle data to send.")
-                        else:
-                            logger.error(f"Error fetching candle data: {candle_data['error']}")
-                    else:
-                        logger.debug("No timeframe set, skipping candle data fetch.")
-
-                    await asyncio.sleep(1)
-                except websockets.exceptions.ConnectionClosed:
-                    logger.info("Connection closed, stopping price stream.")
-                    break
-        except asyncio.CancelledError:
-            logger.info(f"MT5 price stream for {self.symbol} cancelled.")
-        except Exception as e:
-            logger.error(f"Error in MT5 price stream for {self.symbol}: {e}", exc_info=True)
-
-    def get_mt5_price(self, symbol):
-        result = self.mt5_client.get_live_price(symbol)
-        if "error" in result:
-            return {"error": result["error"]}
-        return {"symbol": symbol, "bid": result.get("bid"), "ask": result.get("ask")}
-
-    def get_mt5_candle(self, symbol, timeframe):
-        result = self.mt5_client.get_historical_candles(
-            symbol=symbol,
-            timeframe=timeframe,
-            count=1
-        )
-        if "error" in result:
-            return {"error": result["error"]}
-        
-        candles = result.get("candles", [])
-        if candles:
-            return candles[0]
-        return {"error": "No candle data returned"}
+    async def send_candle_update(self, candle_data):
+        """Callback function to send new candle updates to the client."""
+        #logger.info(f"Received candle update from MT5 for {self.symbol} {self.timeframe} for account {self.account_id}: {json.dumps(candle_data)}")
+        payload = {
+            "type": "new_candle",
+            "data": candle_data
+        }
+        logger.info(f"Sending new candle for {self.symbol} {self.timeframe} to client for account {self.account_id}: {json.dumps(payload)}")
+        await self.send_json(payload)
 
     def get_historical_candles(self, symbol, timeframe, count):
-        result = self.mt5_client.get_historical_candles(
+        # This method now needs to handle the case where mt5_client is not the old polling client
+        # but the new WebSocket-based one. The get_historical_candles method was kept on it.
+        if not self.mt5_client:
+            return {"error": "MT5 client not initialized"}
+        
+        # The actual call is synchronous, but it's called from an async context,
+        # so it needs to be wrapped if it performs blocking IO.
+        # Since it's using `requests`, it's blocking.
+        return self.mt5_client.get_historical_candles(
             symbol=symbol,
             timeframe=timeframe,
             count=count
         )
-        if "error" in result:
-            return {"error": result["error"]}
-        
-        return result.get("candles", [])
 
     async def subscribe_ctrader(self):
         subscription_url = "http://localhost:8080/ctrader/symbol/subscribe"

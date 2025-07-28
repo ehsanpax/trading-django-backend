@@ -225,97 +225,49 @@ class OpenPositionsLiveView(APIView):
 
     def get(self, request, account_id):
         account = get_object_or_404(Account, id=account_id, user=request.user)
-        final_open_positions = []
-        db_trade_order_ids = set()
-
-        # 1. Fetch open trades from the database for this account
-        db_trades = Trade.objects.filter(account=account, trade_status="open")
-        from .serializers import TradeSerializer # Ensure TradeSerializer is imported
-        serialized_db_trades = TradeSerializer(db_trades, many=True).data
-
-        for trade_data in serialized_db_trades:
-            trade_data["source"] = "database"
-            # Ensure order_id is present and add to set for matching
-            if trade_data.get("order_id") is not None:
-                db_trade_order_ids.add(trade_data["order_id"])
-            final_open_positions.append(trade_data)
-
-        # 2. Fetch live positions from the platform
-        platform_positions_raw = []
+        
         if account.platform == "MT5":
             try:
                 mt5_account = account.mt5_account
             except MT5Account.DoesNotExist:
-                # If no MT5 account, we just return DB trades for this account
-                return Response({"open_positions": final_open_positions}, status=status.HTTP_200_OK)
+                return Response({"error": "No linked MT5 account found."}, status=status.HTTP_404_NOT_FOUND)
 
-            client = MT5APIClient(
-                base_url=settings.MT5_API_BASE_URL,
-                account_id=mt5_account.account_number,
-                password=mt5_account.encrypted_password,
-                broker_server=mt5_account.broker_server,
-                internal_account_id=str(account.id)
-            )
+            # Use the async_to_sync wrapper for the service call
+            client_data = get_account_details(account_id, request.user)
             
-            mt5_positions_result = client.get_open_positions()
-            if "error" in mt5_positions_result:
-                print(f"MT5 get_open_positions error for account {account_id}: {mt5_positions_result['error']}")
-                return Response({"open_positions": final_open_positions}, status=status.HTTP_200_OK)
+            if "error" in client_data:
+                return Response({"error": client_data["error"]}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Fetch DB trades synchronously
+            db_trades = Trade.objects.filter(account=account, trade_status="open")
+            db_trades_dict = {trade.position_id: trade for trade in db_trades if trade.position_id}
+
+            live_positions = client_data.get("open_positions", [])
             
-            platform_positions_raw = mt5_positions_result.get("open_positions", [])
-
-            # Process MT5 positions
-            # Create a dictionary of DB trades by their order_id for quick lookup
-            db_trades_dict = {t_data['order_id']: t_data for t_data in serialized_db_trades if t_data.get('order_id') is not None}
-
-            for mt5_pos_live in platform_positions_raw: # Renamed to avoid confusion
-                ticket = mt5_pos_live.get("ticket")
+            final_positions = []
+            for pos in live_positions:
+                if not isinstance(pos, dict):
+                    continue  # Skip if pos is not a dictionary
+                ticket = pos.get("ticket")
+                db_trade = db_trades_dict.get(ticket)
                 
-                # Base data from live MT5 position
-                live_pos_data = {
-                    "ticket": ticket,
-                    "symbol": mt5_pos_live.get("symbol"),
-                    "volume": mt5_pos_live.get("volume"),
-                    "price_open": mt5_pos_live.get("price_open"),
-                    "current_pl": mt5_pos_live.get("profit"), # Using 'current_pl' for consistency
-                    "swap": mt5_pos_live.get("swap"),
-                    "commission": mt5_pos_live.get("commission"),
-                    "stop_loss": mt5_pos_live.get("sl"),
-                    "profit_target": mt5_pos_live.get("tp"),
-                    "time": mt5_pos_live.get("time"), # MT5 'time' is usually open time
-                    "direction": "BUY" if mt5_pos_live.get("direction") == "BUY" else "SELL", # Assuming connector provides this directly
-                    "comment": mt5_pos_live.get("comment"),
-                    "magic": mt5_pos_live.get("magic"),
-                    "account_id": str(account.id), # Add account_id for context
-                    "source": "platform_live" # Default source
-                }
-
-                # Try to find and merge with DB data
-                matched_db_trade = db_trades_dict.get(ticket)
-                if matched_db_trade:
-                    # Remove the matched trade from final_open_positions to avoid duplication
-                    # and to replace it with the merged data.
-                    final_open_positions = [t for t in final_open_positions if t.get('order_id') != ticket]
-                    
-                    # Merge: Start with DB data, then update/override with live MT5 data
-                    # This ensures DB specific fields are kept, and live fields are fresh
-                    merged_data = {**matched_db_trade, **live_pos_data}
-                    merged_data["trade_id"] = matched_db_trade.get("id") # Ensure our internal UUID is used
-                    merged_data["order_id"] = ticket # Ensure platform ticket is used as order_id
-                    merged_data["source"] = "platform_synced_with_db"
-                    # Ensure 'profit' from MT5 is used as 'current_pl'
-                    merged_data["current_pl"] = mt5_pos_live.get("profit") 
-                    # Keep SL/TP from platform as they are live
-                    merged_data["stop_loss"] = mt5_pos_live.get("sl")
-                    merged_data["profit_target"] = mt5_pos_live.get("tp")
-
-                    final_open_positions.append(merged_data)
+                if db_trade:
+                    # Merge: Start with serialized DB trade, then update with live data
+                    trade_data = TradeSerializer(db_trade).data
+                    trade_data.update({
+                        "profit": pos.get("profit"), # Ensure the 'profit' key is present for the serializer's source
+                        "swap": pos.get("swap"),
+                        "stop_loss": pos.get("sl"),
+                        "profit_target": pos.get("tp"),
+                        "source": "platform_synced_with_db"
+                    })
+                    final_positions.append(trade_data)
                 else:
-                    # Position is on platform but not in our DB (or not matched)
-                    live_pos_data["trade_id"] = None # No internal DB id
-                    live_pos_data["order_id"] = ticket # Platform's ticket
-                    live_pos_data["source"] = "platform_only"
-                    final_open_positions.append(live_pos_data)
+                    # Platform-only trade
+                    pos["source"] = "platform_only"
+                    final_positions.append(pos)
+
+            return Response({"db_trades": [], "open_positions": final_positions}, status=status.HTTP_200_OK)
 
         elif account.platform == "cTrader":
             try:

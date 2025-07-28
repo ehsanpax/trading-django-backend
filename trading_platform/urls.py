@@ -46,6 +46,9 @@ urlpatterns = [
     path("api/ta/", include("ta.urls")),
     path("api/ai/", include("AI.urls")),  # Added AI app urls
     path("api/user/", include("user.urls")),
+    path("api/price/", include("price.urls")),
+    path("api/charts/", include("charts.urls")),
+    path("api/indicators/", include("indicators.urls")),
     path("api/", include("trading.urls")),
 ]
 if settings.DEBUG:

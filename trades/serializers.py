@@ -5,6 +5,7 @@ from decimal import Decimal
 
 class TradeSerializer(serializers.ModelSerializer):
     current_pl = serializers.DecimalField(max_digits=15, decimal_places=2, read_only=True, required=False)
+    actual_profit_loss = serializers.DecimalField(max_digits=15, decimal_places=2, read_only=True, required=False, source='profit')
     # Ensure other fields from the MT5 live data that might not be on the Trade model are also available
     # if they are part of the merged dictionary passed to the serializer.
     # For example, if 'comment' or 'magic' from MT5 live data is needed and not on Trade model:

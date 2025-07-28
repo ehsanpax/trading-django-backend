@@ -246,13 +246,6 @@ SYMBOL_EXCHANGE_MAP = {
 
 # ─── Which timeframes to compute ────────────────────
 
-from tvDatafeed import Interval
-
-INDICATOR_TIMEFRAMES = {
-    "M1": Interval.in_1_minute,
-    "M5": Interval.in_5_minute,
-    # add more as needed…
-}
 
 
 # ─── Celery broker & beat ───────────────────────────

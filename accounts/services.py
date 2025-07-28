@@ -1,26 +1,30 @@
 # accounts/services.py
 from django.shortcuts import get_object_or_404
 from accounts.models import Account, MT5Account, CTraderAccount
-from trading_platform.mt5_api_client import MT5APIClient
+from trading_platform.mt5_api_client import connection_manager
 from connectors.ctrader_client import CTraderClient
 from asgiref.sync import async_to_sync
 from django.conf import settings
 import requests
+import asyncio
+import logging
 
-def get_account_details(account_id, user):
+logger = logging.getLogger(__name__)
+
+async def get_account_details_async(account_id, user):
     """
-    Retrieves account details for the given account_id and user.
-    For MT5 accounts, it logs in, retrieves account info and open positions.
+    Asynchronously retrieves account details for the given account_id and user.
+    This is the core async function.
     """
-    account = get_object_or_404(Account, id=account_id, user=user)
+    account = await Account.objects.aget(id=account_id, user=user)
     
     if account.platform == "MT5":
         try:
-            mt5_account = MT5Account.objects.get(account=account)
+            mt5_account = await MT5Account.objects.aget(account=account)
         except MT5Account.DoesNotExist:
             return {"error": "No linked MT5 account found."}
 
-        client = MT5APIClient(
+        client = await connection_manager.get_client(
             base_url=settings.MT5_API_BASE_URL,
             account_id=mt5_account.account_number,
             password=mt5_account.encrypted_password,
@@ -28,19 +32,22 @@ def get_account_details(account_id, user):
             internal_account_id=str(account.id)
         )
         
+        # Wait for the initial data to be received from the WebSocket, with a timeout.
+        logger.info(f"Service for account {account_id}: Waiting for initial data from MT5APIClient...")
+        try:
+            await asyncio.wait_for(client.initial_data_received.wait(), timeout=10.0)
+            logger.info(f"Service for account {account_id}: Initial data received. Proceeding.")
+        except asyncio.TimeoutError:
+            logger.warning(f"Service for account {account_id}: Timed out waiting for initial data. Proceeding with cached data if available.")
+        
         account_info = client.get_account_info()
-        if "error" in account_info:
-            return {"error": account_info["error"]}
-
-        positions = client.get_open_positions()
-        if "error" in positions:
-            return {"error": positions["error"]}
+        positions_data = client.get_open_positions()
         
         return {
             "balance": account_info.get("balance"),
             "equity": account_info.get("equity"),
             "margin": account_info.get("margin"),
-            "open_positions": positions.get("open_positions")
+            "open_positions": positions_data.get("open_positions", [])
         }
     elif account.platform == "cTrader":
         try:
@@ -78,3 +85,11 @@ def get_account_details(account_id, user):
     
     else:
         return {"error": "Unsupported trading platform."}
+
+@async_to_sync
+async def get_account_details(account_id, user):
+    """
+    Synchronously retrieves account details.
+    This is a wrapper for compatibility with synchronous views.
+    """
+    return await get_account_details_async(account_id, user)
