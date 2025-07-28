@@ -1,5 +1,7 @@
 from rest_framework import serializers
 from .models import Prompt, Execution, ChatSession, SessionExecution
+from trade_journal.models import TradeJournal
+from django.db import models
 
 
 class PromptSerializer(serializers.ModelSerializer):
@@ -28,23 +30,23 @@ class SessionExecutionSerializer(serializers.Serializer):
 
     def save(self, **kwargs):
         user = self.context["request"].user
-        chat_session = ChatSession.objects.filter(
-            external_session_id=self.validated_data.get("external_session_id")
-        ).first()
-        if not chat_session:
-            chat_session = ChatSession.objects.create(
-                external_session_id=self.validated_data.get("external_session_id"),
+        chat_session, updated = ChatSession.objects.update_or_create(
+            external_session_id=self.validated_data.get("external_session_id"),
+            user=user,
+            defaults=dict(
                 user_first_message=self.validated_data.get("user_first_message"),
                 session_data=self.validated_data.get("session_data"),
-                user=user,
-            )
-        execution = Execution.objects.create(
+            ),
+        )
+        execution, updated = Execution.objects.update_or_create(
             external_execution_id=self.validated_data.get("external_execution_id"),
             user=user,
-            total_cost=self.validated_data.get("total_cost"),
-            metadata=self.validated_data.get("metadata"),
+            defaults={
+                "total_cost": self.validated_data.get("total_cost"),
+                "metadata": self.validated_data.get("metadata"),
+            },
         )
-        session_execution = SessionExecution.objects.create(
+        session_execution, created = SessionExecution.objects.get_or_create(
             session=chat_session,
             execution=execution,
         )
@@ -52,6 +54,7 @@ class SessionExecutionSerializer(serializers.Serializer):
 
 
 class ChatSessionSerializer(serializers.ModelSerializer):
+    total_cost = serializers.SerializerMethodField()
 
     class Meta:
         model = ChatSession
@@ -62,7 +65,22 @@ class ChatSessionSerializer(serializers.ModelSerializer):
             "session_data",
             "user",
             "created_at",
+            "total_cost",
         ]
         read_only_fields = [
             "user"
         ]  # User is set by the view, not directly by the client
+
+    def get_total_cost(self, obj):
+        """
+        Calculate the total cost of all executions associated with this chat session.
+        """
+        return obj.executions.aggregate(total_cost=models.Sum("execution__total_cost"))[
+            "total_cost"
+        ]
+
+
+class TradeJournalSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TradeJournal
+        fields = "__all__"

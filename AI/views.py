@@ -4,12 +4,14 @@ from .serializers import (
     PromptSerializer,
     SessionExecutionSerializer,
     ChatSessionSerializer,
+    TradeJournalSerializer,
 )
 from rest_framework.views import APIView
 from rest_framework.viewsets import ModelViewSet
 from rest_framework.authentication import TokenAuthentication
 from rest_framework.response import Response
 from rest_framework import status
+from trade_journal.models import TradeJournal
 
 
 class PromptViewSet(viewsets.ModelViewSet):
@@ -59,4 +61,24 @@ class ChatSessionViewset(ModelViewSet):
     queryset = ChatSession.objects.all()
 
     def get_queryset(self):
-        return super().get_queryset().filter(user=self.request.user)
+        return (
+            super()
+            .get_queryset()
+            .filter(user=self.request.user)
+            .order_by("-created_at")
+        )
+
+
+class TradeJournalViewset(ModelViewSet):
+    serializer_class = TradeJournalSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    authentication_classes = [TokenAuthentication]
+    queryset = TradeJournal.objects.all()
+
+    def get_queryset(self):
+        return (
+            super()
+            .get_queryset()
+            .filter(trade__account__user=self.request.user)
+            .order_by("-created_at")
+        )

@@ -1,6 +1,11 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import PromptViewSet, StoreSessionExecutionViewset, ChatSessionViewset
+from .views import (
+    PromptViewSet,
+    StoreSessionExecutionViewset,
+    ChatSessionViewset,
+    TradeJournalViewset,
+)
 
 
 urlpatterns = [
@@ -18,5 +23,10 @@ urlpatterns = [
         "chat-sessions/",
         ChatSessionViewset.as_view({"get": "list"}),
         name="chat-session-list-create",
+    ),
+    path(
+        "trade-journals/",
+        TradeJournalViewset.as_view({"get": "list"}),
+        name="trade-journal-list",
     ),
 ]
