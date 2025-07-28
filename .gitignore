@@ -1,5 +1,6 @@
 .venv
 .wsl_venv
+.wsl_venv/
 __pycache__
 
 # Byte-compiled / optimized / DLL files
