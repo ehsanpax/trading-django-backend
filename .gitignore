@@ -184,3 +184,4 @@ cython_debug/
 *.csv
 *.parquet
 static/*
+wsl_venv/*

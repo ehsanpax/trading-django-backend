@@ -24,7 +24,7 @@ class Command(BaseCommand):
             "--host",
             "0.0.0.0",
             "--port",
-            "80",
+            "8000",
             "--workers",
             str(concurrency),
         ]
