@@ -125,7 +125,7 @@ class MT5APIClient:
         if self.is_connected:
             try:
                 message = json.dumps({"type": "subscribe_price", "symbol": symbol})
-                logger.info(f"Sending WebSocket message for account {self.internal_account_id}: {message}")
+                #logger.info(f"Sending WebSocket message for account {self.internal_account_id}: {message}")
                 await self.ws.send(message)
             except websockets.exceptions.ConnectionClosed:
                 logger.warning(f"Could not subscribe to {symbol}, connection closed.")
@@ -134,7 +134,7 @@ class MT5APIClient:
         if self.is_connected:
             try:
                 message = json.dumps({"type": "unsubscribe_price", "symbol": symbol})
-                logger.info(f"Sending WebSocket message for account {self.internal_account_id}: {message}")
+                #logger.info(f"Sending WebSocket message for account {self.internal_account_id}: {message}")
                 await self.ws.send(message)
             except websockets.exceptions.ConnectionClosed:
                 logger.warning(f"Could not unsubscribe from {symbol}, connection closed.")
@@ -143,7 +143,7 @@ class MT5APIClient:
         if self.is_connected:
             try:
                 message = json.dumps({"type": "subscribe_candles", "symbol": symbol, "timeframe": timeframe})
-                logger.info(f"Sending WebSocket message for account {self.internal_account_id}: {message}")
+                #logger.info(f"Sending WebSocket message for account {self.internal_account_id}: {message}")
                 await self.ws.send(message)
             except websockets.exceptions.ConnectionClosed:
                 logger.warning(f"Could not subscribe to candles for {symbol}_{timeframe}, connection closed.")
@@ -152,7 +152,7 @@ class MT5APIClient:
         if self.is_connected:
             try:
                 message = json.dumps({"type": "unsubscribe_candles", "symbol": symbol, "timeframe": timeframe})
-                logger.info(f"Sending WebSocket message for account {self.internal_account_id}: {message}")
+                #logger.info(f"Sending WebSocket message for account {self.internal_account_id}: {message}")
                 await self.ws.send(message)
             except websockets.exceptions.ConnectionClosed:
                 logger.warning(f"Could not unsubscribe from candles for {symbol}_{timeframe}, connection closed.")
@@ -254,7 +254,7 @@ class MT5APIClient:
         payload["position_ticket"] = ticket
         return self._post("/mt5/positions/details", payload)
 
-    def place_trade(self, symbol: str, lot_size: float, direction: str, stop_loss: float, take_profit: float) -> Dict[str, Any]:
+    def place_trade(self, symbol: str, lot_size: float, direction: str, stop_loss: float, take_profit: float, order_type: str = "MARKET", limit_price: Optional[float] = None) -> Dict[str, Any]:
         payload = self._get_auth_payload()
         payload.update({
             "symbol": symbol,
@@ -262,7 +262,10 @@ class MT5APIClient:
             "direction": direction,
             "stop_loss": stop_loss,
             "take_profit": take_profit,
+            "order_type": order_type,
+            "limit_price": limit_price,
         })
+        logger.info(f"Sending trade request to MT5 API: {payload}")
         return self._post("/mt5/trade", json_data=payload)
 
     def close_trade(self, ticket: int, volume: float, symbol: str) -> Dict[str, Any]:

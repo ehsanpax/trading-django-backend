@@ -193,12 +193,15 @@ class TradeService:
         conn = self._get_connector(account)
 
         if account.platform == "MT5":
+            limit_price_float = float(self.data["limit_price"]) if self.data.get("limit_price") is not None else None
             resp = conn.place_trade(
                 symbol=self.data["symbol"],
                 lot_size=final_lot,
                 direction=self.data["direction"],
                 stop_loss=sl_price,
                 take_profit=tp_price,
+                order_type=self.data.get("order_type", "MARKET"),
+                limit_price=limit_price_float
             )
             if "error" in resp:
                 raise APIException(resp["error"])
@@ -247,7 +250,7 @@ class TradeService:
             direction       = self.data["direction"],
             order_type      = self.data["order_type"],
             volume          = Decimal(final_lot),
-            price           = (Decimal(self.data["limit_price"]) 
+            price           = (Decimal(self.data["limit_price"])
                                if self.data.get("limit_price") is not None else None),
             stop_loss       = Decimal(sl_price),
             take_profit     = Decimal(tp_price),
@@ -403,26 +406,25 @@ def close_trade_globally(user, trade_id: UUID) -> dict:
         if "error" in close_result:
             raise APIException(f"MT5 trade closure command failed: {close_result['error']}")
 
-        # After successful closure, we assume the profit is captured by other means or not needed from this endpoint.
-        # The FastAPI service could be updated to return profit on close.
-        # For now, we'll set profit to 0 and proceed.
-        profit = Decimal(0)
+        # After successful closure, synchronize with the platform to get the final P/L
+        sync_result = synchronize_trade_with_platform(trade_id=trade.id, existing_connector=client)
 
+        if "error" in sync_result:
+            # Log this critical error, but proceed to close the trade in our DB.
+            # The trade is closed on the platform, so our DB should reflect that.
+            # The P/L might be stale, but a subsequent sync can fix it.
+            print(f"CRITICAL: Trade {trade.id} closed on MT5, but DB sync failed: {sync_result['error']}")
+            # We can still proceed to mark as closed, but profit will be stale.
+            pass # Continue to the standard closing logic below
 
     elif trade.account.platform == "cTrader":
         # Consistent with original view, cTrader close is not implemented.
-        # Raising APIException will result in a 500, but view can catch it for a 400.
-        # For now, let service raise APIException.
         raise APIException("cTrader close not implemented yet.")
     else:
         raise APIException("Unsupported trading platform.")
 
-    # Update the trade record in the database
-    trade.trade_status = "closed"
-    trade.closed_at = django_timezone.now()
-    if profit is not None: # Profit should be a Decimal here
-        trade.actual_profit_loss = profit
-    trade.save()
+    # Refresh the instance from the DB to get the latest state after sync
+    trade.refresh_from_db()
 
     return {
         "message": "Trade closed successfully",

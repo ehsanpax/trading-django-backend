@@ -79,7 +79,7 @@ class ExecuteTradeInputSerializer(serializers.Serializer):
     account_id           = serializers.UUIDField()
     symbol               = serializers.CharField()
     direction            = serializers.ChoiceField(choices=["BUY","SELL"])
-    order_type           = serializers.ChoiceField(choices=["MARKET","LIMIT","STOP"])
+    order_type           = serializers.ChoiceField(choices=["MARKET","LIMIT","STOP"], default="MARKET")
     limit_price          = serializers.DecimalField(max_digits=15, decimal_places=5, required=False)
     stop_loss_distance   = serializers.IntegerField()
     take_profit          = serializers.DecimalField(max_digits=15, decimal_places=5)
@@ -102,6 +102,11 @@ class ExecuteTradeInputSerializer(serializers.Serializer):
             total = sum(Decimal(str(x["share"])) for x in tgt)
             if total != Decimal("1"):
                 raise serializers.ValidationError("sum of target shares must equal 1.0")
+        
+        # 3. If order_type is LIMIT or STOP, price is required
+        if data.get("order_type") in ["LIMIT", "STOP"] and data.get("limit_price") is None:
+            raise serializers.ValidationError({"limit_price": "This field is required for LIMIT or STOP orders."})
+
         return data
     
 

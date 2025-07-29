@@ -52,12 +52,17 @@ from rest_framework.exceptions import APIException, PermissionDenied, Validation
 from rest_framework.decorators import action # For custom actions
 # ----- Trade / Order Execution --------------------------------------------
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 class ExecuteTradeView(GenericAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class   = ExecuteTradeInputSerializer
     response_serializer_class = ExecuteTradeOutputSerializer
 
     def post(self, request, *args, **kwargs):
+        logger.info(f"Received trade execution request: {request.data}")
         # 1️⃣ validate input
         in_ser = self.get_serializer(data=request.data)
         in_ser.is_valid(raise_exception=True)

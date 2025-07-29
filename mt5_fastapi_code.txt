@@ -1,75 +1,142 @@
-import MetaTrader5 as mt5
-from fastapi import FastAPI, HTTPException, Depends
-from pydantic import BaseModel, Field
+import pymt5linux as mt5
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Request
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field, validator
 from datetime import datetime, timedelta, timezone
 import time
 from decimal import Decimal
 from typing import Optional, Dict, Any
 import os
 from dotenv import load_dotenv
+import logging
+import uuid
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from fastapi import WebSocket, WebSocketDisconnect # Import WebSocket and WebSocketDisconnect
+import process_manager
+import onboarding_manager
+import json # Import json for WebSocket messages
+from websocket_manager import websocket_manager # Import the WebSocketManager instance
+from collections import defaultdict # For managing symbol subscriptions
+import asyncio # For asynchronous tasks
+
+
+# --- Logging Configuration ---
+# Configure logging to output to console
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
+    handlers=[
+        logging.StreamHandler() # Ensures logs go to the console/stdout
+    ]
+)
+logger = logging.getLogger(__name__)
+
 
 # Load environment variables from .env file
 load_dotenv()
 
+# --- Environment Variables ---
+MT5_HOST = os.getenv("MT5_HOST", "localhost")
+logger.info(f"Connecting to MT5 host: {MT5_HOST}")
+
+
 app = FastAPI(
-    title="MT5 API Service",
-    description="API for interacting with MetaTrader5 terminals.",
-    version="1.0.0",
+    title="MT5 Multi-Account API Service",
+    description="API for orchestrating and interacting with multiple MetaTrader5 terminals.",
+    version="1.1.0",
 )
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
+)
+
+# --- Base Pydantic Models ---
+class BaseAccountRequest(BaseModel):
+    internal_account_id: str = Field(..., description="The unique internal identifier for the account.")
+    account_id: int = Field(..., description="The MT5 login account number.")
+    password: str = Field(..., description="The MT5 login password.")
+    broker_server: str = Field(..., description="The MT5 broker server name.")
+
+# --- Dynamic MT5 Connection Handler ---
+async def get_mt5_connection_for_polling(req: BaseAccountRequest):
+    """
+    Provides a logged-in MT5 connection for internal polling tasks.
+    It handles the asynchronous startup of MT5 instances.
+    This is a standalone function, not a FastAPI dependency.
+    """
+    try:
+        bridge_info = process_manager.get_or_start_bridge(
+            req.internal_account_id, req.account_id, req.password, req.broker_server
+        )
+        status = bridge_info.get("status")
+        port = bridge_info.get("port")
+        
+        # Wait for the bridge to be running if it's still starting
+        timeout = 60 # seconds
+        start_time = time.time()
+        while status == "starting" and (time.time() - start_time) < timeout:
+            await asyncio.sleep(2) # Wait a bit before re-checking status
+            bridge_info = process_manager.get_or_start_bridge(
+                req.internal_account_id, req.account_id, req.password, req.broker_server
+            )
+            status = bridge_info.get("status")
+            port = bridge_info.get("port") # Port might change if instance restarted
+
+        if status == "running":
+            mt5_conn = mt5.MetaTrader5(host=MT5_HOST, port=port)
+            if not mt5_conn.initialize():
+                logger.error(f"Failed to initialize MT5 bridge for account {req.internal_account_id}: {mt5_conn.last_error()}")
+                raise HTTPException(status_code=503, detail=f"Failed to initialize MT5 bridge for account {req.internal_account_id}: {mt5_conn.last_error()}")
+            
+            if not mt5_conn.login(req.account_id, req.password, req.broker_server):
+                mt5_conn.shutdown()
+                logger.error(f"Failed to log into MT5 account {req.account_id}: {mt5_conn.last_error()}")
+                raise HTTPException(status_code=401, detail=f"Failed to log into MT5 account {req.account_id}: {mt5_conn.last_error()}")
+            
+            logger.info(f"Successfully connected and logged into MT5 account {req.account_id} via bridge on port {port}.")
+            yield mt5_conn
+
+        elif status == "starting":
+            logger.info(f"Instance for {req.internal_account_id} is still starting after timeout. Responding with 503.")
+            raise HTTPException(
+                status_code=503, 
+                detail="MT5 instance is starting. Please try again in a few moments.",
+                headers={"Retry-After": "10"}
+            )
+        
+        else: # Handles "failed" or any other unexpected status
+            log_path = process_manager.RUNNING_PROCS.get(req.internal_account_id, {}).get('log_path_base', 'N/A')
+            logger.error(f"MT5 instance for {req.internal_account_id} is in a failed or unhandled state. Check logs at {log_path}.")
+            raise HTTPException(status_code=500, detail=f"The MT5 instance for this account failed to start. Please check the server logs for details (Log base: {log_path}).")
+
+    finally:
+        if 'mt5_conn' in locals() and mt5_conn.terminal_info():
+            #logger.info(f"Shutting down connection for account {req.account_id} on port {port}.")
+            mt5_conn.shutdown()
+
+# --- Dynamic MT5 Connection Dependency for FastAPI Endpoints ---
+async def get_mt5_connection_dependency(req: BaseAccountRequest):
+    """
+    FastAPI dependency that provides a logged-in MT5 connection.
+    It uses the get_mt5_connection_for_polling logic internally.
+    """
+    # This is now a proper async generator dependency
+    async for connection in get_mt5_connection_for_polling(req):
+        yield connection
 
 # --- MT5Connector Class (Copied and adapted from mt5/services.py) ---
 class MT5Connector:
     """
     Handles connection, login, and trade execution for MT5.
     """
-    def __init__(self, account_id: int, broker_server: str):
-        self.account_id = account_id
-        self.broker_server = broker_server
-        self.terminal_path = rf"C:\MetaTrader 5\{self.account_id}\terminal64.exe"
-
-    def connect(self, password: str) -> dict:
-        """Log into MT5 if not already logged in, using the dedicated terminal instance."""
-        
-        current_terminal_info = mt5.terminal_info()
-
-        if current_terminal_info and current_terminal_info.path == self.terminal_path:
-            account_info = mt5.account_info()
-            if account_info and account_info.login == self.account_id:
-                print(f"Already logged in as {self.account_id} in terminal {self.terminal_path} (path match), skipping re-login.")
-                return {"message": f"Already logged into MT5 account {self.account_id}"}
-        
-        if current_terminal_info and current_terminal_info.path != self.terminal_path:
-            print(f"MT5 currently initialized for a different path ({current_terminal_info.path}). Shutting down before initializing for {self.terminal_path}.")
-            mt5.shutdown()
-            time.sleep(0.5)
-            current_terminal_info = None
-
-        if not current_terminal_info or (mt5.terminal_info() and mt5.terminal_info().path != self.terminal_path):
-            print(f"Initializing MT5 for terminal: {self.terminal_path}")
-            if not mt5.initialize(path=self.terminal_path):
-                init_error = mt5.last_error()
-                error_msg = f"MT5 initialization failed for terminal {self.terminal_path}. Error: {init_error}"
-                print(error_msg)
-                return {"error": error_msg}
-            else:
-                print(f"MT5 initialized successfully for terminal: {self.terminal_path}")
-        
-        account_info = mt5.account_info()
-        current_path_after_init = mt5.terminal_info().path if mt5.terminal_info() else None
-        if account_info and account_info.login == self.account_id and current_path_after_init == self.terminal_path:
-            print(f"Already logged in as {self.account_id} in terminal {self.terminal_path} (verified post-init), skipping re-login.")
-            return {"message": f"Already logged into MT5 account {self.account_id}"}
-
-        print(f"🔹 Attempting login for account: {self.account_id} on server: {self.broker_server} using terminal: {self.terminal_path}")
-        login_status = mt5.login(self.account_id, password, self.broker_server)
-        if not login_status:
-            login_error_code, login_error_message = mt5.last_error()
-            error_msg = f"Login failed for account {self.account_id} on terminal {self.terminal_path}. Error: {login_error_code} - {login_error_message}"
-            print(error_msg)
-            return {"error": error_msg}
-
-        print(f"Successfully Logged into MT5 account {self.account_id} using terminal {self.terminal_path}")
-        return {"message": f"Logged into MT5 account {self.account_id}"}
+    def __init__(self, mt5_instance):
+        self.mt5 = mt5_instance
 
     def place_trade(
         self,
@@ -84,35 +151,57 @@ class MT5Connector:
     ) -> dict:
         """
         Executes a market trade or submits a pending order (limit/stop) on MT5.
+
+        :param symbol: instrument symbol, e.g. "EURUSD"
+        :param lot_size: size of the position in lots
+        :param direction: "BUY" or "SELL"
+        :param order_type: "MARKET", "LIMIT", or "STOP"
+        :param limit_price: required price for LIMIT or STOP orders
+        :param time_in_force: "GTC" or "DAY"
+        :param stop_loss: absolute stop loss price
+        :param take_profit: absolute take profit price
+        :return: dict with execution result or error
         """
-        if mt5.terminal_info() is None:
+
+        # Ensure MT5 session is active
+        if self.mt5.terminal_info() is None:
             return {"error": "⚠️ MT5 session lost before trade execution!"}
 
-        account_info = mt5.account_info()
-        if account_info is None or account_info.login != self.account_id:
-            return {"error": "⚠️ MT5 session lost! Please reconnect before trading."}
-
-        symbol_info = mt5.symbol_info(symbol)
+        symbol_info = self.mt5.symbol_info(symbol)
+        logger.info(f"Symbol: {symbol}")
+        logger.info(f"filling_mode: {symbol_info.filling_mode}")
+        logger.info(f"trade_mode: {symbol_info.trade_mode}")
+        logger.info(f"volume_min: {symbol_info.volume_min}")
+        logger.info(f"volume_max: {symbol_info.volume_max}")
+        logger.info(f"volume_step: {symbol_info.volume_step}")
+        #logger.info(f"is_trading: {symbol_info.trade_allow}")
+        logger.info(f"is_selected: {symbol_info.visible}")
+                # 1️⃣ Fetch symbol precision & current tick
+        symbol_info = self.mt5.symbol_info(symbol)
         if not symbol_info:
             return {"error": f"⚠️ Symbol {symbol} not found or no info available"}
-        tick = mt5.symbol_info_tick(symbol)
+        tick = self.mt5.symbol_info_tick(symbol)
         if not tick:
             return {"error": f"⚠️ No tick data for {symbol}"}
 
         direction  = direction.upper()
         order_type = order_type.upper()
 
+        # 2️⃣ If pending order, ensure limit_price is provided, rounded and valid
         if order_type in ("LIMIT", "STOP"):
             if limit_price is None:
                 return {"error": f"Missing 'limit_price' for {order_type} order"}
 
+            # ⬇ Convert the string to float ⬇
             try:
                 price_val = float(limit_price)
             except (TypeError, ValueError):
                 return {"error": f"Invalid limit_price: {limit_price}"}
 
+            # ⬇ Round to the symbol’s allowed number of decimal places ⬇
             limit_price = round(price_val, symbol_info.digits)
 
+            # BUY‐LIMIT must be below ask; SELL‐LIMIT above bid
             if order_type == "LIMIT":
                 if direction == "BUY" and limit_price >= tick.ask:
                     return {"error": (
@@ -123,6 +212,7 @@ class MT5Connector:
                         f"Invalid price: SELL_LIMIT {limit_price} ≤ current bid {tick.bid}"
                     )}
 
+            # BUY‐STOP must be above ask; SELL‐STOP below bid
             if order_type == "STOP":
                 if direction == "BUY" and limit_price <= tick.ask:
                     return {"error": (
@@ -133,53 +223,136 @@ class MT5Connector:
                         f"Invalid price: SELL_STOP {limit_price} ≥ current bid {tick.bid}"
                     )}
 
+        # 3️⃣ Map action/type/price exactly as before, using our now‐validated limit_price
         if order_type == "MARKET":
-            action = mt5.TRADE_ACTION_DEAL
-            req_type = mt5.ORDER_TYPE_BUY if direction == "BUY" else mt5.ORDER_TYPE_SELL
+            action = self.mt5.TRADE_ACTION_DEAL
+            req_type = self.mt5.ORDER_TYPE_BUY if direction == "BUY" else self.mt5.ORDER_TYPE_SELL
             price = tick.ask if direction == "BUY" else tick.bid
         elif order_type == "LIMIT":
-            action = mt5.TRADE_ACTION_PENDING
+            action = self.mt5.TRADE_ACTION_PENDING
             req_type = (
-                mt5.ORDER_TYPE_BUY_LIMIT if direction == "BUY" 
-                else mt5.ORDER_TYPE_SELL_LIMIT
+                self.mt5.ORDER_TYPE_BUY_LIMIT if direction == "BUY" 
+                else self.mt5.ORDER_TYPE_SELL_LIMIT
             )
             price = limit_price
         else:  # STOP
-            action = mt5.TRADE_ACTION_PENDING
+            action = self.mt5.TRADE_ACTION_PENDING
             req_type = (
-                mt5.ORDER_TYPE_BUY_STOP if direction == "BUY" 
-                else mt5.ORDER_TYPE_SELL_STOP
+                self.mt5.ORDER_TYPE_BUY_STOP if direction == "BUY" 
+                else self.mt5.ORDER_TYPE_SELL_STOP
             )
             price = limit_price
 
+        # Map time_in_force
         tif_map = {
-            "GTC": mt5.ORDER_TIME_GTC,
-            "DAY": mt5.ORDER_TIME_DAY,
+            "GTC": self.mt5.ORDER_TIME_GTC,
+            "DAY": self.mt5.ORDER_TIME_DAY,
         }
-        tif = tif_map.get(time_in_force.upper(), mt5.ORDER_TIME_GTC)
+        tif = tif_map.get(time_in_force.upper(), self.mt5.ORDER_TIME_GTC)
 
+        filling_mode_mask = symbol_info.filling_mode
+
+        allowed_filling: list[int] = []
+        if filling_mode_mask & self.mt5.ORDER_FILLING_FOK:
+            allowed_filling.append(self.mt5.ORDER_FILLING_FOK)     # 1
+        if filling_mode_mask & self.mt5.ORDER_FILLING_IOC:
+            allowed_filling.append(self.mt5.ORDER_FILLING_IOC)     # 2
+        if filling_mode_mask & self.mt5.ORDER_FILLING_RETURN:
+            allowed_filling.append(self.mt5.ORDER_FILLING_RETURN)  # 3
+
+        if allowed_filling:
+            filling_type = allowed_filling[0]   # broker‑approved choice
+        else:
+            logger.warning(
+                f"No recognised filling mode bits in mask {filling_mode_mask}. "
+                "Falling back to IOC (2)."
+            )
+            filling_type = self.mt5.ORDER_FILLING_IOC              # safest fallback
+
+        logger.info(
+            f"Symbol '{symbol}' filling‑mode mask={filling_mode_mask}. "
+            f"Allowed={allowed_filling} ➜ using {filling_type}"
+        )
+
+        sl_value = stop_loss or 0
+        tp_value = take_profit or 0
+
+        # Validate Stop Loss and Take Profit levels
+        stops_level = symbol_info.trade_stops_level
+        point = symbol_info.point
+
+        if stops_level > 0:
+            if direction == "BUY":
+                if sl_value != 0.0 and abs(price - sl_value) < stops_level * point:
+                    logger.warning(f"Stop loss for BUY order is too close. Price: {price}, SL: {sl_value}, Min Distance: {stops_level * point}. Removing SL from request.")
+                    sl_value = 0.0
+                if tp_value != 0.0 and abs(tp_value - price) < stops_level * point:
+                    logger.warning(f"Take profit for BUY order is too close. Price: {price}, TP: {tp_value}, Min Distance: {stops_level * point}. Removing TP from request.")
+                    tp_value = 0.0
+            elif direction == "SELL":
+                if sl_value != 0.0 and abs(sl_value - price) < stops_level * point:
+                    logger.warning(f"Stop loss for SELL order is too close. Price: {price}, SL: {sl_value}, Min Distance: {stops_level * point}. Removing SL from request.")
+                    sl_value = 0.0
+                if tp_value != 0.0 and abs(price - tp_value) < stops_level * point:
+                    logger.warning(f"Take profit for SELL order is too close. Price: {price}, TP: {tp_value}, Min Distance: {stops_level * point}. Removing TP from request.")
+                    tp_value = 0.0
+
+        # Build trade request
         trade_request = {
             "action":      action,
             "symbol":      symbol,
             "volume":      lot_size,
             "type":        req_type,
             "price":       price,
-            "sl":          stop_loss or 0,
-            "tp":          take_profit or 0,
+            "sl":          float(sl_value),
+            "tp":          float(tp_value),
             "deviation":   10,
             "magic":       0,
             "comment":     "Trade placed via API",
             "type_time":   tif,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_filling": filling_type,
         }
 
-        result = mt5.order_send(trade_request)
-        if result is None:
-            err_code, err_msg = mt5.last_error()
-            return {"error": f"❌ Trade execution failed: {err_code} - {err_msg}"}
-        if result.retcode != mt5.TRADE_RETCODE_DONE:
-            return {"error": f"❌ Trade failed: {result.comment}"}
+        # 8️⃣  Send order with dynamic filling‑mode fallback (single execution)
+        # ---------------------------------------------------------------------------
 
+        # Preferred order: FOK (1)  ➜ IOC (2) ➜ RETURN (0)
+        candidate_modes = [self.mt5.ORDER_FILLING_FOK,
+                        self.mt5.ORDER_FILLING_IOC,
+                        self.mt5.ORDER_FILLING_RETURN]
+
+        result = None                          # final result holder
+        for mode in candidate_modes:
+            trade_request["type_filling"] = mode
+            logger.info(
+                f"Trying order_send with type_filling={mode} "
+                f"({'FOK' if mode==1 else 'IOC' if mode==2 else 'RETURN'})"
+            )
+
+            current = self.mt5.order_send(trade_request)
+            result = current  # keep the last attempt for later inspection
+
+            # If the call itself failed (None) break – we have nothing else to try
+            if current is None:
+                err_code, err_msg = self.mt5.last_error()
+                logger.error(f"order_send() returned None: {err_code} – {err_msg}")
+                break
+
+            # If anything other than “unsupported filling mode” happens, stop looping
+            if current.retcode != 10030:       # 10030 = unsupported filling mode
+                break
+
+            logger.warning(
+                f"Retcode 10030 (unsupported filling mode) with mode {mode}. "
+                "Trying next candidate."
+            )
+
+        logger.info(f"Final MT5 order_send result: {result}")
+        
+        
+        logger.info(f"Constructed MT5 trade request: {trade_request}")
+
+        # Construct success payload
         payload = {
             "message":   "Trade executed successfully",
             "order_id":  result.order,
@@ -188,29 +361,33 @@ class MT5Connector:
             "symbol":    symbol,
             "direction": direction,
             "price":     price,
-            "status":    "pending",
-            "opened_position_ticket": None
+            "status":    "pending", # Default status
+            "opened_position_ticket": None # Initialize to None, will be set for market orders
         }
 
         if order_type == "MARKET":
             payload["status"] = "filled"
-            if result.order != 0:
-                payload["opened_position_ticket"] = result.order
+            logger.info(f"--- MT5Connector.place_trade (Market Order): OrderSendResult for order {result.order}: Deal={getattr(result, 'deal', 'N/A')}, Position (attr value)={getattr(result, 'position', 'N/A')}, Comment='{result.comment}', Retcode={result.retcode}")
+            
+            if result.order != 0: # Ensure the order ticket is valid
+                payload["opened_position_ticket"] = result.order # Use order's own ticket
+                logger.info(f"--- MT5Connector.place_trade: Set opened_position_ticket to {result.order} (from result.order)")
+            else:
+                # This case should be rare for a successful order send
+                logger.info(f"--- MT5Connector.place_trade: result.order is 0, opened_position_ticket remains None.")
+        # For pending orders, status remains "pending" and opened_position_ticket remains None as initialized.
         
+        logger.info(f"--- MT5Connector.place_trade: Final payload being returned: {payload}")
         return payload
 
     def get_open_position_details_by_ticket(self, position_ticket: int) -> dict:
         """Fetch details of a specific open position by its ticket."""
-        if mt5.terminal_info() is None:
+        if self.mt5.terminal_info() is None:
             return {"error": "MT5 terminal is not running"}
 
-        account_info = mt5.account_info()
-        if not account_info or account_info.login != self.account_id:
-            return {"error": "Not logged in to the correct MT5 account"}
-
-        positions = mt5.positions_get(ticket=position_ticket)
+        positions = self.mt5.positions_get(ticket=position_ticket)
         if positions is None:
-            err_code, err_msg = mt5.last_error()
+            err_code, err_msg = self.mt5.last_error()
             return {"error": f"positions_get(ticket={position_ticket}) failed: {err_code} - {err_msg}"}
 
         if not positions:
@@ -231,19 +408,15 @@ class MT5Connector:
 
     def get_position_by_order_id(self, order_id: int) -> dict:
         """Fetch an open position by the ticket of the order that created/modified it."""
-        if mt5.terminal_info() is None:
+        if self.mt5.terminal_info() is None:
             return {"error": "MT5 terminal is not running"}
-
-        account_info = mt5.account_info()
-        if not account_info or account_info.login != self.account_id:
-            return {"error": "Not logged in to the correct MT5 account"}
 
         from_date = datetime.now(timezone.utc) - timedelta(days=7)
         to_date = datetime.now(timezone.utc) + timedelta(hours=13)
-        deals = mt5.history_deals_get(from_date, to_date, order=order_id)
+        deals = self.mt5.history_deals_get(from_date, to_date, order=order_id)
 
         if deals is None:
-            err_code, err_msg = mt5.last_error()
+            err_code, err_msg = self.mt5.last_error()
             return {"error": f"Failed to retrieve deals for order_id {order_id}: {err_code} - {err_msg}"}
 
         if not deals:
@@ -254,11 +427,11 @@ class MT5Connector:
         RETRY_DELAY_SECONDS = 0.5
 
         for attempt in range(MAX_RETRIES):
-            current_deals = mt5.history_deals_get(from_date, to_date, order=order_id)
+            current_deals = self.mt5.history_deals_get(from_date, to_date, order=order_id)
 
             if current_deals:
                 for deal in current_deals:
-                    if deal.entry == mt5.DEAL_ENTRY_IN:
+                    if deal.entry == self.mt5.DEAL_ENTRY_IN:
                         if deal.position_id != 0:
                             position_ticket = deal.position_id
                             break
@@ -279,9 +452,9 @@ class MT5Connector:
         if position_ticket is None:
             return {"error": f"Failed to determine position_id for order_id {order_id} after retries and fallback."}
 
-        positions = mt5.positions_get(ticket=position_ticket)
+        positions = self.mt5.positions_get(ticket=position_ticket)
         if positions is None:
-            err_code, err_msg = mt5.last_error()
+            err_code, err_msg = self.mt5.last_error()
             return {"error": f"positions_get(ticket={position_ticket}) failed: {err_code} - {err_msg}"}
 
         if not positions:
@@ -302,10 +475,10 @@ class MT5Connector:
 
     def get_account_info(self) -> dict:
         """Fetches account balance, equity, and margin from MT5."""
-        if mt5.terminal_info() is None:
+        if self.mt5.terminal_info() is None:
             return {"error": "MT5 terminal is not running"}
 
-        account_info = mt5.account_info()
+        account_info = self.mt5.account_info()
         if not account_info:
             return {"error": "Failed to retrieve account info from MT5"}
 
@@ -319,12 +492,12 @@ class MT5Connector:
 
     def get_open_positions(self) -> dict:
         """Fetches all currently open positions in MT5."""
-        if mt5.terminal_info() is None:
+        if self.mt5.terminal_info() is None:
             return {"error": "MT5 terminal is not running"}
 
-        positions = mt5.positions_get()
+        positions = self.mt5.positions_get()
         if positions is None:
-            err_code, err_msg = mt5.last_error()
+            err_code, err_msg = self.mt5.last_error()
             return {"error": f"positions_get() failed: {err_code} - {err_msg}"}
 
         open_positions = []
@@ -348,14 +521,14 @@ class MT5Connector:
 
     def get_live_price(self, symbol: str) -> dict:
         """Fetch real-time price for a symbol from MT5."""
-        tick = mt5.symbol_info_tick(symbol)
+        tick = self.mt5.symbol_info_tick(symbol)
         if tick:
             return {"symbol": symbol, "bid": tick.bid, "ask": tick.ask}
         return {"error": "Failed to retrieve price data"}
 
     def get_symbol_info(self, symbol: str) -> dict:
         """Fetches pip size, tick size, and contract size for a symbol."""
-        symbol_info = mt5.symbol_info(symbol)
+        symbol_info = self.mt5.symbol_info(symbol)
         if not symbol_info:
             return {"error": f"Symbol {symbol} not found"}
         return {
@@ -365,28 +538,24 @@ class MT5Connector:
             "contract_size": symbol_info.trade_contract_size
         }
     def close_trade(self, ticket: int, volume: float, symbol: str) -> dict:
-        if mt5.terminal_info() is None:
+        if self.mt5.terminal_info() is None:
             return {"error": "MT5 terminal is not running"}
 
-        account_info = mt5.account_info()
-        if not account_info or account_info.login != self.account_id:
-            return {"error": "Not logged in to the correct MT5 account"}
-
-        price_info = mt5.symbol_info_tick(symbol)
+        price_info = self.mt5.symbol_info_tick(symbol)
         if not price_info:
             return {"error": f"Price not available for {symbol}"}
 
-        position = mt5.positions_get(ticket=ticket)
+        position = self.mt5.positions_get(ticket=ticket)
         if not position:
             return {"error": f"No position found for ticket {ticket}"}
 
         pos = position[0]
-        direction = "SELL" if pos.type == mt5.POSITION_TYPE_BUY else "BUY"
+        direction = "SELL" if pos.type == self.mt5.POSITION_TYPE_BUY else "BUY"
         close_price = price_info.bid if direction == "SELL" else price_info.ask
-        order_type = mt5.ORDER_TYPE_SELL if direction == "SELL" else mt5.ORDER_TYPE_BUY
+        order_type = self.mt5.ORDER_TYPE_SELL if direction == "SELL" else self.mt5.ORDER_TYPE_BUY
 
         close_request = {
-            "action": mt5.TRADE_ACTION_DEAL,
+            "action": self.mt5.TRADE_ACTION_DEAL,
             "position": ticket,
             "symbol": symbol,
             "volume": volume,
@@ -395,14 +564,40 @@ class MT5Connector:
             "deviation": 10,
             "magic": 0,
             "comment": "Trade closed via API",
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_time": self.mt5.ORDER_TIME_GTC,
+            # Filling type will be set in the loop
         }
 
-        result = mt5.order_send(close_request)
+        # Use the same filling mode fallback logic as in place_trade
+        candidate_modes = [self.mt5.ORDER_FILLING_FOK, self.mt5.ORDER_FILLING_IOC, self.mt5.ORDER_FILLING_RETURN]
+        result = None
 
-        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-            return {"error": f"Failed to close trade: {result.comment if result else 'no result'}", "retcode": result.retcode if result else None}
+        for mode in candidate_modes:
+            close_request["type_filling"] = mode
+            logger.info(f"Trying to close trade with filling mode: {mode}")
+            current_result = self.mt5.order_send(close_request)
+            result = current_result
+
+            if current_result is None:
+                err_code, err_msg = self.mt5.last_error()
+                logger.error(f"order_send() for close returned None: {err_code} – {err_msg}")
+                break
+
+            if current_result.retcode == self.mt5.TRADE_RETCODE_DONE:
+                logger.info(f"Successfully closed trade with filling mode: {mode}")
+                break
+
+            if current_result.retcode != 10030: # 10030 = unsupported filling mode
+                logger.error(f"Failed to close trade with mode {mode}. Retcode: {current_result.retcode}, Comment: {current_result.comment}")
+                break
+            
+            logger.warning(f"Retcode 10030 (unsupported filling mode) with mode {mode}. Trying next candidate.")
+
+
+        if result is None or result.retcode != self.mt5.TRADE_RETCODE_DONE:
+            error_comment = result.comment if result else "order_send returned None"
+            error_retcode = result.retcode if result else "N/A"
+            return {"error": f"Failed to close trade: {error_comment}", "retcode": error_retcode}
 
         return {
             "message": "Trade closed in MT5",
@@ -417,13 +612,9 @@ class MT5Connector:
         """
         Modifies the Stop Loss and/or Take Profit of an open position.
         """
-        if mt5.terminal_info() is None:
+        if self.mt5.terminal_info() is None:
             return {"error": "MT5 terminal is not running or not initialized."}
         
-        account_info = mt5.account_info()
-        if not account_info or account_info.login != self.account_id:
-            return {"error": "Not logged in to the correct MT5 account for modifying position."}
-
         if stop_loss is None and take_profit is None:
             return {"error": "No stop_loss or take_profit value provided to modify."}
 
@@ -434,21 +625,21 @@ class MT5Connector:
             return {"error": "Stop Loss or Take Profit prices cannot be negative."}
 
         request = {
-            "action": mt5.TRADE_ACTION_SLTP,
+            "action": self.mt5.TRADE_ACTION_SLTP,
             "position": position_id,
             "symbol": symbol,
             "sl": sl_price,
             "tp": tp_price,
         }
 
-        result = mt5.order_send(request)
+        result = self.mt5.order_send(request)
 
         if result is None:
-            err_code, err_msg = mt5.last_error()
+            err_code, err_msg = self.mt5.last_error()
             error_message = f"order_send() failed for TRADE_ACTION_SLTP: {err_code} - {err_msg}"
             return {"error": error_message}
 
-        if result.retcode != mt5.TRADE_RETCODE_DONE:
+        if result.retcode != self.mt5.TRADE_RETCODE_DONE:
             error_message = f"Failed to modify SL/TP for position {position_id}: {result.comment} (retcode: {result.retcode})"
             return {"error": error_message, "retcode": result.retcode, "comment": result.comment}
 
@@ -465,7 +656,7 @@ class MT5Connector:
         for attempt in range(max_retries):
             utc_from = datetime.now(timezone.utc) - timedelta(days=1)
             utc_to = datetime.now(timezone.utc)
-            deals = mt5.history_deals_get(utc_from, utc_to)
+            deals = self.mt5.history_deals_get(utc_from, utc_to)
 
             if deals:
                 for deal in deals:
@@ -484,7 +675,7 @@ class MT5Connector:
         for attempt in range(max_retries):
             utc_from = datetime.now(timezone.utc) - timedelta(minutes=1)
             utc_to = datetime.now(timezone.utc)
-            deals = mt5.history_deals_get(utc_from, utc_to)
+            deals = self.mt5.history_deals_get(utc_from, utc_to)
             if deals:
                 for d in deals:
                     if d.order == order_ticket:
@@ -500,7 +691,7 @@ class MT5Connector:
         for attempt in range(max_retries):
             utc_from = datetime.now(timezone.utc) - timedelta(days=1)
             utc_to = datetime.now(timezone.utc)
-            deals = mt5.history_deals_get(utc_from, utc_to, order=order_ticket)
+            deals = self.mt5.history_deals_get(utc_from, utc_to, order=order_ticket)
             if deals:
                 total_profit = sum(deal.profit + deal.commission + deal.swap for deal in deals)
                 return {"profit": total_profit}
@@ -514,23 +705,19 @@ class MT5Connector:
         if not position_id:
             return {"error": "position_id cannot be None or zero."}
 
-        if mt5.terminal_info() is None:
+        if self.mt5.terminal_info() is None:
             return {"error": "MT5 terminal is not running"}
         
-        account_info = mt5.account_info()
-        if not account_info or account_info.login != self.account_id:
-            return {"error": "Not logged in to the correct MT5 account"}
-        
-        deals = mt5.history_deals_get(position=position_id)
+        deals = self.mt5.history_deals_get(position=position_id)
 
         if deals is None:
-            err_code, err_msg = mt5.last_error()
+            err_code, err_msg = self.mt5.last_error()
             return {"error": f"history_deals_get(position={position_id}) call failed: {err_code} - {err_msg}"}
 
         if not deals:
             return {"error": f"No deals found for position_id {position_id}."}
         
-        exit_deals = [d for d in deals if d.entry == mt5.DEAL_ENTRY_OUT or d.entry == mt5.DEAL_ENTRY_INOUT]
+        exit_deals = [d for d in deals if d.entry == self.mt5.DEAL_ENTRY_OUT or d.entry == self.mt5.DEAL_ENTRY_INOUT]
 
         if not exit_deals:
             return {"error": f"No explicit exit deal found for position {position_id}."}
@@ -564,13 +751,9 @@ class MT5Connector:
         """
         Fetches all necessary data from MT5 for a given position to allow synchronization.
         """
-        if mt5.terminal_info() is None:
+        if self.mt5.terminal_info() is None:
             return {"error_message": "MT5 terminal is not running or not initialized."}
         
-        account_info = mt5.account_info()
-        if not account_info or account_info.login != self.account_id:
-            return {"error_message": "Not logged in to the correct MT5 account for sync data fetch."}
-
         deals_data = []
         platform_remaining_size = Decimal('0.0')
         is_closed_on_platform = False
@@ -580,10 +763,10 @@ class MT5Connector:
         final_swap = None
         error_message = None
 
-        mt5_deals_raw = mt5.history_deals_get(position=position_id)
+        mt5_deals_raw = self.mt5.history_deals_get(position=position_id)
 
         if mt5_deals_raw is None:
-            err_code, err_msg = mt5.last_error()
+            err_code, err_msg = self.mt5.last_error()
             error_message = f"history_deals_get(position={position_id}) failed: {err_code} - {err_msg}"
             return {
                 "deals": [], "is_closed_on_platform": False, "platform_remaining_size": Decimal('0.0'),
@@ -616,18 +799,18 @@ class MT5Connector:
                 })
                 
                 deal_volume = Decimal(str(deal.volume))
-                if deal.entry == mt5.DEAL_ENTRY_IN:
+                if deal.entry == self.mt5.DEAL_ENTRY_IN:
                     platform_remaining_size += deal_volume
-                elif deal.entry == mt5.DEAL_ENTRY_OUT or deal.entry == mt5.DEAL_ENTRY_INOUT:
+                elif deal.entry == self.mt5.DEAL_ENTRY_OUT or deal.entry == self.mt5.DEAL_ENTRY_INOUT:
                     platform_remaining_size -= deal_volume
         
         if platform_remaining_size <= Decimal('0.0') and mt5_deals_raw:
             is_closed_on_platform = True
         
-        open_mt5_positions = mt5.positions_get(symbol=instrument_symbol)
+        open_mt5_positions = self.mt5.positions_get(symbol=instrument_symbol)
         if open_mt5_positions is None:
-            err_code, err_msg = mt5.last_error()
-            print(f"Warning: positions_get(symbol={instrument_symbol}) failed: {err_code} - {err_msg}. Relying on deal volume for closure status.")
+            err_code, err_msg = self.mt5.last_error()
+            logger.warning(f"Warning: positions_get(symbol={instrument_symbol}) failed: {err_code} - {err_msg}. Relying on deal volume for closure status.")
         elif isinstance(open_mt5_positions, tuple):
             found_open_position = any(p.ticket == position_id for p in open_mt5_positions)
             if not found_open_position and mt5_deals_raw :
@@ -651,220 +834,598 @@ class MT5Connector:
             "error_message": error_message
         }
 
-# --- FastAPI Models for Request/Response ---
-class AccountDetails(BaseModel):
-    account_id: int
-    password: str
-    broker_server: str
+    def get_historical_candles(self, symbol: str, timeframe: str, count: Optional[int] = None, start_time: Optional[datetime] = None, end_time: Optional[datetime] = None) -> dict:
+        """
+        Fetches historical candlestick data from MT5, either by count or by time range.
+        """
+        if self.mt5.terminal_info() is None:
+            return {"error": "MT5 terminal is not running"}
 
-class PlaceTradeRequest(AccountDetails):
+        timeframe_map = {
+            "M1": self.mt5.TIMEFRAME_M1,
+            "M5": self.mt5.TIMEFRAME_M5,
+            "M15": self.mt5.TIMEFRAME_M15,
+            "M30": self.mt5.TIMEFRAME_M30,
+            "H1": self.mt5.TIMEFRAME_H1,
+            "H4": self.mt5.TIMEFRAME_H4,
+            "D1": self.mt5.TIMEFRAME_D1,
+            "W1": self.mt5.TIMEFRAME_W1,
+            "MN1": self.mt5.TIMEFRAME_MN1,
+        }
+        mt5_timeframe = timeframe_map.get(timeframe.upper())
+        if not mt5_timeframe:
+            return {"error": f"Invalid timeframe: {timeframe}"}
+
+        rates = None
+        if count is not None:
+            logger.info(f"Fetching last {count} candles for {symbol} with timeframe {timeframe}")
+            rates = self.mt5.copy_rates_from_pos(symbol, mt5_timeframe, 0, count)
+        elif start_time is not None and end_time is not None:
+            logger.info(f"Fetching candles for {symbol} with timeframe {timeframe} from {start_time} to {end_time}")
+            rates = self.mt5.copy_rates_range(symbol, mt5_timeframe, start_time, end_time)
+        else:
+            return {"error": "Either 'count' or both 'start_time' and 'end_time' must be provided."}
+
+        if rates is None:
+            err_code, err_msg = self.mt5.last_error()
+            logger.error(f"MT5 copy_rates operation failed: {err_code} - {err_msg}")
+            return {"error": f"Failed to retrieve historical data: {err_code} - {err_msg}"}
+
+        if len(rates) == 0:
+            logger.warning(f"No historical data returned for {symbol} with timeframe {timeframe} for the given criteria.")
+            return {"candles": []}
+
+        logger.info(f"Returned {len(rates)} candles for {symbol} with timeframe {timeframe}")
+        candles = []
+        for rate in rates:
+            candles.append({
+                "time": int(rate['time']),
+                "open": float(rate['open']),
+                "high": float(rate['high']),
+                "low": float(rate['low']),
+                "close": float(rate['close']),
+                "volume": int(rate['tick_volume']),
+            })
+        
+        return {"candles": candles}
+
+# --- Onboarding Models ---
+class OnboardRequest(BaseModel):
+    internal_account_id: str = Field(..., description="The unique internal identifier for the account, provided by the main backend.")
+
+class OnboardResponse(BaseModel):
+    message: str
+    internal_account_id: str
+    vnc_details: dict
+
+# --- API Request Models ---
+class PlaceTradeRequest(BaseAccountRequest):
     symbol: str
     lot_size: float
     direction: str
     order_type: str = "MARKET"
-    limit_price: Optional[float] = None
+    price: Optional[float] = None
     time_in_force: str = "GTC"
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
 
-class CloseTradeRequest(AccountDetails):
+class CloseTradeRequest(BaseAccountRequest):
     ticket: int
     volume: float
     symbol: str
 
-class ModifyProtectionRequest(AccountDetails):
+class ModifyProtectionRequest(BaseAccountRequest):
     position_id: int
     symbol: str
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
 
-class GetPositionDetailsRequest(AccountDetails):
+class GetPositionDetailsRequest(BaseAccountRequest):
     position_ticket: int
 
-class GetPositionByOrderRequest(AccountDetails):
+class GetPositionByOrderRequest(BaseAccountRequest):
     order_id: int
 
-class GetClosedDealProfitRequest(AccountDetails):
+class GetClosedDealProfitRequest(BaseAccountRequest):
     ticket: int
 
-class SymbolInfoRequest(AccountDetails):
+class SymbolInfoRequest(BaseAccountRequest):
     symbol: str
 
-class LivePriceRequest(AccountDetails):
+class LivePriceRequest(BaseAccountRequest):
     symbol: str
 
-class FetchTradeSyncDataRequest(AccountDetails):
+class FetchTradeSyncDataRequest(BaseAccountRequest):
     position_id: int
     instrument_symbol: str
 
-# --- FastAPI Endpoints ---
-@app.post("/mt5/connect")
-async def connect_mt5(details: AccountDetails):
-    connector = MT5Connector(details.account_id, details.broker_server)
-    result = connector.connect(details.password)
-    if "error" in result:
-        raise HTTPException(status_code=400, detail=result["error"])
-    return result
 
-@app.post("/mt5/trade")
-async def place_trade(trade_req: PlaceTradeRequest):
-    connector = MT5Connector(trade_req.account_id, trade_req.broker_server)
-    login_result = connector.connect(trade_req.password)
-    if "error" in login_result:
-        raise HTTPException(status_code=401, detail=login_result["error"])
+class HistoricalDataRequest(BaseAccountRequest):
+    symbol: str
+    timeframe: str
+    count: Optional[int] = Field(None, description="Number of candles to retrieve from the current position.")
+    start_time: Optional[datetime] = Field(None, description="Start time for historical data (UTC).")
+    end_time: Optional[datetime] = Field(None, description="End time for historical data (UTC).")
+
+    @validator('count', always=True)
+    def check_time_or_count(cls, v, values):
+        has_start_time = values.get('start_time') is not None
+        has_end_time = values.get('end_time') is not None
+        has_count = v is not None
+
+        if has_count and (has_start_time or has_end_time):
+            raise ValueError("Cannot specify 'count' with 'start_time' or 'end_time'. Choose one method.")
+        if (has_start_time and not has_end_time) or (not has_start_time and has_end_time):
+            raise ValueError("Both 'start_time' and 'end_time' must be provided if using time range.")
+        if not has_count and not (has_start_time and has_end_time):
+            raise ValueError("Either 'count' or both 'start_time' and 'end_time' must be provided.")
+        
+        if has_start_time and has_end_time and values['start_time'] >= values['end_time']:
+            raise ValueError("'start_time' must be before 'end_time'.")
+        
+        return v
+
+class CloseInstanceRequest(BaseModel):
+    internal_account_id: str = Field(..., description="The unique internal identifier for the account.")
+
+# --- FastAPI Endpoints ---
+
+# Dictionary to store subscribed symbols for each internal_account_id
+# { "internal_account_id": { "symbol": set_of_client_ids } }
+subscribed_symbols: Dict[str, Dict[str, set]] = defaultdict(lambda: defaultdict(set))
+
+# Dictionary to store subscribed candles for each internal_account_id
+# { "internal_account_id": { "symbol_timeframe": set_of_client_ids } }
+subscribed_candles: Dict[str, Dict[str, set]] = defaultdict(lambda: defaultdict(set))
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request, exc):
+    print("VALIDATION ERROR:", exc.errors())
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors()},
+    )
+
+@app.websocket("/ws/{internal_account_id}/{client_id}")
+async def websocket_endpoint(
+    websocket: WebSocket,
+    internal_account_id: str,
+    client_id: str,
+    # We don't use Depends(get_mt5_connection) here directly
+    # because the WebSocket connection is long-lived and MT5 connections are short-lived.
+    # The polling task will handle MT5 connections.
+):
+    logger.info(f"Attempting to connect WebSocket for account {internal_account_id}, client {client_id}")
+    await websocket_manager.connect(internal_account_id, client_id, websocket)
     
+    # Start polling task if this is the first connection for this account
+    if internal_account_id not in websocket_manager.account_polling_tasks or \
+       websocket_manager.account_polling_tasks[internal_account_id].done():
+        websocket_manager.start_polling_task(
+            internal_account_id,
+            poll_mt5_data_and_broadcast
+        )
+    else:
+        # If polling is already active, send the last known data immediately to the new client
+        last_info = websocket_manager.get_last_known_data(internal_account_id, "account_info")
+        if last_info:
+            await websocket_manager.send_personal_message(
+                json.dumps({"type": "account_info", "data": last_info}),
+                internal_account_id,
+                client_id
+            )
+        last_positions = websocket_manager.get_last_known_data(internal_account_id, "open_positions")
+        if last_positions:
+            await websocket_manager.send_personal_message(
+                json.dumps({"type": "open_positions", "data": last_positions}),
+                internal_account_id,
+                client_id
+            )
+
+    try:
+        while True:
+            data = await websocket.receive_text()
+            logger.info(f"Received message from client {client_id} for account {internal_account_id}: {data}")
+            message = json.loads(data)
+            
+            if message.get("type") == "subscribe_price":
+                symbol = message.get("symbol")
+                if symbol:
+                    subscribed_symbols[internal_account_id][symbol].add(client_id)
+                    logger.info(f"Client {client_id} subscribed to price for {symbol} (Account: {internal_account_id})")
+                    # Optionally send current price immediately
+                    # This would require a temporary MT5 connection
+                    # For simplicity, we'll rely on the next polling cycle for now.
+            elif message.get("type") == "unsubscribe_price":
+                symbol = message.get("symbol")
+                if symbol and client_id in subscribed_symbols[internal_account_id][symbol]:
+                    subscribed_symbols[internal_account_id][symbol].remove(client_id)
+                    if not subscribed_symbols[internal_account_id][symbol]:
+                        del subscribed_symbols[internal_account_id][symbol]
+                    logger.info(f"Client {client_id} unsubscribed from price for {symbol} (Account: {internal_account_id})")
+            
+            elif message.get("type") == "subscribe_candles":
+                symbol = message.get("symbol")
+                timeframe = message.get("timeframe")
+                if symbol and timeframe:
+                    subscription_key = f"{symbol}_{timeframe}"
+                    subscribed_candles[internal_account_id][subscription_key].add(client_id)
+                    logger.info(f"Client {client_id} subscribed to candles for {subscription_key} (Account: {internal_account_id})")
+
+            elif message.get("type") == "unsubscribe_candles":
+                symbol = message.get("symbol")
+                timeframe = message.get("timeframe")
+                if symbol and timeframe:
+                    subscription_key = f"{symbol}_{timeframe}"
+                    if client_id in subscribed_candles[internal_account_id][subscription_key]:
+                        subscribed_candles[internal_account_id][subscription_key].remove(client_id)
+                        if not subscribed_candles[internal_account_id][subscription_key]:
+                            del subscribed_candles[internal_account_id][subscription_key]
+                        logger.info(f"Client {client_id} unsubscribed from candles for {subscription_key} (Account: {internal_account_id})")
+
+    except WebSocketDisconnect:
+        websocket_manager.disconnect(internal_account_id, client_id)
+        logger.info(f"WebSocket disconnected for account {internal_account_id}, client {client_id}")
+        # Clean up symbol subscriptions for this client
+        for symbol_subs in subscribed_symbols[internal_account_id].values():
+            symbol_subs.discard(client_id)
+        for candle_subs in subscribed_candles[internal_account_id].values():
+            candle_subs.discard(client_id)
+
+        # Remove empty symbol subscriptions
+        symbols_to_remove = [s for s, clients in subscribed_symbols[internal_account_id].items() if not clients]
+        for s in symbols_to_remove:
+            del subscribed_symbols[internal_account_id][s]
+        if not subscribed_symbols[internal_account_id]:
+            del subscribed_symbols[internal_account_id]
+            
+        # Remove empty candle subscriptions
+        candles_to_remove = [s for s, clients in subscribed_candles[internal_account_id].items() if not clients]
+        for s in candles_to_remove:
+            del subscribed_candles[internal_account_id][s]
+        if not subscribed_candles[internal_account_id]:
+            del subscribed_candles[internal_account_id]
+
+    except Exception as e:
+        logger.error(f"WebSocket error for account {internal_account_id}, client {client_id}: {e}")
+        websocket_manager.disconnect(internal_account_id, client_id)
+
+# --- Onboarding and Account Management Endpoints ---
+
+@app.post("/mt5/onboard", response_model=OnboardResponse)
+async def onboard_account(req: OnboardRequest):
+    """
+    Provisions a new account, assigns a port, and starts a secure VNC session for the first login.
+    This endpoint should be called by the main trading platform backend.
+    """
+    try:
+        result = onboarding_manager.onboard_new_account(
+            internal_account_id=req.internal_account_id
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Onboarding failed for internal account {req.internal_account_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/mt5/onboard/{internal_account_id}/complete")
+async def complete_onboarding(internal_account_id: str, background_tasks: BackgroundTasks):
+    """
+    Stops the VNC session and cleans up resources after a successful manual login.
+    Also triggers the MT5 bridge to start in the background.
+    """
+    # Retrieve VNC details before stopping the session, as stop_vnc_session removes it
+    vnc_session_info = onboarding_manager.ACTIVE_VNC_SESSIONS.get(internal_account_id)
+    
+    if onboarding_manager.stop_vnc_session(internal_account_id):
+        # Optionally, remove the login.ini file for security
+        config_path = os.path.join(onboarding_manager.ACCOUNTS_BASE_DIR_HOST, internal_account_id, "config", "login.ini")
+        if os.path.exists(config_path):
+            os.remove(config_path)
+            logger.info(f"Removed login.ini for {internal_account_id} as part of onboarding completion.")
+        
+        # Start the bridge in the background after VNC is stopped
+        background_tasks.add_task(onboarding_manager.start_bridge_background, 
+                                  internal_account_id=internal_account_id)
+        logger.info(f"Scheduled background task to start MT5 bridge for {internal_account_id}.")
+
+        return {"message": "VNC session terminated and onboarding complete. MT5 bridge starting in background."}
+    else:
+        raise HTTPException(status_code=404, detail="No active VNC session found for this account.")
+
+@app.delete("/mt5/instance/{internal_account_id}")
+async def delete_instance(internal_account_id: str):
+    """
+    Deletes an entire MT5 instance, including its processes, data, and port mapping.
+    """
+    try:
+        result = onboarding_manager.delete_mt5_instance(internal_account_id)
+        return result
+    except Exception as e:
+        logger.error(f"Deletion failed for internal account {internal_account_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/mt5/close")
+async def close_instance_endpoint(req: CloseInstanceRequest):
+    """
+    Stops a running MT5 instance for a given account.
+    """
+    try:
+        result = process_manager.stop_mt5_instance(req.internal_account_id)
+        if result:
+            return {"status": "closed", "message": result}
+        else:
+            raise HTTPException(status_code=404, detail="Instance not found or already stopped.")
+    except Exception as e:
+        logger.error(f"Failed to close instance {req.internal_account_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# --- Trading and Data Endpoints ---
+@app.post("/mt5/trade")
+async def place_trade_endpoint(
+    req: PlaceTradeRequest,
+    background_tasks: BackgroundTasks,
+    mt5_conn: mt5.MetaTrader5 = Depends(get_mt5_connection_dependency),
+):
+    #body = await request.json()
+    #logger.info(f"--- RAW /mt5/trade PAYLOAD: {body}")
+    background_tasks.add_task(process_manager.stop_idle_instances)
+    logger.info(f"Received /mt5/trade request for account {req.internal_account_id}")
+    connector = MT5Connector(mt5_conn)
     result = connector.place_trade(
-        symbol=trade_req.symbol,
-        lot_size=trade_req.lot_size,
-        direction=trade_req.direction,
-        order_type=trade_req.order_type,
-        limit_price=trade_req.limit_price,
-        time_in_force=trade_req.time_in_force,
-        stop_loss=trade_req.stop_loss,
-        take_profit=trade_req.take_profit,
+        symbol=req.symbol,
+        lot_size=req.lot_size,
+        direction=req.direction,
+        order_type=req.order_type,
+        limit_price=req.price,
+        time_in_force=req.time_in_force,
+        stop_loss=req.stop_loss,
+        take_profit=req.take_profit,
     )
     if "error" in result:
+        logger.error(f"Trade execution failed. Request: {req.dict()}. Error: {result['error']}")
         raise HTTPException(status_code=400, detail=result["error"])
+    logger.info(f"Trade executed successfully. Result: {result}")
     return result
 
 @app.post("/mt5/positions/open")
-async def get_open_positions(details: AccountDetails):
-    connector = MT5Connector(details.account_id, details.broker_server)
-    login_result = connector.connect(details.password)
-    if "error" in login_result:
-        raise HTTPException(status_code=401, detail=login_result["error"])
-    
+async def get_open_positions(req: BaseAccountRequest, mt5_conn: mt5.MetaTrader5 = Depends(get_mt5_connection_dependency)):
+    connector = MT5Connector(mt5_conn)
     result = connector.get_open_positions()
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
     return result
 
 @app.post("/mt5/positions/all")
-async def get_all_open_trades(details: AccountDetails):
+async def get_all_open_trades(req: BaseAccountRequest, mt5_conn: mt5.MetaTrader5 = Depends(get_mt5_connection_dependency)):
     """
     New endpoint to get all open trades for a given account.
     """
-    connector = MT5Connector(details.account_id, details.broker_server)
-    login_result = connector.connect(details.password)
-    if "error" in login_result:
-        raise HTTPException(status_code=401, detail=login_result["error"])
-    
+    connector = MT5Connector(mt5_conn)
     result = connector.get_open_positions() # Reusing the existing function
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
     return result
 
 @app.post("/mt5/positions/details")
-async def get_position_details(req: GetPositionDetailsRequest):
-    connector = MT5Connector(req.account_id, req.broker_server)
-    login_result = connector.connect(req.password)
-    if "error" in login_result:
-        raise HTTPException(status_code=401, detail=login_result["error"])
-    
+async def get_position_details(req: GetPositionDetailsRequest, mt5_conn: mt5.MetaTrader5 = Depends(get_mt5_connection_dependency)):
+    connector = MT5Connector(mt5_conn)
     result = connector.get_open_position_details_by_ticket(req.position_ticket)
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
     return result
 
 @app.post("/mt5/positions/by_order")
-async def get_position_by_order(req: GetPositionByOrderRequest):
-    connector = MT5Connector(req.account_id, req.broker_server)
-    login_result = connector.connect(req.password)
-    if "error" in login_result:
-        raise HTTPException(status_code=401, detail=login_result["error"])
-    
+async def get_position_by_order(req: GetPositionByOrderRequest, mt5_conn: mt5.MetaTrader5 = Depends(get_mt5_connection_dependency)):
+    connector = MT5Connector(mt5_conn)
     result = connector.get_position_by_order_id(req.order_id)
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
     return result
 
 @app.post("/mt5/positions/close")
-async def close_trade(req: CloseTradeRequest):
-    connector = MT5Connector(req.account_id, req.broker_server)
-    login_result = connector.connect(req.password)
-    if "error" in login_result:
-        raise HTTPException(status_code=401, detail=login_result["error"])
-    
+async def close_trade_endpoint(req: CloseTradeRequest, mt5_conn: mt5.MetaTrader5 = Depends(get_mt5_connection_dependency)):
+    connector = MT5Connector(mt5_conn)
     result = connector.close_trade(req.ticket, req.volume, req.symbol)
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
     return result
 
 @app.post("/mt5/positions/modify_protection")
-async def modify_position_protection(req: ModifyProtectionRequest):
-    connector = MT5Connector(req.account_id, req.broker_server)
-    login_result = connector.connect(req.password)
-    if "error" in login_result:
-        raise HTTPException(status_code=401, detail=login_result["error"])
-    
+async def modify_position_protection(req: ModifyProtectionRequest, mt5_conn: mt5.MetaTrader5 = Depends(get_mt5_connection_dependency)):
+    connector = MT5Connector(mt5_conn)
     result = connector.modify_position_protection(req.position_id, req.symbol, req.stop_loss, req.take_profit)
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
     return result
 
 @app.post("/mt5/account_info")
-async def get_account_info(details: AccountDetails):
-    connector = MT5Connector(details.account_id, details.broker_server)
-    login_result = connector.connect(details.password)
-    if "error" in login_result:
-        raise HTTPException(status_code=401, detail=login_result["error"])
-    
+async def get_account_info_endpoint(req: BaseAccountRequest, mt5_conn: mt5.MetaTrader5 = Depends(get_mt5_connection_dependency)):
+    connector = MT5Connector(mt5_conn)
     result = connector.get_account_info()
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
     return result
 
 @app.post("/mt5/symbol_info")
-async def get_symbol_info(req: SymbolInfoRequest):
-    connector = MT5Connector(req.account_id, req.broker_server)
-    login_result = connector.connect(req.password)
-    if "error" in login_result:
-        raise HTTPException(status_code=401, detail=login_result["error"])
-    
+async def get_symbol_info_endpoint(req: SymbolInfoRequest, mt5_conn: mt5.MetaTrader5 = Depends(get_mt5_connection_dependency)):
+    connector = MT5Connector(mt5_conn)
     result = connector.get_symbol_info(req.symbol)
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
     return result
 
 @app.post("/mt5/price")
-async def get_live_price(req: LivePriceRequest):
-    connector = MT5Connector(req.account_id, req.broker_server)
-    login_result = connector.connect(req.password)
-    if "error" in login_result:
-        raise HTTPException(status_code=401, detail=login_result["error"])
-    
+async def get_live_price_endpoint(req: LivePriceRequest, mt5_conn: mt5.MetaTrader5 = Depends(get_mt5_connection_dependency)):
+    connector = MT5Connector(mt5_conn)
     result = connector.get_live_price(req.symbol)
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
     return result
 
 @app.post("/mt5/deals/closed_profit")
-async def get_closed_deal_profit(req: GetClosedDealProfitRequest):
-    connector = MT5Connector(req.account_id, req.broker_server)
-    login_result = connector.connect(req.password)
-    if "error" in login_result:
-        raise HTTPException(status_code=401, detail=login_result["error"])
-    
+async def get_closed_deal_profit(req: GetClosedDealProfitRequest, mt5_conn: mt5.MetaTrader5 = Depends(get_mt5_connection_dependency)):
+    connector = MT5Connector(mt5_conn)
     result = connector.get_closed_deal_profit(req.ticket)
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
     return result
 
 @app.post("/mt5/deals/sync_data")
-async def fetch_trade_sync_data(req: FetchTradeSyncDataRequest):
-    connector = MT5Connector(req.account_id, req.broker_server)
-    login_result = connector.connect(req.password)
-    if "error" in login_result:
-        raise HTTPException(status_code=401, detail=login_result["error"])
-    
+async def fetch_trade_sync_data(req: FetchTradeSyncDataRequest, mt5_conn: mt5.MetaTrader5 = Depends(get_mt5_connection_dependency)):
+    connector = MT5Connector(mt5_conn)
     result = connector.fetch_trade_sync_data(req.position_id, req.instrument_symbol)
     if "error_message" in result and result["error_message"] is not None:
         raise HTTPException(status_code=400, detail=result["error_message"])
     return result
 
-# Shutdown MT5 connection on app shutdown
+@app.post("/mt5/candles")
+async def get_historical_candles_endpoint(req: HistoricalDataRequest, mt5_conn: mt5.MetaTrader5 = Depends(get_mt5_connection_dependency)):
+    print(f"Received request for historical candles: {req.dict()}")
+    connector = MT5Connector(mt5_conn)
+    print(f"Using MT5Connector: {connector}")
+    result = connector.get_historical_candles(
+        symbol=req.symbol,
+        timeframe=req.timeframe,
+        count=req.count,
+        start_time=req.start_time,
+        end_time=req.end_time
+    )
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+# --- App Shutdown Event ---
 @app.on_event("shutdown")
 def shutdown_event():
-    if mt5.terminal_info():
-        print("Shutting down MT5 connection on app shutdown.")
-        mt5.shutdown()
+    logger.info("Application is shutting down. Stopping all running MT5 instances.")
+    # This is a simplified cleanup. In a real-world scenario,
+    # you might want more graceful handling of running processes.
+    for account_id in list(process_manager.RUNNING_PROCS.keys()):
+        process_manager.stop_mt5_instance(account_id)
+    # Stop all active polling tasks
+    for account_id in list(websocket_manager.account_polling_tasks.keys()):
+        websocket_manager.stop_polling_task(account_id)
+
+# --- Polling and Broadcasting Logic ---
+async def poll_mt5_data_and_broadcast(internal_account_id: str):
+    """
+    Polls MT5 for account info, open positions, and subscribed live prices,
+    then broadcasts changes to connected WebSocket clients.
+    """
+    polling_interval = 1 # seconds
+    
+    # Create a dummy request object for get_mt5_connection dependency
+    # In a real scenario, you'd need to retrieve actual account_id, password, broker_server
+    # from a secure storage based on internal_account_id.
+    # For this example, we'll use placeholders or assume they are available via process_manager
+    # or a similar mechanism.
+    
+    # For demonstration, let's assume we can get these from process_manager or a config
+    # This part needs to be robustly handled in a production system.
+    
+    # Wait for account details to become available. This handles the race condition
+    # where the WebSocket connects before the first HTTP call has been made.
+    wait_timeout = 60  # seconds
+    wait_start_time = time.time()
+    account_details = None
+    while time.time() - wait_start_time < wait_timeout:
+        account_details = process_manager.get_account_details_for_polling(internal_account_id)
+        if account_details:
+            break
+        logger.debug(f"Waiting for account details for {internal_account_id}...")
+        await asyncio.sleep(2)
+
+    if not account_details:
+        logger.error(f"Could not retrieve account details for polling for {internal_account_id} after waiting. Stopping polling.")
+        websocket_manager.stop_polling_task(internal_account_id)
+        return
+
+    dummy_req = BaseAccountRequest(
+        internal_account_id=internal_account_id,
+        account_id=account_details["account_id"],
+        password=account_details["password"],
+        broker_server=account_details["broker_server"]
+    )
+
+    while True:
+        try:
+            # Use the get_mt5_connection dependency to get a logged-in MT5 instance
+            # This will handle starting the bridge if needed and logging in.
+            async for mt5_conn in get_mt5_connection_for_polling(dummy_req):
+                connector = MT5Connector(mt5_conn)
+
+                # 1. Poll Account Info
+                current_account_info = connector.get_account_info()
+                last_account_info = websocket_manager.get_last_known_data(internal_account_id, "account_info")
+                
+                if current_account_info and current_account_info != last_account_info:
+                    await websocket_manager.broadcast(
+                        json.dumps({"type": "account_info", "data": current_account_info}),
+                        internal_account_id
+                    )
+                    websocket_manager.set_last_known_data(internal_account_id, "account_info", current_account_info)
+                    logger.debug(f"Broadcasted account info for {internal_account_id}")
+
+                # 2. Poll Open Positions
+                current_open_positions = connector.get_open_positions()
+                last_open_positions = websocket_manager.get_last_known_data(internal_account_id, "open_positions")
+
+                if current_open_positions and current_open_positions != last_open_positions:
+                    await websocket_manager.broadcast(
+                        json.dumps({"type": "open_positions", "data": current_open_positions}),
+                        internal_account_id
+                    )
+                    websocket_manager.set_last_known_data(internal_account_id, "open_positions", current_open_positions)
+                    logger.debug(f"Broadcasted open positions for {internal_account_id}")
+
+                # 3. Poll Live Prices for subscribed symbols
+                account_subscribed_symbols = subscribed_symbols.get(internal_account_id, {})
+                for symbol in list(account_subscribed_symbols.keys()):
+                    current_price = connector.get_live_price(symbol)
+                    last_price = websocket_manager.get_last_known_data(internal_account_id, f"price_{symbol}")
+
+                    if current_price and "error" not in current_price and current_price != last_price:
+                        await websocket_manager.broadcast(
+                            json.dumps({"type": "live_price", "symbol": symbol, "data": current_price}),
+                            internal_account_id
+                        )
+                        websocket_manager.set_last_known_data(internal_account_id, f"price_{symbol}", current_price)
+                        logger.debug(f"Broadcasted live price for {symbol} (Account: {internal_account_id})")
+
+                # 4. Poll Candles for subscribed symbol-timeframe pairs
+                account_subscribed_candles = subscribed_candles.get(internal_account_id, {})
+                for subscription_key in list(account_subscribed_candles.keys()):
+                    symbol, timeframe = subscription_key.split('_')
+                    # Fetch the most recent candle
+                    candle_data = connector.get_historical_candles(symbol, timeframe, 1)
+                    
+                    if candle_data and "error" not in candle_data and candle_data.get("candles"):
+                        current_candle = candle_data["candles"][0]
+                        last_candle = websocket_manager.get_last_known_data(internal_account_id, f"candle_{subscription_key}")
+
+                        if current_candle != last_candle:
+                            message_to_send = {
+                                "type": "candle_update",
+                                "symbol": symbol,
+                                "timeframe": timeframe,
+                                "data": current_candle
+                            }
+                            await websocket_manager.broadcast(
+                                json.dumps(message_to_send),
+                                internal_account_id
+                            )
+                            logger.info(f"Sent candle update for {subscription_key}: {message_to_send}")
+                            websocket_manager.set_last_known_data(internal_account_id, f"candle_{subscription_key}", current_candle)
+                            logger.debug(f"Broadcasted candle update for {subscription_key} (Account: {internal_account_id})")
+
+        except HTTPException as e:
+            logger.warning(f"HTTPException during polling for {internal_account_id}: {e.detail}. Retrying...")
+            # If MT5 instance is starting or failed, get_mt5_connection will raise HTTPException.
+            # We should continue polling, as it might recover.
+        except Exception as e:
+            logger.error(f"Unhandled error during polling for {internal_account_id}: {e}")
+            # Consider stopping the polling task if errors are persistent and unrecoverable
+            # websocket_manager.stop_polling_task(internal_account_id)
+            # break # Exit the polling loop
+
+        await asyncio.sleep(polling_interval)
