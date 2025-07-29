@@ -19,9 +19,7 @@ import environ
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Initialize environment variables
-env = environ.Env(
-    DEBUG=(bool, False)
-)
+env = environ.Env(DEBUG=(bool, False))
 environ.Env.read_env(os.path.join(BASE_DIR, ".env"))
 
 MEDIA_URL = "/media/"
@@ -56,26 +54,26 @@ INSTALLED_APPS = [
     "rest_framework",
     "rest_framework.authtoken",
     # Your apps
-    'trading',
-    'accounts',
-    'connectors',
-    'corsheaders',
-    'trades',
-    'risk',
-    'price',
-    'channels',
-    'trade_journal',
-    'automations',
-    'indicators',
-    'calculators',
-    'trade_history',
-    'control',
-    'chart_snapshots.apps.ChartSnapshotsConfig',
-    'analysis', # Added new analysis app
-    'bots',
-    'ta',  # Technical Analysis app
-    'AI', # AI Prompts app
-    'charts',
+    "trading",
+    "accounts",
+    "connectors",
+    "corsheaders",
+    "trades",
+    "risk",
+    "price",
+    "channels",
+    "trade_journal",
+    "automations",
+    "indicators",
+    "calculators",
+    "trade_history",
+    "control",
+    "chart_snapshots.apps.ChartSnapshotsConfig",
+    "analysis",  # Added new analysis app
+    "bots",
+    "ta",  # Technical Analysis app
+    "AI",  # AI Prompts app
+    "charts",
 ]
 
 
@@ -131,13 +129,13 @@ CHANNEL_LAYERS = {
 
 
 DATABASES = {
-    'default': {
-        'ENGINE': env("DB_ENGINE"),
-        'NAME': env("DB_NAME"),
-        'USER': env("DB_USER"),
-        'PASSWORD': env("DB_PASSWORD"),
-        'HOST': env("DB_HOST"),
-        'PORT': env("DB_PORT"),
+    "default": {
+        "ENGINE": env("DB_ENGINE", default="django.db.backends.postgresql"),
+        "NAME": env("DB_NAME"),
+        "USER": env("DB_USER"),
+        "PASSWORD": env("DB_PASSWORD"),
+        "HOST": env("DB_HOST"),
+        "PORT": env("DB_PORT"),
     }
 }
 
@@ -255,7 +253,6 @@ SYMBOL_EXCHANGE_MAP = {
 # ─── Which timeframes to compute ────────────────────
 
 
-
 # ─── Celery broker & beat ───────────────────────────
 CELERY_BROKER_URL = env("CELERY_BROKER_URL")
 # CELERY_BEAT_SCHEDULE is now defined in trading_platform/celery_app.py
@@ -276,8 +273,8 @@ CELERY_TASK_ROUTES = {
 }
 
 CELERY_RESULT_BACKEND = env("CELERY_RESULT_BACKEND")
-DATA_ROOT = BASE_DIR / 'analysis_data' # Added for analysis app
-DATA_ROOT.mkdir(exist_ok=True) # Ensure the directory exists
+DATA_ROOT = BASE_DIR / "analysis_data"  # Added for analysis app
+DATA_ROOT.mkdir(exist_ok=True)  # Ensure the directory exists
 
 OANDA_ACCESS_TOKEN = env("OANDA_ACCESS_TOKEN")
 OANDA_ENVIRONMENT = env("OANDA_ENVIRONMENT")
