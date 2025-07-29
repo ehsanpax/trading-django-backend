@@ -270,6 +270,7 @@ CELERYD_MAX_MEMORY_PER_CHILD = (
 CELERY_TASK_ROUTES = {
     "bots.tasks.live_loop": {"queue": "live_bots"},
     "bots.tasks.run_backtest": {"queue": "backtests"},
+    "trades.tasks.trigger_trade_synchronization": {"queue": "celery"},
     # Define other task routes here if needed, or use a wildcard for default queue
     # 'myapp.tasks.*': {'queue': 'default_queue'},
 }

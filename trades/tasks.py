@@ -228,3 +228,27 @@ def scan_profit_targets():
 
     print(f"{task_name} finished. Processed successfully: {processed_targets}, Errors/Skipped: {errors_occurred}.")
     return f"{task_name}: Processed {processed_targets}, Errors/Skipped {errors_occurred}."
+
+
+@shared_task(name="trades.tasks.trigger_trade_synchronization")
+def trigger_trade_synchronization(trade_id: str):
+    """
+    A Celery task to trigger the synchronization of a single trade.
+    """
+    print(f"CELERY TASK: Triggering synchronization for trade_id: {trade_id}")
+    result = synchronize_trade_with_platform(trade_id=trade_id)
+    if result.get("error"):
+        print(f"ERROR during synchronization for trade {trade_id}: {result['error']}")
+    else:
+        print(f"SUCCESS: Synchronization task completed for trade {trade_id}.")
+    return result
+
+
+@shared_task(name="trades.tasks.diagnostic_task")
+def diagnostic_task(message: str):
+    """
+    A simple task to diagnose Celery communication issues.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"DIAGNOSTIC TASK RECEIVED: {message}")

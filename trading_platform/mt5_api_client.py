@@ -5,6 +5,7 @@ import websockets
 import uuid
 import logging
 from typing import Dict, Any, Optional, Callable, List
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -296,13 +297,20 @@ class MT5APIClient:
         })
         return self._post("/mt5/deals/sync_data", payload)
 
-    def get_historical_candles(self, symbol: str, timeframe: str, count: int) -> Dict[str, Any]:
+    def get_historical_candles(self, symbol: str, timeframe: str, count: Optional[int] = None, start_time: Optional[datetime] = None, end_time: Optional[datetime] = None) -> Dict[str, Any]:
         payload = self._get_auth_payload()
         payload.update({
             "symbol": symbol,
             "timeframe": timeframe,
-            "count": count,
         })
+        if count is not None:
+            payload["count"] = count
+        elif start_time is not None and end_time is not None:
+            payload["start_time"] = start_time.isoformat() + "Z"
+            payload["end_time"] = end_time.isoformat() + "Z"
+        else:
+            return {"error": "Either 'count' or both 'start_time' and 'end_time' must be provided."}
+            
         return self._post("/mt5/candles", json_data=payload)
 
     def delete_instance(self) -> Dict[str, Any]:

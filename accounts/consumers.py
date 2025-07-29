@@ -6,6 +6,7 @@ from django.conf import settings
 from django.apps import apps
 from .models import Account, MT5Account
 from trading_platform.mt5_api_client import connection_manager
+from trades.tasks import trigger_trade_synchronization
 
 logger = logging.getLogger(__name__)
 
@@ -115,19 +116,30 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
 
     async def send_positions_update(self, open_positions):
         """Callback for open positions updates from the MT5APIClient."""
-        # open_positions is already the list of positions from MT5APIClient
         self.open_positions = open_positions
-        
-        # Check if any new positions are not in our map
-        found_new_trade = False
-        for pos in self.open_positions:
-            # Ensure pos is a dictionary before trying .get()
-            if isinstance(pos, dict) and str(pos.get('ticket')) not in self.ticket_to_uuid_map:
-                found_new_trade = True
-                break
-        
-        if found_new_trade:
-            logger.info("New position ticket detected, refreshing UUID map.")
+
+        current_position_tickets = {str(pos.get('ticket')) for pos in self.open_positions if isinstance(pos, dict) and pos.get('ticket')}
+        previous_position_tickets = set(self.ticket_to_uuid_map.keys())
+
+        closed_tickets = previous_position_tickets - current_position_tickets
+        new_tickets = current_position_tickets - previous_position_tickets
+
+        if closed_tickets:
+            logger.info(f"Detected {len(closed_tickets)} closed trades: {closed_tickets}")
+            for ticket in closed_tickets:
+                trade_id = self.ticket_to_uuid_map.get(ticket)
+                if trade_id:
+                    logger.info(f"Enqueuing synchronization task for closed trade. Ticket: {ticket}, Trade ID: {trade_id}")
+                    trigger_trade_synchronization.apply_async(kwargs={'trade_id': trade_id})
+                    logger.info(f"Task for trade {trade_id} sent to broker.")
+                    # Remove from map to prevent re-syncing
+                    if ticket in self.ticket_to_uuid_map:
+                        del self.ticket_to_uuid_map[ticket]
+                else:
+                    logger.warning(f"Could not find trade_id for closed ticket {ticket} in map.")
+
+        if new_tickets:
+            logger.info(f"Detected {len(new_tickets)} new trades. Refreshing UUID map from DB.")
             await self._populate_trade_uuid_map()
 
         await self.send_combined_update()

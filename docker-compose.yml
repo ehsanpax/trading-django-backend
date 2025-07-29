@@ -29,7 +29,7 @@ services:
       - .:/app
     depends_on:
       - redis
-    command: celery -A trading_platform.celery_app worker -l info -Q celery,live_bots
+    command: celery -A trading_platform.celery_app worker -l info -P gevent --concurrency=10 -Q celery,live_bots
 
   celery_backtest_worker:
     build:
