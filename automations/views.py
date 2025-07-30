@@ -12,13 +12,13 @@ from accounts.models import Account # Assuming Account model path
 from trades.helpers import fetch_symbol_info_for_platform # Import the helper
 from rest_framework.authentication import TokenAuthentication, SessionAuthentication
 from rest_framework.permissions import IsAuthenticated
-from trade_journal.models import TradeJournal, TradeJournalAttachment, Trade
+from trade_journal.models import TradeJournal, TradeJournalAttachment, Trade, Order
 import requests
 from django.core.files.base import ContentFile
 import uuid # Import uuid for validating trade_id
-
 # Import close_trade_globally
-from trades.services import close_trade_globally
+from trades.services import close_trade_globally, TradeService
+from trades.serializers import ExecuteTradeOutputSerializer
 from rest_framework.exceptions import APIException, PermissionDenied, ValidationError
 from trading.models import Trade # Import Trade model for DoesNotExist exception
 
@@ -94,22 +94,35 @@ class ExecuteAITradeView(APIView):
         trade_payload["rr_ratio"] = payload.get("rr_ratio") # Default handled by serializer
         trade_payload["reason"] = payload.get("note", "") # Default handled by serializer
 
+        payload = {
+            "account_id": trade_payload["account_id"],
+            "symbol": trade_payload["symbol"],
+            "direction": trade_payload["direction"],
+            "order_type": trade_payload["order_type"],
+            "limit_price": trade_payload["limit_price"],
+            "stop_loss_distance": trade_payload["stop_loss_distance"],
+            "take_profit": trade_payload["take_profit"],
+            "risk_percent": trade_payload["risk_percent"],
+            "reason": trade_payload["reason"],
+            "rr_ratio": trade_payload["rr_ratio"],
+            "projected_profit": trade_payload["projected_profit"],
+            "projected_loss": trade_payload["projected_loss"],
 
-        factory = APIRequestFactory()
-        forward_request = factory.post('/trades/execute/', trade_payload, format='json')
-        # carry over authentication
-        force_authenticate(forward_request, user=request.user)
+        }
+        # 2️⃣ run service
+        svc = TradeService(request.user, payload)
+        account, final_lot, sl, tp = svc.validate()
+        resp = svc.execute_on_broker(account, final_lot, sl, tp)
+        order, trade = svc.persist(account, resp, final_lot, sl, tp)
 
-        execution_view = ExecuteTradeView.as_view()
-        response = execution_view(forward_request, *args, **kwargs)
+        # 3️⃣ build and return output
+        out = svc.build_response(order, trade)
+        out_ser = ExecuteTradeOutputSerializer(data=out)
+        out_ser.is_valid(raise_exception=True)  # ensures consistent output
 
-        print("Response from ExecuteTradeView:", response.data, response.status_code)
-
-        trade_id = response.data.get("trade_id")
-        if not trade_id:
-            return Response({"error": "Trade ID not found in response"}, status=status.HTTP_400_BAD_REQUEST)
         trade_journal = TradeJournal.objects.create(
-            trade=Trade.objects.get(id=trade_id),
+            trade=Trade.objects.get(id=out_ser.validated_data["trade_id"]),
+            order=Order.objects.get(id=out_ser.validated_data["order_id"]),
             action=payload.get("action", "Opened Position"),
             reason=payload.get("note", ""),
             strategy_tag=payload.get("strategy_tag", ""),
@@ -125,7 +138,7 @@ class ExecuteAITradeView(APIView):
                     file=ContentFile(file.content, name=attachment.split("/")[-1])
                 )
         
-        return Response(response.data, status=response.status_code)
+        return Response(out_ser.data, status=out_ser.status_code)
 
 class CloseAIPositionView(APIView):
     """

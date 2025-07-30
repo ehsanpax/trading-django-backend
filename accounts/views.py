@@ -8,6 +8,8 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.authentication import SessionAuthentication, TokenAuthentication
+from rest_framework_simplejwt.authentication import JWTAuthentication
 from django.conf import settings
 from django.shortcuts import get_object_or_404
 import json
@@ -37,7 +39,6 @@ class CreateAccountView(APIView):
     Creates a new trading account and links it to a platform-specific record (MT5 or cTrader).
     """
     permission_classes = [IsAuthenticated]
-    print("TTTTTTESTTTTTTTTTTTTTTTT")
     def post(self, request, format=None):
         serializer = AccountCreateSerializer(data=request.data)
         if serializer.is_valid():
@@ -83,6 +84,7 @@ class CreateAccountView(APIView):
 
 class ListAccountsView(APIView):
     permission_classes = [permissions.IsAuthenticated]
+    authentication_classes = [TokenAuthentication, JWTAuthentication]
 
     def get(self, request, format=None):
         user = request.user

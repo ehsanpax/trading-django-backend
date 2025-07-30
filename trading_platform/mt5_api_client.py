@@ -45,7 +45,8 @@ class MT5APIClient:
         ws_url = f"{self.ws_base_url}/ws/{self.internal_account_id}/{self.client_id}"
         while True:
             try:
-                async with websockets.connect(ws_url) as ws:
+                # Add ping_interval to keep the connection alive
+                async with websockets.connect(ws_url, ping_interval=20, ping_timeout=20) as ws:
                     self.ws = ws
                     self.is_connected = True
                     logger.info(f"WebSocket connected for account {self.internal_account_id}")
@@ -53,11 +54,14 @@ class MT5APIClient:
                     # Resubscribe to all necessary data upon connection
                     for symbol in self.price_listeners.keys():
                         await self.subscribe_price(symbol)
+                    
+                    for listener_key in self.candle_listeners.keys():
+                        symbol, timeframe = listener_key.split('_')
+                        await self.subscribe_candles(symbol, timeframe)
 
                     while self.is_connected:
                         try:
                             message = await self.ws.recv()
-                            #logger.info(f"Received WebSocket message for account {self.internal_account_id}: {message}")
                             data = json.loads(message)
                             message_type = data.get("type")
 
@@ -68,22 +72,11 @@ class MT5APIClient:
                                 for listener in self.account_info_listeners:
                                     await listener(self.last_account_info)
                             elif message_type == "open_positions":
-                                # The data is a dict: {"open_positions": [...]}. Extract the list.
                                 positions_list = data.get("data", {}).get("open_positions", [])
-                                
-                                # Ensure it's a list of dicts, and log if not
                                 if not isinstance(positions_list, list):
                                     logger.error(f"MT5APIClient: Expected 'open_positions' to be a list, but got {type(positions_list)}: {positions_list}")
-                                    positions_list = [] # Fallback to empty list
-
-                                # Further ensure each item in the list is a dict
-                                final_positions = []
-                                for item in positions_list:
-                                    if isinstance(item, dict):
-                                        final_positions.append(item)
-                                    else:
-                                        logger.warning(f"MT5APIClient: Skipping non-dict item in open_positions list: {type(item)} - {item}")
-
+                                    positions_list = []
+                                final_positions = [item for item in positions_list if isinstance(item, dict)]
                                 self.last_open_positions = final_positions
                                 for listener in self.open_positions_listeners:
                                     await listener(self.last_open_positions)
@@ -98,19 +91,18 @@ class MT5APIClient:
                             elif message_type == "candle_update":
                                 symbol = data.get("symbol")
                                 timeframe = data.get("timeframe")
-                                candle_data = data.get("data", {}) # This is the actual candle
+                                candle_data = data.get("data", {})
                                 if symbol and timeframe:
                                     listener_key = f"{symbol}_{timeframe}"
                                     if listener_key in self.candle_listeners:
                                         for listener in self.candle_listeners[listener_key]:
-                                            # Pass the actual candle data to the listener
                                             await listener(candle_data)
-                        except websockets.exceptions.ConnectionClosed:
-                            #logger.warning(f"WebSocket connection closed for account {self.internal_account_id}.")
-                            break # Exit inner loop to reconnect
+                        except websockets.exceptions.ConnectionClosed as e:
+                            logger.warning(f"WebSocket connection closed for account {self.internal_account_id}. Code: {e.code}, Reason: {e.reason}")
+                            break
                         except Exception as e:
-                            #logger.error(f"Error in WebSocket listener for account {self.internal_account_id}: {e}")
-                            break # Exit inner loop to reconnect
+                            logger.error(f"Error in WebSocket listener for account {self.internal_account_id}: {e}")
+                            break
 
             except Exception as e:
                 logger.error(f"WebSocket connection failed for account {self.internal_account_id}: {e}")
@@ -134,7 +126,7 @@ class MT5APIClient:
         if self.is_connected:
             try:
                 message = json.dumps({"type": "unsubscribe_price", "symbol": symbol})
-                #logger.info(f"Sending WebSocket message for account {self.internal_account_id}: {message}")
+                logger.info(f"Sending unsubscribe_price message for {symbol} to MT5 API for account {self.internal_account_id}: {message}")
                 await self.ws.send(message)
             except websockets.exceptions.ConnectionClosed:
                 logger.warning(f"Could not unsubscribe from {symbol}, connection closed.")
@@ -152,7 +144,7 @@ class MT5APIClient:
         if self.is_connected:
             try:
                 message = json.dumps({"type": "unsubscribe_candles", "symbol": symbol, "timeframe": timeframe})
-                #logger.info(f"Sending WebSocket message for account {self.internal_account_id}: {message}")
+                logger.info(f"Sending unsubscribe_candles message for {symbol}_{timeframe} to MT5 API for account {self.internal_account_id}: {message}")
                 await self.ws.send(message)
             except websockets.exceptions.ConnectionClosed:
                 logger.warning(f"Could not unsubscribe from candles for {symbol}_{timeframe}, connection closed.")
@@ -222,6 +214,7 @@ class MT5APIClient:
 
     def _post(self, endpoint: str, json_data: Dict[str, Any]) -> Dict[str, Any]:
         try:
+            logger.info(f"Sending POST request to {endpoint} with data: {json_data}")
             headers = {'Content-Type': 'application/json'}
             response = requests.post(
                 f"{self.base_url}{endpoint}",
@@ -309,8 +302,8 @@ class MT5APIClient:
         if count is not None:
             payload["count"] = count
         elif start_time is not None and end_time is not None:
-            payload["start_time"] = start_time.isoformat() + "Z"
-            payload["end_time"] = end_time.isoformat() + "Z"
+            payload["start_time"] = start_time.isoformat()
+            payload["end_time"] = end_time.isoformat()
         else:
             return {"error": "Either 'count' or both 'start_time' and 'end_time' must be provided."}
             

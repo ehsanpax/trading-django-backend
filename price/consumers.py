@@ -178,29 +178,66 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
         if self.historical_data.empty:
             await self.send_json({"error": "No historical data returned to calculate indicator."})
             return
-            
-        self.historical_data.set_index('time', inplace=True)
-        
-        # Calculate the indicator for the historical data
-        self.historical_data = self.indicator_service.calculate_indicator(self.historical_data, indicator_name, params)
-        
-        self.historical_data.reset_index(inplace=True)
 
-        # Send the historical indicator data to the client
-        indicator_column_name = f"{indicator_name}_{params.get('length', '')}" # Construct the column name
-        if indicator_column_name not in self.historical_data.columns:
-             await self.send_json({"error": f"Indicator column '{indicator_column_name}' not found after calculation."})
-             return
+        # Store original time format for later, and ensure it's numeric for conversion
+        self.historical_data['time'] = pd.to_numeric(self.historical_data['time'], errors='coerce')
+        original_time = self.historical_data['time'].copy()
 
-        indicator_data = self.historical_data[['time', indicator_column_name]].to_dict('records')
+        # Create a temporary dataframe with a proper DatetimeIndex for calculations
+        calc_df = self.historical_data.copy()
+        # Convert Unix timestamp to a DatetimeIndex first, then localize
+        calc_df.index = pd.to_datetime(calc_df['time'], unit='s')
+        calc_df.index = calc_df.index.tz_localize('UTC')
         
-        await self.send_json({
+        # Calculate the indicator.
+        indicator_result_df = self.indicator_service.calculate_indicator(calc_df.copy(), indicator_name, params)
+
+        # Determine the integration strategy and find the new columns
+        if 'close' in indicator_result_df.columns and len(indicator_result_df) == len(calc_df):
+            # Heuristic: If 'close' is present and length matches, it's a full DataFrame (like RSI).
+            final_df = indicator_result_df
+            new_columns = list(set(final_df.columns) - set(calc_df.columns))
+        else:
+            # It's likely just the new indicator columns (like Daily Levels). Join them.
+            final_df = calc_df.join(indicator_result_df)
+            new_columns = list(indicator_result_df.columns)
+
+        if not new_columns:
+            await self.send_json({"error": "Indicator calculation returned no new data columns."})
+            return
+
+        # Restore the original time column format for sending to the client
+        final_df.reset_index(drop=True, inplace=True)
+        final_df['time'] = original_time
+
+        # Conditionally format the data based on the number of new columns
+        if len(new_columns) == 1:
+            # Single-value indicator (e.g., RSI), send data in "wide" format for backward compatibility
+            columns_to_send = ['time'] + new_columns
+            indicator_data = final_df[columns_to_send].dropna(subset=new_columns).to_dict('records')
+            logger.info(f"Sending single-value indicator data for {unique_id} ({indicator_name}): {len(indicator_data)} records.")
+            if indicator_data:
+                logger.info(f"Sample data point: {indicator_data[0]}")
+        else:
+            # Multi-value indicator (e.g., Daily Levels), send data in "series" format
+            indicator_data = {}
+            for col in new_columns:
+                series_df = final_df[['time', col]].dropna()
+                indicator_data[col] = series_df.rename(columns={col: 'value'}).to_dict('records')
+            logger.info(f"Sending multi-value indicator data for {unique_id} ({indicator_name}). Keys: {new_columns}")
+            if new_columns and indicator_data.get(new_columns[0]):
+                logger.info(f"Sample data point for {new_columns[0]}: {indicator_data[new_columns[0]][0] if indicator_data[new_columns[0]] else 'N/A'}")
+
+        payload = {
             "type": "indicator_data",
             "indicator": indicator_name,
             "unique_id": unique_id,
             "params": params,
-            "data": indicator_data
-        })
+            "data": indicator_data,
+            "data_keys": new_columns
+        }
+        
+        await self.send_json(payload)
 
     async def handle_remove_indicator(self, content):
         unique_id = content.get("unique_id")
@@ -217,7 +254,7 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
             await self.send_json({"error": f"Indicator with unique_id '{unique_id}' not active"})
 
     async def handle_unsubscribe(self, content):
-        logger.info(f"Unsubscribing from {self.symbol} for account {self.account_id}")
+        logger.info(f"Received unsubscribe message from client for {self.symbol} for account {self.account_id}")
         if self.platform == "MT5" and self.mt5_client:
             await self.mt5_client.unsubscribe_price(self.symbol)
             if self.timeframe:

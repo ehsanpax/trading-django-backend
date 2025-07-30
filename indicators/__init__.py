@@ -7,3 +7,4 @@ import indicators.smi
 import indicators.stochastic_rsi
 import indicators.obv
 import indicators.dmi
+import indicators.daily_levels

@@ -1,11 +1,12 @@
 from django.db import models
 import uuid
 from uuid import uuid4
-from trading.models import Trade
+from trading.models import Trade, Order
 
 class TradeJournal(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    trade = models.ForeignKey(Trade, on_delete=models.CASCADE, related_name="journals")
+    trade = models.ForeignKey(Trade, on_delete=models.CASCADE, related_name="journals", null=True, blank=True)
+    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name="journals", null=True, blank=True)
 
     action = models.CharField(max_length=50)          # e.g., 'Opened', 'SL Modified'
     reason = models.TextField(null=True, blank=True)  # why the trade was taken or closed
