@@ -2,6 +2,8 @@ from rest_framework import serializers
 from .models import Prompt, Execution, ChatSession, SessionExecution
 from trade_journal.models import TradeJournal
 from django.db import models
+from trading.models import Trade, Order
+from trading.serializers import TradeSerializer, OrderSerializer
 
 
 class PromptSerializer(serializers.ModelSerializer):
@@ -81,6 +83,9 @@ class ChatSessionSerializer(serializers.ModelSerializer):
 
 
 class TradeJournalSerializer(serializers.ModelSerializer):
+    trade = TradeSerializer(allow_null=True, required=False, read_only=True)
+    order = OrderSerializer(allow_null=True, required=False, read_only=True)
+
     class Meta:
         model = TradeJournal
         fields = "__all__"

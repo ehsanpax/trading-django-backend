@@ -74,6 +74,7 @@ class TradeJournalViewset(ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
     authentication_classes = [TokenAuthentication]
     queryset = TradeJournal.objects.all()
+    pagination_class = None  # Disable pagination for simplicity
 
     def get_queryset(self):
         return (
