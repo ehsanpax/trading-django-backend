@@ -35,7 +35,9 @@ from .services import ( # Grouped imports for services
     close_trade_globally, 
     partially_close_trade, 
     update_trade_protection_levels, 
-    update_trade_stop_loss_globally
+    update_trade_stop_loss_globally,
+    get_pending_orders,
+    cancel_pending_order
 )
 from .serializers import (
     OrderSerializer,
@@ -549,7 +551,7 @@ class AllOpenPositionsLiveView(APIView):
 class PendingOrdersView(APIView):
     """
     GET /trades/pending-orders/{account_id}/
-    Returns all pending (limit/stop) orders for the given account.
+    Returns all pending (limit/stop) orders for the given account from the trading platform.
     """
     permission_classes = [IsAuthenticated]
 
@@ -557,50 +559,83 @@ class PendingOrdersView(APIView):
         # 1️⃣ Verify ownership
         account = get_object_or_404(Account, id=account_id, user=request.user)
 
-        # 2️⃣ Fetch PENDING orders from the DB
-        pending = Order.objects.filter(
-            account=account,
-            status=Order.Status.PENDING
-        )
-
-        # 3️⃣ Serialize & return
-        serializer = OrderSerializer(pending, many=True)
-        return Response(
-            {'pending_orders': serializer.data},
-            status=status.HTTP_200_OK
-        )
+        # 2️⃣ Fetch pending orders from the service
+        try:
+            pending_orders_data = get_pending_orders(account)
+            return Response(
+                {'pending_orders': pending_orders_data},
+                status=status.HTTP_200_OK
+            )
+        except APIException as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except NotImplementedError as e:
+            return Response({"detail": str(e)}, status=status.HTTP_501_NOT_IMPLEMENTED)
+        except Exception as e:
+            logger.error(f"Unexpected error in PendingOrdersView: {e}")
+            return Response({"detail": "An unexpected error occurred."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
 
 
 
 class AllPendingOrdersView(APIView):
     """
-    GET /trades/pending-orders/{account_id}/
-    Returns all pending (limit/stop) orders for the given account.
+    GET /trades/all-pending-orders/
+    Returns all pending (limit/stop) orders for all of the user's accounts from the trading platforms.
     """
     authentication_classes = [TokenAuthentication, SessionAuthentication]    
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         accounts = Account.objects.filter(user=request.user)
-
-        all_open_orders = []
+        all_pending_orders = []
 
         for account in accounts:
+            try:
+                pending_orders_data = get_pending_orders(account)
+                # Add account info to each order for better context on the frontend
+                for order in pending_orders_data:
+                    order['account_id'] = str(account.id)
+                    order['account_name'] = account.name
+                all_pending_orders.extend(pending_orders_data)
+            except APIException as e:
+                # Log the error and continue to the next account
+                logger.error(f"Could not fetch pending orders for account {account.id}: {e}")
+                continue
+            except NotImplementedError:
+                # Skip platforms that are not implemented
+                continue
+            except Exception as e:
+                logger.error(f"Unexpected error fetching pending orders for account {account.id}: {e}")
+                continue
 
-            # 2️⃣ Fetch PENDING orders from the DB
-            pending = Order.objects.filter(
-                account=account,
-                status=Order.Status.PENDING
-            )
-
-            # 3️⃣ Serialize & return
-            serializer = OrderSerializer(pending, many=True)
-            all_open_orders.extend(serializer.data)
         return Response(
-            {'pending_orders': all_open_orders},
+            {'pending_orders': all_pending_orders},
             status=status.HTTP_200_OK
         )
+
+
+class CancelPendingOrderView(APIView):
+    """
+    DELETE /trades/pending-orders/<uuid:order_id>/cancel/
+    Cancels a pending order.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, order_id: uuid.UUID):
+        try:
+            result = cancel_pending_order(user=request.user, order_id=order_id)
+            return Response(result, status=status.HTTP_200_OK)
+        except Order.DoesNotExist:
+            return Response({"detail": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
+        except PermissionDenied as e:
+            return Response({"detail": str(e)}, status=status.HTTP_403_FORBIDDEN)
+        except ValidationError as e:
+            return Response({"detail": e.detail if hasattr(e, 'detail') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except APIException as e:
+            return Response({"detail": e.detail if hasattr(e, 'detail') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            logger.error(f"Unexpected error in CancelPendingOrderView: {e}")
+            return Response({"detail": "An unexpected error occurred while canceling the order."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 class UpdateStopLossAPIView(APIView):
     permission_classes = [IsAuthenticated]

@@ -15,6 +15,40 @@ from django.utils import timezone as django_timezone # Alias for django's timezo
 from uuid import UUID
 from datetime import datetime, timezone as dt_timezone # Import datetime's timezone as dt_timezone
 
+
+def get_pending_orders(account: Account) -> list:
+    """
+    Fetches pending orders for a given account from the appropriate platform.
+    """
+    if account.platform == "MT5":
+        try:
+            mt5_account = account.mt5_account
+        except MT5Account.DoesNotExist:
+            raise APIException("No linked MT5 account found for this account.")
+
+        client = MT5APIClient(
+            base_url=settings.MT5_API_BASE_URL,
+            account_id=mt5_account.account_number,
+            password=mt5_account.encrypted_password,
+            broker_server=mt5_account.broker_server,
+            internal_account_id=str(account.id)
+        )
+
+        response = client.get_all_open_positions_rest()
+        if "error" in response:
+            raise APIException(f"Failed to fetch positions from MT5: {response['error']}")
+
+        all_trades = response.get("open_positions", [])
+        pending_orders = [trade for trade in all_trades if trade.get("type") == "pending_order"]
+        return pending_orders
+
+    elif account.platform == "cTrader":
+        # Placeholder for cTrader implementation
+        return []
+    else:
+        raise NotImplementedError(f"Pending order retrieval is not implemented for platform: {account.platform}")
+
+
 def get_cached(symbol, tf, ind):
     row = (
         IndicatorData.objects
@@ -814,3 +848,53 @@ def update_trade_stop_loss_globally(user,
         "new_stop_loss": float(new_stop_loss_price),
         "platform_response": modification_result if account.platform == "MT5" else "N/A"
     }
+
+
+def cancel_pending_order(user, order_id: UUID) -> dict:
+    """
+    Cancels a pending order on the platform and updates its status in the database.
+    """
+    order = get_object_or_404(Order, id=order_id)
+
+    if order.account.user != user:
+        raise PermissionDenied("Unauthorized to cancel this order.")
+
+    if order.status != Order.Status.PENDING:
+        raise ValidationError(f"Order is not pending, its status is '{order.status}'.")
+
+    if order.account.platform == "MT5":
+        try:
+            mt5_account = order.account.mt5_account
+        except MT5Account.DoesNotExist:
+            raise APIException("No linked MT5 account found for this order's account.")
+
+        client = MT5APIClient(
+            base_url=settings.MT5_API_BASE_URL,
+            account_id=mt5_account.account_number,
+            password=mt5_account.encrypted_password,
+            broker_server=mt5_account.broker_server,
+            internal_account_id=str(order.account.id)
+        )
+
+        if not order.broker_order_id:
+            raise APIException(f"Cannot cancel order {order.id}: Missing broker_order_id.")
+
+        cancel_result = client.cancel_order(order_ticket=int(order.broker_order_id))
+
+        if "error" in cancel_result and cancel_result.get("error") != "CANCELED":
+            raise APIException(f"MT5 order cancellation failed: {cancel_result['error']}")
+
+        # Update order status in the database
+        order.status = Order.Status.CANCELED
+        order.save(update_fields=["status"])
+
+        return {
+            "message": "Order canceled successfully.",
+            "order_id": str(order.id),
+            "platform_response": cancel_result
+        }
+
+    elif order.account.platform == "cTrader":
+        raise APIException("cTrader order cancellation not implemented yet.")
+    else:
+        raise APIException(f"Unsupported trading platform: {order.account.platform}")

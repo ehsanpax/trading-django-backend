@@ -247,6 +247,12 @@ class MT5APIClient:
         payload["position_ticket"] = ticket
         return self._post("/mt5/positions/details", payload)
 
+    def get_all_open_positions_rest(self) -> Dict[str, Any]:
+        """
+        Fetches all open positions and pending orders via REST API.
+        """
+        return self._post("/mt5/positions/open", self._get_auth_payload())
+
     def place_trade(self, symbol: str, lot_size: float, direction: str, stop_loss: float, take_profit: float, order_type: str = "MARKET", limit_price: Optional[float] = None) -> Dict[str, Any]:
         payload = self._get_auth_payload()
         payload.update({
@@ -269,6 +275,14 @@ class MT5APIClient:
             "symbol": symbol,
         })
         return self._post("/mt5/positions/close", payload)
+
+    def cancel_order(self, order_ticket: int) -> Dict[str, Any]:
+        """
+        Cancels a pending order.
+        """
+        payload = self._get_auth_payload()
+        payload["order_ticket"] = order_ticket
+        return self._post("/mt5/orders/cancel", json_data=payload)
 
     def modify_position_protection(self, position_id: int, symbol: str, stop_loss: Optional[float] = None, take_profit: Optional[float] = None) -> Dict[str, Any]:
         payload = self._get_auth_payload()

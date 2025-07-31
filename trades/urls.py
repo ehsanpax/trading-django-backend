@@ -5,7 +5,8 @@ from .views import (
     ExecuteTradeView, OpenTradesView, UpdateTakeProfitView, # Changed UpdateTradeView to UpdateTakeProfitView
     CloseTradeView, TradeSymbolInfoView, MarketPriceView, OpenPositionsLiveView, PendingOrdersView, AllOpenPositionsLiveView, AllPendingOrdersView,
     UpdateStopLossAPIView, PartialCloseTradeView,
-    WatchlistViewSet # Added WatchlistViewSet
+    WatchlistViewSet, # Added WatchlistViewSet
+    CancelPendingOrderView
 )
 
 # Create a router and register our viewsets with it.
@@ -22,6 +23,7 @@ urlpatterns = [
     path('market-price/<str:account_id>/<str:symbol>/', MarketPriceView.as_view(), name='market-price'),
     path('open-positions/<uuid:account_id>/', OpenPositionsLiveView.as_view(), name="open_positions_live"),
     path('pending-orders/<uuid:account_id>/', PendingOrdersView.as_view(),name='pending-orders'), # Corrected double slash
+    path('pending-orders/<uuid:order_id>/cancel/', CancelPendingOrderView.as_view(), name='cancel-pending-order'),
     path('all-open-positions/', AllOpenPositionsLiveView.as_view(), name="all_open_positions_live"),
     path('all-pending-orders/', AllPendingOrdersView.as_view(), name="all_pending_orders"),
     path('update-sl/', UpdateStopLossAPIView.as_view(), name='update_trade_stop_loss'),

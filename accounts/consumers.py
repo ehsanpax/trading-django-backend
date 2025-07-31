@@ -23,6 +23,7 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         self.account_info = {}
         self.open_positions = []
         self.ticket_to_uuid_map = {}
+        self.order_ticket_to_uuid_map = {}
 
     async def _populate_trade_uuid_map(self):
         """
@@ -42,6 +43,24 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         }
         logger.info(f"UUID map populated with {len(self.ticket_to_uuid_map)} entries.")
 
+    async def _populate_order_uuid_map(self):
+        """
+        Queries the database for all pending orders for the current account
+        and populates the order ticket-to-UUID mapping.
+        """
+        Order = apps.get_model('trading', 'Order')
+        logger.info(f"Populating order UUID map for account {self.account_id}")
+        pending_orders_db = await sync_to_async(list)(
+            Order.objects.filter(
+                account_id=self.account_id,
+                status='pending'
+            ).values('broker_order_id', 'id')
+        )
+        self.order_ticket_to_uuid_map = {
+            str(order['broker_order_id']): str(order['id']) for order in pending_orders_db
+        }
+        logger.info(f"Order UUID map populated with {len(self.order_ticket_to_uuid_map)} entries.")
+
     async def connect(self):
         """
         Handles a new WebSocket connection.
@@ -56,8 +75,6 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         try:
             account = await sync_to_async(Account.objects.select_related('mt5_account').get)(id=self.account_id, user=self.user)
             if account.platform != "MT5":
-                # For now, we only support MT5 real-time updates via this consumer.
-                # cTrader would require a different listener mechanism.
                 logger.warning(f"Attempted WebSocket connection for non-MT5 account {self.account_id}.")
                 await self.close(code=4004, reason="Real-time updates are only supported for MT5 accounts.")
                 return
@@ -85,11 +102,14 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         self.mt5_client.register_open_positions_listener(self.send_positions_update)
 
         # Send initial state from cache immediately
-        logger.info(f"Populating initial UUID map and sending cached data for account {self.account_id}")
+        logger.info(f"Populating initial UUID maps and sending cached data for account {self.account_id}")
         await self._populate_trade_uuid_map()
+        await self._populate_order_uuid_map()
         self.account_info = self.mt5_client.get_account_info()
-        self.open_positions = self.mt5_client.get_open_positions().get("open_positions", [])
-        await self.send_combined_update()
+        all_positions = self.mt5_client.get_open_positions().get("open_positions", [])
+        pending_orders = [p for p in all_positions if isinstance(p, dict) and p.get('type') == 'pending_order']
+        self.open_positions = [p for p in all_positions if isinstance(p, dict) and p.get('type') != 'pending_order']
+        await self.send_combined_update(pending_orders=pending_orders)
 
     async def disconnect(self, close_code):
         """
@@ -116,14 +136,26 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
 
     async def send_positions_update(self, open_positions):
         """Callback for open positions updates from the MT5APIClient."""
-        self.open_positions = open_positions
+        all_positions = open_positions
+        pending_orders = [p for p in all_positions if isinstance(p, dict) and p.get('type') == 'pending_order']
+        open_trades = [p for p in all_positions if isinstance(p, dict) and p.get('type') != 'pending_order']
 
-        current_position_tickets = {str(pos.get('ticket')) for pos in self.open_positions if isinstance(pos, dict) and pos.get('ticket')}
-        previous_position_tickets = set(self.ticket_to_uuid_map.keys())
+        self.open_positions = open_trades
 
-        closed_tickets = previous_position_tickets - current_position_tickets
-        new_tickets = current_position_tickets - previous_position_tickets
+        # --- Efficiently check if the pending order list has changed ---
+        current_order_tickets = {str(p.get('ticket')) for p in pending_orders}
+        previous_order_tickets = set(self.order_ticket_to_uuid_map.keys())
+        if current_order_tickets != previous_order_tickets:
+            logger.info("Change in pending orders detected. Refreshing order UUID map from DB.")
+            await self._populate_order_uuid_map()
 
+        await self.send_combined_update(pending_orders=pending_orders)
+
+        # --- Continue with existing logic for open trades ---
+        current_trade_tickets = {str(pos.get('ticket')) for pos in self.open_positions}
+        previous_trade_tickets = set(self.ticket_to_uuid_map.keys())
+
+        closed_tickets = previous_trade_tickets - current_trade_tickets
         if closed_tickets:
             logger.info(f"Detected {len(closed_tickets)} closed trades: {closed_tickets}")
             for ticket in closed_tickets:
@@ -131,75 +163,56 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
                 if trade_id:
                     logger.info(f"Enqueuing synchronization task for closed trade. Ticket: {ticket}, Trade ID: {trade_id}")
                     trigger_trade_synchronization.apply_async(kwargs={'trade_id': trade_id})
-                    logger.info(f"Task for trade {trade_id} sent to broker.")
-                    # Remove from map to prevent re-syncing
                     if ticket in self.ticket_to_uuid_map:
                         del self.ticket_to_uuid_map[ticket]
                 else:
                     logger.warning(f"Could not find trade_id for closed ticket {ticket} in map.")
 
+        new_tickets = current_trade_tickets - previous_trade_tickets
         if new_tickets:
-            logger.info(f"Detected {len(new_tickets)} new trades. Refreshing UUID map from DB.")
+            logger.info(f"Detected {len(new_tickets)} new trades. Refreshing trade UUID map from DB.")
             await self._populate_trade_uuid_map()
 
-        await self.send_combined_update()
-
-    async def send_combined_update(self):
-        """Combines the latest account info and positions and sends to the client."""
-        if not self.account_info: # Don't send empty updates if the initial cache is empty
+    async def send_combined_update(self, pending_orders: list = []):
+        """Combines the latest account info, positions, and pending orders and sends to the client."""
+        if not self.account_info:
             logger.debug(f"Skipping update for {self.account_id} because account_info is empty.")
             return
 
-        # The MT5APIClient is now responsible for ensuring self.open_positions is a list of dicts.
-        # We can remove the redundant type checking here.
-
-        # The MT5APIClient is now responsible for ensuring self.open_positions is a list of dicts.
-        # We can remove the redundant type checking here.
-
-        # Add extreme logging for each element in open_positions
-        # This logging is crucial to understand the exact type of each item
-        for i, pos_item in enumerate(self.open_positions):
-            logger.error(f"send_combined_update: Element {i} type: {type(pos_item)}, content: {pos_item}")
-
-        # Process positions with extreme defensive parsing
+        # Process open positions
         processed_positions = []
         for pos_item in self.open_positions:
-            current_pos_dict = None
-            if isinstance(pos_item, str):
-                try:
-                    current_pos_dict = json.loads(pos_item)
-                    if not isinstance(current_pos_dict, dict):
-                        logger.error(f"send_combined_update: Parsed string is not a dict: {pos_item}")
-                        current_pos_dict = None # Reset if not a dict
-                except json.JSONDecodeError as e:
-                    logger.error(f"send_combined_update: Failed to parse string element: {pos_item}. Error: {e}")
-                    current_pos_dict = None # Reset on error
-            elif isinstance(pos_item, dict):
-                current_pos_dict = pos_item
-            else:
-                logger.error(f"send_combined_update: Unexpected type for position element: {type(pos_item)} - {pos_item}")
-                current_pos_dict = None # Reset for unexpected types
-
-            if current_pos_dict:
-                # Ensure 'ticket' key exists before trying to get it
-                ticket_value = current_pos_dict.get('ticket')
+            if isinstance(pos_item, dict):
+                ticket_value = pos_item.get('ticket')
                 if ticket_value is not None:
                     processed_positions.append({
-                        **current_pos_dict,
+                        **pos_item,
                         'trade_id': self.ticket_to_uuid_map.get(str(ticket_value))
                     })
                 else:
-                    logger.warning(f"send_combined_update: Position dict missing 'ticket' key: {current_pos_dict}")
-                    processed_positions.append(current_pos_dict) # Add without trade_id if ticket is missing
-            
+                    processed_positions.append(pos_item)
+
+        # Process pending orders to inject UUID
+        processed_pending_orders = []
+        for order_item in pending_orders:
+            if isinstance(order_item, dict):
+                ticket_value = order_item.get('ticket')
+                if ticket_value is not None:
+                    processed_pending_orders.append({
+                        **order_item,
+                        'order_id': self.order_ticket_to_uuid_map.get(str(ticket_value))
+                    })
+                else:
+                    processed_pending_orders.append(order_item)
+
         payload = {
             "type": "account_update",
             "data": {
                 "balance": self.account_info.get("balance"),
                 "equity": self.account_info.get("equity"),
                 "margin": self.account_info.get("margin"),
-                "open_positions": processed_positions
+                "open_positions": processed_positions,
+                "pending_orders": processed_pending_orders
             }
         }
-        #logger.info(f"Sending account update to client for account {self.account_id}")
         await self.send_json(payload)
