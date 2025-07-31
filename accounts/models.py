@@ -12,7 +12,7 @@ def generate_six_digit_code():
 
 class Account(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    simple_id = models.IntegerField(default=generate_six_digit_code)
+    simple_id = models.IntegerField(default=generate_six_digit_code, db_index=True)
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="accounts"
     )

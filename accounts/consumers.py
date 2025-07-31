@@ -59,7 +59,7 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         self.order_ticket_to_uuid_map = {
             str(order['broker_order_id']): str(order['id']) for order in pending_orders_db
         }
-        logger.info(f"Order UUID map populated with {len(self.order_ticket_to_uuid_map)} entries.")
+        #logger.info(f"Order UUID map populated with {len(self.order_ticket_to_uuid_map)} entries.")
 
     async def connect(self):
         """
