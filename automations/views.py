@@ -5,7 +5,7 @@ from rest_framework import status
 from rest_framework.test import APIRequestFactory, force_authenticate
 import uuid
 from decimal import Decimal
-from decimal import Decimal
+from django.db.models import Q
 from .serializers import AITradeRequestSerializer
 from trades.views import ExecuteTradeView
 from accounts.models import Account  # Assuming Account model path
@@ -58,11 +58,14 @@ class ExecuteAITradeView(APIView):
         symbol = payload.get("symbol")
         account_id = payload.get("account_id")
 
-        try:
-            account = Account.objects.get(id=account_id)
-        except Account.DoesNotExist:
+        account = Account.objects.filter(
+            Q(Q(id=account_id) | Q(simple_id=account_id)) & Q(user=request.user)
+        ).first()
+        if not account:
             return Response(
-                {"error": f"Account {account_id} not found."},
+                {
+                    "error": f"Account {account_id} not found for user {request.user.username}."
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
