@@ -197,7 +197,7 @@ class ExecuteAITradeView(APIView):
                     file=ContentFile(file.content, name=attachment.split("/")[-1]),
                 )
 
-        return Response(out_ser.data, status=out_ser.status_code)
+        return Response(out_ser.data)
 
 
 class CloseAIPositionView(APIView):
