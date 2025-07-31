@@ -49,7 +49,7 @@ class MT5APIClient:
                 async with websockets.connect(ws_url, ping_interval=20, ping_timeout=20) as ws:
                     self.ws = ws
                     self.is_connected = True
-                    logger.info(f"WebSocket connected for account {self.internal_account_id}")
+                    #logger.info(f"WebSocket connected for account {self.internal_account_id}")
 
                     # Resubscribe to all necessary data upon connection
                     for symbol in self.price_listeners.keys():
@@ -98,7 +98,7 @@ class MT5APIClient:
                                         for listener in self.candle_listeners[listener_key]:
                                             await listener(candle_data)
                         except websockets.exceptions.ConnectionClosed as e:
-                            logger.warning(f"WebSocket connection closed for account {self.internal_account_id}. Code: {e.code}, Reason: {e.reason}")
+                            #logger.warning(f"WebSocket connection closed for account {self.internal_account_id}. Code: {e.code}, Reason: {e.reason}")
                             break
                         except Exception as e:
                             logger.error(f"Error in WebSocket listener for account {self.internal_account_id}: {e}")
@@ -126,7 +126,7 @@ class MT5APIClient:
         if self.is_connected:
             try:
                 message = json.dumps({"type": "unsubscribe_price", "symbol": symbol})
-                logger.info(f"Sending unsubscribe_price message for {symbol} to MT5 API for account {self.internal_account_id}: {message}")
+                #logger.info(f"Sending unsubscribe_price message for {symbol} to MT5 API for account {self.internal_account_id}: {message}")
                 await self.ws.send(message)
             except websockets.exceptions.ConnectionClosed:
                 logger.warning(f"Could not unsubscribe from {symbol}, connection closed.")
@@ -144,7 +144,7 @@ class MT5APIClient:
         if self.is_connected:
             try:
                 message = json.dumps({"type": "unsubscribe_candles", "symbol": symbol, "timeframe": timeframe})
-                logger.info(f"Sending unsubscribe_candles message for {symbol}_{timeframe} to MT5 API for account {self.internal_account_id}: {message}")
+                #logger.info(f"Sending unsubscribe_candles message for {symbol}_{timeframe} to MT5 API for account {self.internal_account_id}: {message}")
                 await self.ws.send(message)
             except websockets.exceptions.ConnectionClosed:
                 logger.warning(f"Could not unsubscribe from candles for {symbol}_{timeframe}, connection closed.")
@@ -214,7 +214,7 @@ class MT5APIClient:
 
     def _post(self, endpoint: str, json_data: Dict[str, Any]) -> Dict[str, Any]:
         try:
-            logger.info(f"Sending POST request to {endpoint} with data: {json_data}")
+            #logger.info(f"Sending POST request to {endpoint} with data: {json_data}")
             headers = {'Content-Type': 'application/json'}
             response = requests.post(
                 f"{self.base_url}{endpoint}",
@@ -258,7 +258,7 @@ class MT5APIClient:
             "order_type": order_type,
             "limit_price": limit_price,
         })
-        logger.info(f"Sending trade request to MT5 API: {payload}")
+        #logger.info(f"Sending trade request to MT5 API: {payload}")
         return self._post("/mt5/trade", json_data=payload)
 
     def close_trade(self, ticket: int, volume: float, symbol: str) -> Dict[str, Any]:
@@ -326,7 +326,7 @@ class MT5APIClient:
                 None, 
                 lambda: self._post("/mt5/account_info", self._get_auth_payload())
             )
-            logger.info(f"Successfully triggered instance initialization for {self.internal_account_id}")
+            #logger.info(f"Successfully triggered instance initialization for {self.internal_account_id}")
         except Exception as e:
             logger.error(f"Failed to trigger instance initialization for {self.internal_account_id}: {e}")
             # We don't re-raise here, as the connection might still succeed.

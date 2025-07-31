@@ -95,17 +95,17 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
             return
 
     async def disconnect(self, close_code):
-        logger.info(f"🔻 WebSocket disconnected for Account: {self.account_id} - {self.symbol}")
+        #logger.info(f"🔻 WebSocket disconnected for Account: {self.account_id} - {self.symbol}")
         if self.platform == "MT5" and self.mt5_client:
             self.mt5_client.unregister_price_listener(self.symbol, self.send_price_update)
             if self.timeframe: # If we were subscribed to candles, unregister
                 self.mt5_client.unregister_candle_listener(self.symbol, self.timeframe, self.send_candle_update)
         elif self.price_task:
             self.price_task.cancel()
-        logger.info(f"🔻 WebSocket closed for Account: {self.account_id} - {self.symbol}")
+        #logger.info(f"🔻 WebSocket closed for Account: {self.account_id} - {self.symbol}")
 
     async def receive_json(self, content):
-        logger.info(f"Received message from client for account {self.account_id} - {self.symbol}: {json.dumps(content)}")
+        #logger.info(f"Received message from client for account {self.account_id} - {self.symbol}: {json.dumps(content)}")
         action = content.get("type") or content.get("action")
 
         if action == "subscribe":
@@ -117,7 +117,7 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
                     self.mt5_client.unregister_candle_listener(self.symbol, self.timeframe, self.send_candle_update)
 
                 self.timeframe = new_timeframe
-                logger.info(f"Subscribed to timeframe: {self.timeframe}")
+                #logger.info(f"Subscribed to timeframe: {self.timeframe}")
                 if self.mt5_client:
                     self.mt5_client.register_candle_listener(self.symbol, self.timeframe, self.send_candle_update)
                     await self.mt5_client.subscribe_candles(self.symbol, self.timeframe)
@@ -147,7 +147,7 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
             await self.send_json({"error": "Unique ID not provided for indicator"})
             return
 
-        logger.info(f"Adding indicator: {indicator_name} with params: {params}, unique_id: {unique_id}")
+        #logger.info(f"Adding indicator: {indicator_name} with params: {params}, unique_id: {unique_id}")
         self.active_indicators[unique_id] = {"name": indicator_name, "params": params} # Store by unique_id
         
         # Fetch historical data to calculate the indicator
@@ -215,7 +215,7 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
             # Single-value indicator (e.g., RSI), send data in "wide" format for backward compatibility
             columns_to_send = ['time'] + new_columns
             indicator_data = final_df[columns_to_send].dropna(subset=new_columns).to_dict('records')
-            logger.info(f"Sending single-value indicator data for {unique_id} ({indicator_name}): {len(indicator_data)} records.")
+            #logger.info(f"Sending single-value indicator data for {unique_id} ({indicator_name}): {len(indicator_data)} records.")
             if indicator_data:
                 logger.info(f"Sample data point: {indicator_data[0]}")
         else:
@@ -224,7 +224,7 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
             for col in new_columns:
                 series_df = final_df[['time', col]].dropna()
                 indicator_data[col] = series_df.rename(columns={col: 'value'}).to_dict('records')
-            logger.info(f"Sending multi-value indicator data for {unique_id} ({indicator_name}). Keys: {new_columns}")
+            #logger.info(f"Sending multi-value indicator data for {unique_id} ({indicator_name}). Keys: {new_columns}")
             if new_columns and indicator_data.get(new_columns[0]):
                 logger.info(f"Sample data point for {new_columns[0]}: {indicator_data[new_columns[0]][0] if indicator_data[new_columns[0]] else 'N/A'}")
 
@@ -248,19 +248,27 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
         if unique_id in self.active_indicators:
             indicator_info = self.active_indicators.pop(unique_id) # Use pop to get the value and remove
             indicator_name = indicator_info.get("name", "Unknown")
-            logger.info(f"Removed indicator: {indicator_name} with unique_id: {unique_id}")
+            #logger.info(f"Removed indicator: {indicator_name} with unique_id: {unique_id}")
             await self.send_json({"type": "indicator_removed", "unique_id": unique_id})
         else:
             await self.send_json({"error": f"Indicator with unique_id '{unique_id}' not active"})
 
     async def handle_unsubscribe(self, content):
-        logger.info(f"Received unsubscribe message from client for {self.symbol} for account {self.account_id}")
+        #logger.info(f"Received unsubscribe message from client for {self.symbol} for account {self.account_id}")
         if self.platform == "MT5" and self.mt5_client:
+            # Unregister listeners first to prevent ghost subscriptions on reconnect
+            self.mt5_client.unregister_price_listener(self.symbol, self.send_price_update)
+            if self.timeframe:
+                self.mt5_client.unregister_candle_listener(self.symbol, self.timeframe, self.send_candle_update)
+
+            # Now, send the unsubscribe messages to the MT5 API
             await self.mt5_client.unsubscribe_price(self.symbol)
             if self.timeframe:
                 await self.mt5_client.unsubscribe_candles(self.symbol, self.timeframe)
+        
         elif self.price_task:
             self.price_task.cancel()
+            
         await self.send_json({"type": "unsubscribed", "symbol": self.symbol})
         await self.close()
 
@@ -274,14 +282,117 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
         await self.send_json(payload)
 
     async def send_candle_update(self, candle_data):
-        """Callback function to send new candle updates to the client."""
-        logger.info(f"Received candle update from MT5 for {self.symbol} {self.timeframe} for account {self.account_id}: {json.dumps(candle_data)}")
-        payload = {
-            "type": "new_candle",
-            "data": candle_data
-        }
-        logger.info(f"Sending new candle for {self.symbol} {self.timeframe} to client for account {self.account_id}: {json.dumps(payload)}")
-        await self.send_json(payload)
+        """Callback function to handle candle updates, calculating indicators on actual close."""
+        # Always send the raw candle data to the client for the live chart line
+        await self.send_json({"type": "new_candle", "data": candle_data})
+
+        if not self.active_indicators:
+            return
+
+        # --- Step 1: Always update the historical data first ---
+        new_candle_df = pd.DataFrame([candle_data])
+        new_candle_df['time'] = pd.to_numeric(new_candle_df['time'], errors='coerce')
+        new_time = new_candle_df['time'].iloc[0]
+
+        is_new_candle = False
+        if self.historical_data.empty:
+            self.historical_data = new_candle_df
+        else:
+            last_time = self.historical_data['time'].iloc[-1]
+            if new_time > last_time:
+                is_new_candle = True
+                # Append the new, forming candle
+                self.historical_data = pd.concat([self.historical_data, new_candle_df], ignore_index=True)
+            else:
+                # Update the currently forming candle
+                self.historical_data.iloc[-1] = new_candle_df.iloc[0]
+
+        # --- Step 2: Always recalculate on new data ---
+        #logger.info(f"New tick received. Recalculating indicators for the latest candle.")
+        await self.recalculate_and_send_updates(is_new_candle=is_new_candle)
+        
+        # --- Step 3: Trim historical data ---
+        if len(self.historical_data) > 1000:
+            self.historical_data = self.historical_data.iloc[-1000:]
+
+    async def recalculate_and_send_updates(self, is_new_candle):
+        """Helper function to calculate indicators and send an update for the latest candle."""
+        if self.historical_data.empty:
+            return
+
+        # The entire historical data, including the first tick of the new candle, is needed for accurate calculation.
+        calc_df = self.historical_data.copy()
+        calc_df.index = pd.to_datetime(calc_df['time'], unit='s')
+        calc_df.index = calc_df.index.tz_localize('UTC')
+
+        for unique_id, indicator_info in self.active_indicators.items():
+            indicator_name = indicator_info["name"]
+            params = indicator_info["params"]
+
+            indicator_result_df = self.indicator_service.calculate_indicator(calc_df.copy(), indicator_name, params)
+
+            # Integration logic...
+            if 'close' in indicator_result_df.columns and len(indicator_result_df) == len(calc_df):
+                final_df = indicator_result_df
+                new_columns = list(set(final_df.columns) - set(calc_df.columns))
+            else:
+                final_df = calc_df.join(indicator_result_df)
+                new_columns = list(indicator_result_df.columns)
+
+            if not new_columns:
+                continue
+
+            # Preserve the original time column, which gets dropped by the indicator calculation.
+            original_times = calc_df['time'].reset_index(drop=True)
+            final_df.reset_index(drop=True, inplace=True)
+            final_df['time'] = original_times
+
+            # The target is always the last row, which represents the currently forming candle.
+            if len(final_df) < 1:
+                continue
+            
+            # If it's a new candle, we send the value for the previously closed candle first
+            if is_new_candle and len(final_df) >= 2:
+                closed_candle_point = final_df.iloc[-2]
+                if len(new_columns) == 1:
+                    update_data = closed_candle_point[['time'] + new_columns].dropna().to_dict()
+                else:
+                    update_data = {'time': closed_candle_point['time']}
+                    for col in new_columns:
+                        if pd.notna(closed_candle_point[col]):
+                            update_data[col] = closed_candle_point[col]
+                
+                if len(update_data) > 1:
+                    payload = {
+                        "type": "indicator_update",
+                        "indicator": indicator_name,
+                        "unique_id": unique_id,
+                        "data": update_data,
+                        "data_keys": new_columns
+                    }
+                    #logger.info(f"Sending final indicator update for closed candle: {json.dumps(payload)}")
+                    await self.send_json(payload)
+
+            # Now, send the update for the currently forming candle
+            latest_point = final_df.iloc[-1]
+            if len(new_columns) == 1:
+                update_data = latest_point[['time'] + new_columns].dropna().to_dict()
+            else:
+                update_data = {'time': latest_point['time']}
+                for col in new_columns:
+                    if pd.notna(latest_point[col]):
+                        update_data[col] = latest_point[col]
+            
+            if len(update_data) > 1:
+                payload = {
+                    "type": "indicator_update",
+                    "indicator": indicator_name,
+                    "unique_id": unique_id,
+                    "data": update_data,
+                    "data_keys": new_columns
+                }
+                #logger.info(f"Sending indicator update for {unique_id}: {json.dumps(payload)}")
+                await self.send_json(payload)
 
     def get_historical_candles(self, symbol, timeframe, count):
         # This method now needs to handle the case where mt5_client is not the old polling client
