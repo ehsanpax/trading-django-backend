@@ -164,19 +164,24 @@ class ExecuteAITradeView(APIView):
         out_ser.is_valid(raise_exception=True)  # ensures consistent output
 
         trade_id = out_ser.validated_data["trade_id"]
+        trade = None
         try:
             trade_id = uuid.UUID(trade_id, version=4)
+            trade = Trade.objects.filter(id=trade_id).first()
         except (ValueError, TypeError):
             trade_id = None
+
         order_id = out_ser.validated_data["order_id"]
+        order = None
         try:
             order_id = uuid.UUID(order_id, version=4)
+            order = Order.objects.filter(id=order_id).first()
         except (ValueError, TypeError):
             order_id = None
 
         trade_journal = TradeJournal.objects.create(
-            trade=trade_id,
-            order=order_id,
+            trade=trade,
+            order=order,
             action=payload.get("action", "Opened Position"),
             reason=payload.get("note", ""),
             strategy_tag=payload.get("strategy_tag", ""),
