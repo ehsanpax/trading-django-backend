@@ -6,6 +6,7 @@ from rest_framework import viewsets, status
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.shortcuts import get_object_or_404
+from django.db.models import Q
 
 
 class TradeJournalViewSet(viewsets.ModelViewSet):
@@ -25,7 +26,9 @@ class TradeJournalViewSet(viewsets.ModelViewSet):
         queryset = TradeJournal.objects.filter(trade__account__user=user)
         if account_id:
             # Filter by specific account if provided
-            queryset = queryset.filter(trade__account__id=account_id)
+            queryset = queryset.filter(
+                Q(trade__account__id=account_id) | Q(trade__account__simple_id=True)
+            )
 
         # Allow filtering by a specific trade_id passed as a query parameter
         trade_id = self.request.query_params.get("trade", None)

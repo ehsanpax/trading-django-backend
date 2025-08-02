@@ -396,7 +396,7 @@ class AllOpenPositionsLiveView(APIView):
         db_trade_order_ids = set()
         account_id = self.request.query_params.get("account", None)
         if account_id:
-            user_accounts = user_accounts.filter(id=account_id)
+            user_accounts = user_accounts.filter(Q(id=account_id) | Q(simple_id=True))
 
         # 1. Fetch all open trades from the database for the user
         db_trades = Trade.objects.filter(account__in=user_accounts, trade_status="open")
