@@ -10,6 +10,7 @@ from uuid import uuid4
 from django.conf import settings
 from django.db.models import Q  # For OR queries
 from accounts.services import get_account_details
+from rest_framework_simplejwt.authentication import JWTAuthentication
 
 # Import models from your accounts app (or wherever they reside)
 from accounts.models import Account, MT5Account, CTraderAccount
@@ -670,6 +671,7 @@ class CancelPendingOrderView(APIView):
     Cancels a pending order.
     """
 
+    authentication_classes = [TokenAuthentication, JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
     def delete(self, request, order_id: uuid.UUID):
