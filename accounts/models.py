@@ -86,6 +86,26 @@ class CTraderAccount(models.Model):
 
 
 from django.core.exceptions import ValidationError
+from django.db.models.signals import post_save
+from django.dispatch import receiver
+
+
+class Profile(models.Model):
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='profile')
+    is_approved = models.BooleanField(default=False, help_text="Designates whether the user has been approved by an admin.")
+
+    def __str__(self):
+        return f"{self.user.username}'s Profile"
+
+@receiver(post_save, sender=settings.AUTH_USER_MODEL)
+def create_user_profile(sender, instance, created, **kwargs):
+    if created:
+        Profile.objects.create(user=instance)
+
+@receiver(post_save, sender=settings.AUTH_USER_MODEL)
+def save_user_profile(sender, instance, **kwargs):
+    if hasattr(instance, 'profile'):
+        instance.profile.save()
 
 
 class ProfitTakingProfile(models.Model):

@@ -1,4 +1,5 @@
 # trades/services.py
+import logging
 from django.conf import settings
 from decimal import Decimal
 from django.shortcuts import get_object_or_404
@@ -11,9 +12,12 @@ from uuid import uuid4
 from .targets import derive_target_price
 from trading.models import IndicatorData
 from rest_framework.exceptions import ValidationError, APIException, PermissionDenied
+from .exceptions import BrokerAPIError, BrokerConnectionError, TradeValidationError, TradeSyncError
 from django.utils import timezone as django_timezone # Alias for django's timezone
 from uuid import UUID
 from datetime import datetime, timezone as dt_timezone # Import datetime's timezone as dt_timezone
+
+logger = logging.getLogger(__name__)
 
 
 def get_pending_orders(account: Account) -> list:
@@ -24,7 +28,7 @@ def get_pending_orders(account: Account) -> list:
         try:
             mt5_account = account.mt5_account
         except MT5Account.DoesNotExist:
-            raise APIException("No linked MT5 account found for this account.")
+            raise TradeValidationError("No linked MT5 account found for this account.")
 
         client = MT5APIClient(
             base_url=settings.MT5_API_BASE_URL,
@@ -35,9 +39,6 @@ def get_pending_orders(account: Account) -> list:
         )
 
         response = client.get_all_open_positions_rest()
-        if "error" in response:
-            raise APIException(f"Failed to fetch positions from MT5: {response['error']}")
-
         all_trades = response.get("open_positions", [])
         pending_orders = [trade for trade in all_trades if trade.get("type") == "pending_order"]
         return pending_orders
@@ -89,7 +90,7 @@ def partially_close_trade(user, trade_id: UUID, volume_to_close: Decimal) -> dic
         try:
             mt5_account = trade.account.mt5_account
         except MT5Account.DoesNotExist:
-            raise APIException("No linked MT5 account found for this trade's account.")
+            raise TradeValidationError("No linked MT5 account found for this trade's account.")
 
         client = MT5APIClient(
             base_url=settings.MT5_API_BASE_URL,
@@ -100,28 +101,25 @@ def partially_close_trade(user, trade_id: UUID, volume_to_close: Decimal) -> dic
         )
 
         if not trade.position_id:
-            raise APIException(f"Cannot partially close trade {trade.id}: Missing MT5 position ticket (position_id).")
+            raise TradeValidationError(f"Cannot partially close trade {trade.id}: Missing MT5 position ticket (position_id).")
 
-        close_result = client.close_trade(
+        client.close_trade(
             ticket=trade.position_id,
             volume=float(volume_to_close),
             symbol=trade.instrument
         )
-
-        if "error" in close_result:
-            raise APIException(f"MT5 trade partial closure command failed: {close_result['error']}")
         
         # Successfully issued partial close command to broker
         # Now, synchronize to get the deal and update trade state
-        sync_result = synchronize_trade_with_platform(trade_id=trade.id, existing_connector=connector)
-
-        if "error" in sync_result:
+        try:
+            synchronize_trade_with_platform(trade_id=trade.id, existing_connector=connector)
+        except (BrokerAPIError, BrokerConnectionError, TradeSyncError) as e:
             # This is problematic: broker action succeeded, but DB sync failed.
             # Log this error thoroughly. The trade state in DB might be stale.
             # For now, we'll raise an exception, but a more robust solution might involve
             # retrying sync or flagging the trade for manual review.
-            print(f"CRITICAL: Trade {trade.id} partially closed on MT5, but DB sync failed: {sync_result['error']}")
-            raise APIException(f"Partially closed on platform, but DB sync failed: {sync_result['error']}. Please check trade status.")
+            logger.critical(f"Trade {trade.id} partially closed on MT5, but DB sync failed: {e}")
+            raise TradeSyncError(f"Partially closed on platform, but DB sync failed: {e}. Please check trade status.")
 
         # Find the latest order related to this trade to get P/L of the closed portion
         # This assumes synchronize_trade_with_platform created an Order for the partial close deal.
@@ -172,6 +170,7 @@ class TradeService:
         """
         account = self._get_account()
 
+        limit_price = self.data.get("limit_price")
         rv = validate_trade_request(
             account_id         = str(account.id),
             user               = self.user,
@@ -180,6 +179,7 @@ class TradeService:
             stop_loss_distance = self.data["stop_loss_distance"],
             take_profit_price  = float(self.data["take_profit"]),
             risk_percent       = float(self.data["risk_percent"]),
+            limit_price=float(limit_price) if limit_price is not None else None,
         )
         if "error" in rv:
             raise ValidationError(rv["error"])
@@ -237,15 +237,12 @@ class TradeService:
                 order_type=self.data.get("order_type", "MARKET"),
                 limit_price=limit_price_float
             )
-            if "error" in resp:
-                raise APIException(resp["error"])
-
             if resp.get("status") == "filled":
                 opened_pos_ticket = resp.get("opened_position_ticket")
                 if opened_pos_ticket:
                     pos_details = conn.get_position_by_ticket(opened_pos_ticket)
                     if "error" in pos_details:
-                        print(f"Warning: Could not fetch details for directly provided ticket {opened_pos_ticket}: {pos_details['error']}.")
+                        logger.warning(f"Could not fetch details for directly provided ticket {opened_pos_ticket}: {pos_details['error']}.")
                         pos_details = {}
                     resp["position_info"] = pos_details
                 else:
@@ -262,8 +259,6 @@ class TradeService:
                 stop_loss     = sl_price,
                 take_profit   = tp_price,
             )
-            if "error" in resp:
-                raise APIException(resp["error"])
             # cTraderClient should already include resp["position_info"] when filled
 
         return resp
@@ -311,21 +306,21 @@ class TradeService:
                 trade_sl = raw_position_info.get("sl", sl_price)
                 trade_tp = raw_position_info.get("tp", tp_price)
             elif raw_position_info.get("error"):
-                 print(f"--- trades/services.py (persist): position_info has error: {raw_position_info.get('error')}. Using calculated/default values for some trade details.")
+                 logger.warning(f"--- trades/services.py (persist): position_info has error: {raw_position_info.get('error')}. Using calculated/default values for some trade details.")
             
             # Determine the position_id for the Trade record
             db_trade_position_id = None
             # For MT5 Market orders, user confirmed that resp["order_id"] (the order ticket) IS the position_id.
             if account.platform == "MT5" and self.data.get("order_type", "").upper() == "MARKET":
                 db_trade_position_id = resp.get("order_id") 
-                print(f"--- trades/services.py (persist): Using order_id {db_trade_position_id} as Trade.position_id for MT5 MARKET order.")
+                logger.info(f"--- trades/services.py (persist): Using order_id {db_trade_position_id} as Trade.position_id for MT5 MARKET order.")
             elif raw_position_info and not raw_position_info.get("error"):
                 # For cTrader or non-market MT5, or if MT5 market order assumption is wrong, use ticket from fetched position_info
                 db_trade_position_id = raw_position_info.get("ticket")
-                print(f"--- trades/services.py (persist): Using ticket {db_trade_position_id} from position_info as Trade.position_id.")
+                logger.info(f"--- trades/services.py (persist): Using ticket {db_trade_position_id} from position_info as Trade.position_id.")
             
             if db_trade_position_id is None:
-                 print(f"Warning: Trade.position_id will be NULL for order {resp.get('order_id')}. Fetched position_info: {raw_position_info}")
+                 logger.warning(f"Trade.position_id will be NULL for order {resp.get('order_id')}. Fetched position_info: {raw_position_info}")
 
             trade = Trade.objects.create(
                 account         = account,
@@ -413,7 +408,7 @@ def close_trade_globally(user, trade_id: UUID) -> dict:
         try:
             mt5_account = trade.account.mt5_account
         except MT5Account.DoesNotExist:
-            raise APIException("No linked MT5 account found for this trade's account.")
+            raise TradeValidationError("No linked MT5 account found for this trade's account.")
 
         client = MT5APIClient(
             base_url=settings.MT5_API_BASE_URL,
@@ -425,35 +420,32 @@ def close_trade_globally(user, trade_id: UUID) -> dict:
 
         mt5_position_ticket_to_close = trade.position_id
         if not mt5_position_ticket_to_close:
-            print(f"Warning: Trade {trade.id} has no position_id. Attempting to use order_id {trade.order_id} for closure.")
+            logger.warning(f"Trade {trade.id} has no position_id. Attempting to use order_id {trade.order_id} for closure.")
             mt5_position_ticket_to_close = trade.order_id
         
         if not mt5_position_ticket_to_close:
-            raise APIException(f"Cannot close trade {trade.id}: Missing MT5 position ticket (position_id or order_id).")
+            raise TradeValidationError(f"Cannot close trade {trade.id}: Missing MT5 position ticket (position_id or order_id).")
 
-        close_result = client.close_trade(
+        client.close_trade(
             ticket=mt5_position_ticket_to_close,
             volume=float(trade.remaining_size),
             symbol=trade.instrument
         )
 
-        if "error" in close_result:
-            raise APIException(f"MT5 trade closure command failed: {close_result['error']}")
-
         # After successful closure, synchronize with the platform to get the final P/L
-        sync_result = synchronize_trade_with_platform(trade_id=trade.id, existing_connector=client)
-
-        if "error" in sync_result:
+        try:
+            synchronize_trade_with_platform(trade_id=trade.id, existing_connector=client)
+        except (BrokerAPIError, BrokerConnectionError, TradeSyncError) as e:
             # Log this critical error, but proceed to close the trade in our DB.
             # The trade is closed on the platform, so our DB should reflect that.
             # The P/L might be stale, but a subsequent sync can fix it.
-            print(f"CRITICAL: Trade {trade.id} closed on MT5, but DB sync failed: {sync_result['error']}")
+            logger.critical(f"Trade {trade.id} closed on MT5, but DB sync failed: {e}")
             # We can still proceed to mark as closed, but profit will be stale.
             pass # Continue to the standard closing logic below
 
     elif trade.account.platform == "cTrader":
         # Consistent with original view, cTrader close is not implemented.
-        raise APIException("cTrader close not implemented yet.")
+        raise BrokerAPIError("cTrader close not implemented yet.")
     else:
         raise APIException("Unsupported trading platform.")
 
@@ -475,8 +467,7 @@ def synchronize_trade_with_platform(trade_id: UUID, existing_connector: MT5APICl
     try:
         trade_instance = get_object_or_404(Trade, id=trade_id)
     except Trade.DoesNotExist:
-        # Or raise custom error / log
-        return {"error": f"Trade with id {trade_id} not found."}
+        raise TradeValidationError(f"Trade with id {trade_id} not found.")
 
     sync_data = None
     platform_name = trade_instance.account.platform
@@ -487,7 +478,7 @@ def synchronize_trade_with_platform(trade_id: UUID, existing_connector: MT5APICl
             try:
                 mt5_account_details = MT5Account.objects.get(account=trade_instance.account)
             except MT5Account.DoesNotExist:
-                return {"error": f"MT5Account details not found for account {trade_instance.account.id}."}
+                raise TradeValidationError(f"MT5Account details not found for account {trade_instance.account.id}.")
 
             connector_to_use = MT5APIClient(
                 base_url=settings.MT5_API_BASE_URL,
@@ -498,14 +489,14 @@ def synchronize_trade_with_platform(trade_id: UUID, existing_connector: MT5APICl
             )
         
         if not connector_to_use:
-             return {"error": "MT5 connector not available."}
+             raise TradeValidationError("MT5 connector not available.")
 
         if hasattr(connector_to_use, 'account_id') and hasattr(trade_instance.account, 'mt5_account') and connector_to_use.account_id != trade_instance.account.mt5_account.account_number:
-            print(f"Warning: synchronize_trade_with_platform called with connector for account {connector_to_use.account_id}, "
+            logger.warning(f"synchronize_trade_with_platform called with connector for account {connector_to_use.account_id}, "
                   f"but trade {trade_instance.id} belongs to account {trade_instance.account.mt5_account.account_number}. This might lead to issues.")
 
         if not trade_instance.position_id:
-            return {"error": f"Trade {trade_instance.id} does not have a position_id. Cannot sync with MT5."}
+            raise TradeValidationError(f"Trade {trade_instance.id} does not have a position_id. Cannot sync with MT5.")
 
         sync_data = connector_to_use.fetch_trade_sync_data(
             position_id=trade_instance.position_id,
@@ -516,15 +507,15 @@ def synchronize_trade_with_platform(trade_id: UUID, existing_connector: MT5APICl
         # ctrade_account_details = CTraderAccount.objects.get(account=trade_instance.account)
         # connector = CTraderClient(ctrade_account_details)
         # sync_data = connector.fetch_trade_sync_data(...)
-        return {"error": "cTrader synchronization not yet implemented."}
+        raise BrokerAPIError("cTrader synchronization not yet implemented.")
     else:
-        return {"error": f"Unsupported platform: {platform_name}"}
+        raise TradeValidationError(f"Unsupported platform: {platform_name}")
 
     if not sync_data:
-        return {"error": "Failed to retrieve sync data from platform."}
+        raise TradeSyncError("Failed to retrieve sync data from platform.")
 
     if sync_data.get("error_message"):
-        return {"error": f"Platform error: {sync_data.get('error_message')}"}
+        raise BrokerAPIError(f"Platform error: {sync_data.get('error_message')}")
 
     # Process sync_data - platform-agnostic part
     # 1. Update/Create Order records from sync_data["deals"]
@@ -594,7 +585,7 @@ def synchronize_trade_with_platform(trade_id: UUID, existing_connector: MT5APICl
         }
     except Exception as e:
         # Log error e
-        return {"error": f"Failed to save synchronized trade {trade_instance.id}: {str(e)}"}
+        raise TradeSyncError(f"Failed to save synchronized trade {trade_instance.id}: {str(e)}")
 
 # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 #                  UPDATE TRADE STOP LOSS / TAKE PROFIT
@@ -642,7 +633,7 @@ def update_trade_protection_levels(user,
         try:
             mt5_account = account.mt5_account
         except MT5Account.DoesNotExist:
-            raise APIException("No linked MT5 account found for this trade's account.")
+            raise TradeValidationError("No linked MT5 account found for this trade's account.")
 
         client = MT5APIClient(
             base_url=settings.MT5_API_BASE_URL,
@@ -653,12 +644,9 @@ def update_trade_protection_levels(user,
         )
 
         if not trade.position_id:
-            raise APIException(f"Trade {trade.id} does not have a position_id. Cannot update protection on MT5.")
+            raise TradeValidationError(f"Trade {trade.id} does not have a position_id. Cannot update protection on MT5.")
 
         position_details = client.get_position_by_ticket(ticket=int(trade.position_id))
-        if "error" in position_details:
-            raise APIException(f"Failed to fetch current position details from MT5: {position_details['error']}")
-        
         current_sl_from_platform = Decimal(str(position_details.get("sl", 0.0)))
 
     # Values to send to the broker
@@ -674,11 +662,9 @@ def update_trade_protection_levels(user,
             stop_loss=sl_to_send,
             take_profit=tp_to_send
         )
-        if "error" in platform_response:
-            raise APIException(f"MT5 take profit update failed: {platform_response['error']}")
         
     elif account.platform == "cTrader":
-        raise APIException("cTrader take profit update not implemented yet.")
+        raise BrokerAPIError("cTrader take profit update not implemented yet.")
     else:
         raise APIException(f"Unsupported platform: {account.platform}")
 
@@ -721,7 +707,7 @@ def update_trade_stop_loss_globally(user,
         try:
             mt5_account = account.mt5_account
         except MT5Account.DoesNotExist:
-            raise APIException("No linked MT5 account found for this trade's account.")
+            raise TradeValidationError("No linked MT5 account found for this trade's account.")
 
         client = MT5APIClient(
             base_url=settings.MT5_API_BASE_URL,
@@ -732,18 +718,16 @@ def update_trade_stop_loss_globally(user,
         )
         
         if not trade.position_id:
-            raise APIException(f"Trade {trade.id} does not have a position_id. Cannot update SL on MT5.")
+            raise TradeValidationError(f"Trade {trade.id} does not have a position_id. Cannot update SL on MT5.")
         
         position_details = client.get_position_by_ticket(ticket=int(trade.position_id))
-        if "error" in position_details:
-            raise APIException(f"Failed to fetch current position details from MT5: {position_details['error']}")
         current_tp_price = Decimal(str(position_details.get("tp", 0.0)))
 
     elif account.platform == "cTrader":
         # ct_acc = get_object_or_404(CTraderAccount, account=account)
         # connector = CTraderClient(ct_acc)
         # # cTrader specific connection/auth if needed
-        raise APIException("cTrader stop loss update not implemented yet.")
+        raise BrokerAPIError("cTrader stop loss update not implemented yet.")
     else:
         raise APIException(f"Unsupported platform: {account.platform}")
 
@@ -761,9 +745,6 @@ def update_trade_stop_loss_globally(user,
             raise ValidationError(f"A 'value' must be provided for '{sl_update_type}'.")
 
         live_price_data = client.get_live_price(symbol=trade.instrument)
-        if "error" in live_price_data:
-            raise APIException(f"Could not fetch live price for {trade.instrument}: {live_price_data['error']}")
-
         current_market_price = None
         if trade.direction == "BUY": # Corrected
             current_market_price = Decimal(str(live_price_data["bid"])) # SL for BUY is based on BID
@@ -776,9 +757,6 @@ def update_trade_stop_loss_globally(user,
 
         if sl_update_type == "distance_pips":
             symbol_info = client.get_symbol_info(symbol=trade.instrument)
-            if "error" in symbol_info:
-                raise APIException(f"Could not fetch symbol info for {trade.instrument}: {symbol_info['error']}")
-            
             pip_size = Decimal(str(symbol_info["pip_size"]))
             price_offset = price_offset * pip_size
 
@@ -789,9 +767,6 @@ def update_trade_stop_loss_globally(user,
         # No else needed here as validated above
         
         symbol_info_for_rounding = client.get_symbol_info(symbol=trade.instrument)
-        if "error" in symbol_info_for_rounding:
-             raise APIException(f"Could not fetch symbol info for rounding: {symbol_info_for_rounding['error']}")
-        
         # Inferring digits from tick_size for rounding
         tick_size_str = str(symbol_info_for_rounding.get("tick_size", "0.00001"))
         if '.' in tick_size_str:
@@ -806,7 +781,7 @@ def update_trade_stop_loss_globally(user,
         raise ValidationError(f"Invalid sl_update_type: {sl_update_type}")
 
     if new_stop_loss_price is None:
-        raise APIException("Failed to calculate new stop loss price.")
+        raise TradeValidationError("Failed to calculate new stop loss price.")
 
     # SL Rule: Cannot remove SL by setting to 0.0 if type is 'specific_price'
     if sl_update_type == "specific_price" and new_stop_loss_price == Decimal("0.0"):
@@ -826,7 +801,7 @@ def update_trade_stop_loss_globally(user,
     modification_result = None
     if account.platform == "MT5":
         if not trade.position_id:
-            raise APIException(f"Trade {trade.id} does not have a position_id. Cannot update SL on MT5.")
+            raise TradeValidationError(f"Trade {trade.id} does not have a position_id. Cannot update SL on MT5.")
 
         modification_result = client.modify_position_protection(
             position_id=int(trade.position_id),
@@ -834,8 +809,6 @@ def update_trade_stop_loss_globally(user,
             stop_loss=float(new_stop_loss_price),
             take_profit=float(current_tp_price)
         )
-        if "error" in modification_result:
-            raise APIException(f"MT5 stop loss update failed: {modification_result['error']}")
     
     # 4. Update Trade Model in Database
     trade.stop_loss = new_stop_loss_price
@@ -866,7 +839,7 @@ def cancel_pending_order(user, order_id: UUID) -> dict:
         try:
             mt5_account = order.account.mt5_account
         except MT5Account.DoesNotExist:
-            raise APIException("No linked MT5 account found for this order's account.")
+            raise TradeValidationError("No linked MT5 account found for this order's account.")
 
         client = MT5APIClient(
             base_url=settings.MT5_API_BASE_URL,
@@ -877,15 +850,12 @@ def cancel_pending_order(user, order_id: UUID) -> dict:
         )
 
         if not order.broker_order_id:
-            raise APIException(f"Cannot cancel order {order.id}: Missing broker_order_id.")
+            raise TradeValidationError(f"Cannot cancel order {order.id}: Missing broker_order_id.")
 
         cancel_result = client.cancel_order(order_ticket=int(order.broker_order_id))
 
-        if "error" in cancel_result and cancel_result.get("error") != "CANCELED":
-            raise APIException(f"MT5 order cancellation failed: {cancel_result['error']}")
-
         # Update order status in the database
-        order.status = Order.Status.CANCELED
+        order.status = Order.Status.CANCELLED
         order.save(update_fields=["status"])
 
         return {
@@ -895,6 +865,6 @@ def cancel_pending_order(user, order_id: UUID) -> dict:
         }
 
     elif order.account.platform == "cTrader":
-        raise APIException("cTrader order cancellation not implemented yet.")
+        raise BrokerAPIError("cTrader order cancellation not implemented yet.")
     else:
-        raise APIException(f"Unsupported trading platform: {order.account.platform}")
+        raise TradeValidationError(f"Unsupported trading platform: {order.account.platform}")

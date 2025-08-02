@@ -7,7 +7,7 @@ from .views import UpdateAccountView
 from .views import DeleteAccountView
 from .views import FetchAccountDetailsView
 from .views import ProfitTakingProfileViewSet
-from .views import MeView # Added MeView import
+from .views import MeView, UserRegistrationView # Added MeView import
 
 # bind the viewset actions to view functions
 profit_profile_list = ProfitTakingProfileViewSet.as_view({
@@ -22,6 +22,7 @@ profit_profile_detail = ProfitTakingProfileViewSet.as_view({
 })
 
 urlpatterns = [
+    path("register/", UserRegistrationView.as_view(), name="register"),
     path("create/", CreateAccountView.as_view(), name="create-account"),
     path("", ListAccountsView.as_view(), name="list-accounts"),
     path("update/<uuid:account_id>/", UpdateAccountView.as_view(), name="update-account"),

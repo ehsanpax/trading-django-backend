@@ -111,85 +111,50 @@ class UpdateTakeProfitView(APIView): # Renamed from UpdateTradeView
         try:
             valid_trade_id = uuid.UUID(trade_id_str)
         except ValueError:
-            return Response({"detail": "Invalid trade ID format."}, status=status.HTTP_400_BAD_REQUEST)
+            raise ValidationError("Invalid trade ID format.")
 
         # This view now ONLY handles take_profit updates.
         raw_tp = request.data.get("take_profit")
 
         if raw_tp is None:
-            return Response(
-                {"detail": "'take_profit' must be provided."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            raise ValidationError("'take_profit' must be provided.")
         
         try:
             new_tp = Decimal(str(raw_tp))
         except Exception:
-            return Response(
-                {"detail": "'take_profit' must be a valid decimal number."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            raise ValidationError("'take_profit' must be a valid decimal number.")
 
-        try:
-            # Call update_trade_protection_levels, passing None for new_stop_loss
-            # as this view no longer handles SL.
-            result = update_trade_protection_levels(
-                user=request.user,
-                trade_id=valid_trade_id,
-                new_stop_loss=None, # Explicitly pass None for SL
-                new_take_profit=new_tp
-            )
-            # Fetch the updated trade to include in the response
-            updated_trade = Trade.objects.get(id=valid_trade_id)
-            serializer = TradeSerializer(updated_trade)
-            
-            return Response({
-                "message": result.get("message", "Trade updated successfully."),
-                "trade": serializer.data,
-                "platform_response": result.get("platform_response")
-            }, status=status.HTTP_200_OK)
-            
-        except Trade.DoesNotExist:
-            return Response({"detail": "Trade not found."}, status=status.HTTP_404_NOT_FOUND)
-        except PermissionDenied as e:
-            return Response({"detail": str(e)}, status=status.HTTP_403_FORBIDDEN)
-        except ValidationError as e:
-            return Response({"detail": e.detail if hasattr(e, 'detail') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
-        except APIException as e:
-            return Response({"detail": e.detail if hasattr(e, 'detail') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:
-            print(f"Unexpected error in UpdateTradeView: {str(e)}")
-            return Response({"detail": "An unexpected error occurred while updating the trade."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        # Call update_trade_protection_levels, passing None for new_stop_loss
+        # as this view no longer handles SL.
+        result = update_trade_protection_levels(
+            user=request.user,
+            trade_id=valid_trade_id,
+            new_stop_loss=None, # Explicitly pass None for SL
+            new_take_profit=new_tp
+        )
+        # Fetch the updated trade to include in the response
+        updated_trade = Trade.objects.get(id=valid_trade_id)
+        serializer = TradeSerializer(updated_trade)
+        
+        return Response({
+            "message": result.get("message", "Trade updated successfully."),
+            "trade": serializer.data,
+            "platform_response": result.get("platform_response")
+        }, status=status.HTTP_200_OK)
 
 # ----- Close Trade -----
 class CloseTradeView(APIView):
     permission_classes = [IsAuthenticated]
 
     def delete(self, request, trade_id):
+        # Ensure trade_id is a valid UUID
         try:
-            # Ensure trade_id is a valid UUID
-            try:
-                valid_trade_id = uuid.UUID(trade_id)
-            except ValueError:
-                return Response({"detail": "Invalid trade ID format."}, status=status.HTTP_400_BAD_REQUEST)
+            valid_trade_id = uuid.UUID(trade_id)
+        except ValueError:
+            raise ValidationError("Invalid trade ID format.")
 
-            result = close_trade_globally(request.user, valid_trade_id)
-            return Response(result, status=status.HTTP_200_OK)
-        except Trade.DoesNotExist:
-            return Response({"detail": "Trade not found."}, status=status.HTTP_404_NOT_FOUND)
-        except PermissionDenied as e:
-            return Response({"detail": str(e)}, status=status.HTTP_403_FORBIDDEN)
-        except ValidationError as e:
-            # ValidationError typically returns a dict detail, but str(e) can work for simple messages
-            return Response({"detail": e.detail if hasattr(e, 'detail') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
-        except APIException as e:
-            # APIException also uses e.detail
-            return Response({"detail": e.detail if hasattr(e, 'detail') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:
-            # Catch-all for other unexpected errors
-            # Log this error server-side for review
-            print(f"Unexpected error in CloseTradeView: {e}") # Or use proper logging
-            return Response({"detail": "An unexpected error occurred while closing the trade."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        result = close_trade_globally(request.user, valid_trade_id)
+        return Response(result, status=status.HTTP_200_OK)
 
 
 # ----- Retrieve Symbol Info -----
@@ -294,11 +259,11 @@ class OpenPositionsLiveView(APIView):
                 pos_resp.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
                 pos_data_response = pos_resp.json()
                 if "error" in pos_data_response:
-                    print(f"cTrader positions endpoint error for account {account_id}: {pos_data_response['error']}")
+                    logger.error(f"cTrader positions endpoint error for account {account_id}: {pos_data_response['error']}")
                     return Response({"open_positions": final_open_positions}, status=status.HTTP_200_OK)
                 platform_positions_raw = pos_data_response.get("positions", [])
             except requests.RequestException as e:
-                print(f"Error calling cTrader positions endpoint for account {account_id}: {str(e)}")
+                logger.error(f"Error calling cTrader positions endpoint for account {account_id}: {str(e)}")
                 return Response({"open_positions": final_open_positions}, status=status.HTTP_200_OK)
             
             # Process cTrader positions
@@ -402,7 +367,7 @@ class AllOpenPositionsLiveView(APIView):
                 
                 mt5_positions_result = client.get_open_positions()
                 if "error" in mt5_positions_result:
-                    print(f"MT5 get_open_positions error for account {account.id}: {mt5_positions_result['error']}")
+                    logger.error(f"MT5 get_open_positions error for account {account.id}: {mt5_positions_result['error']}")
                     continue
                 
                 platform_positions_raw = mt5_positions_result.get("open_positions", [])
@@ -483,11 +448,11 @@ class AllOpenPositionsLiveView(APIView):
                     pos_resp.raise_for_status()
                     pos_data_response = pos_resp.json()
                     if "error" in pos_data_response:
-                        print(f"cTrader positions endpoint error for account {account.id}: {pos_data_response['error']}")
+                        logger.error(f"cTrader positions endpoint error for account {account.id}: {pos_data_response['error']}")
                         continue
                     platform_positions_raw = pos_data_response.get("positions", [])
                 except requests.RequestException as e:
-                    print(f"Error calling cTrader positions endpoint for account {account.id}: {str(e)}")
+                    logger.error(f"Error calling cTrader positions endpoint for account {account.id}: {str(e)}")
                     continue
                 
                 for pos in platform_positions_raw:
@@ -560,19 +525,11 @@ class PendingOrdersView(APIView):
         account = get_object_or_404(Account, id=account_id, user=request.user)
 
         # 2️⃣ Fetch pending orders from the service
-        try:
-            pending_orders_data = get_pending_orders(account)
-            return Response(
-                {'pending_orders': pending_orders_data},
-                status=status.HTTP_200_OK
-            )
-        except APIException as e:
-            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
-        except NotImplementedError as e:
-            return Response({"detail": str(e)}, status=status.HTTP_501_NOT_IMPLEMENTED)
-        except Exception as e:
-            logger.error(f"Unexpected error in PendingOrdersView: {e}")
-            return Response({"detail": "An unexpected error occurred."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        pending_orders_data = get_pending_orders(account)
+        return Response(
+            {'pending_orders': pending_orders_data},
+            status=status.HTTP_200_OK
+        )
     
 
 
@@ -622,50 +579,24 @@ class CancelPendingOrderView(APIView):
     permission_classes = [IsAuthenticated]
 
     def delete(self, request, order_id: uuid.UUID):
-        try:
-            result = cancel_pending_order(user=request.user, order_id=order_id)
-            return Response(result, status=status.HTTP_200_OK)
-        except Order.DoesNotExist:
-            return Response({"detail": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
-        except PermissionDenied as e:
-            return Response({"detail": str(e)}, status=status.HTTP_403_FORBIDDEN)
-        except ValidationError as e:
-            return Response({"detail": e.detail if hasattr(e, 'detail') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
-        except APIException as e:
-            return Response({"detail": e.detail if hasattr(e, 'detail') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:
-            logger.error(f"Unexpected error in CancelPendingOrderView: {e}")
-            return Response({"detail": "An unexpected error occurred while canceling the order."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        result = cancel_pending_order(user=request.user, order_id=order_id)
+        return Response(result, status=status.HTTP_200_OK)
 
 class UpdateStopLossAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, *args, **kwargs):
         serializer = UpdateStopLossSerializer(data=request.data)
-        if serializer.is_valid():
-            validated_data = serializer.validated_data
-            try:
-                result = update_trade_stop_loss_globally(
-                    user=request.user,
-                    trade_id=validated_data['trade_id'],
-                    sl_update_type=validated_data['sl_update_type'],
-                    value=validated_data.get('value'),
-                    specific_price=validated_data.get('specific_price')
-                )
-                return Response(result, status=status.HTTP_200_OK)
-            except Trade.DoesNotExist:
-                return Response({"detail": "Trade not found."}, status=status.HTTP_404_NOT_FOUND)
-            except PermissionDenied as e:
-                return Response({"detail": str(e)}, status=status.HTTP_403_FORBIDDEN)
-            except ValidationError as e:
-                return Response({"detail": e.detail if hasattr(e, 'detail') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
-            except APIException as e: # Catch platform-specific or other API errors from the service
-                return Response({"detail": e.detail if hasattr(e, 'detail') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
-            except Exception as e:
-            # Log generic error
-                print(f"Unexpected error in UpdateStopLossAPIView: {str(e)}") # Basic logging
-            return Response({"error": "An unexpected error occurred while updating stop loss."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        serializer.is_valid(raise_exception=True)
+        validated_data = serializer.validated_data
+        result = update_trade_stop_loss_globally(
+            user=request.user,
+            trade_id=validated_data['trade_id'],
+            sl_update_type=validated_data['sl_update_type'],
+            value=validated_data.get('value'),
+            specific_price=validated_data.get('specific_price')
+        )
+        return Response(result, status=status.HTTP_200_OK)
 
 
 # ----- Partial Close Trade -----
@@ -676,30 +607,17 @@ class PartialCloseTradeView(APIView):
         try:
             valid_trade_id = uuid.UUID(trade_id_str)
         except ValueError:
-            return Response({"detail": "Invalid trade ID format."}, status=status.HTTP_400_BAD_REQUEST)
+            raise ValidationError("Invalid trade ID format.")
 
         serializer = PartialCloseTradeInputSerializer(data=request.data)
-        if serializer.is_valid():
-            volume_to_close = serializer.validated_data['volume_to_close']
-            try:
-                result = partially_close_trade(
-                    user=request.user,
-                    trade_id=valid_trade_id,
-                    volume_to_close=volume_to_close
-                )
-                return Response(result, status=status.HTTP_200_OK)
-            except Trade.DoesNotExist:
-                return Response({"detail": "Trade not found."}, status=status.HTTP_404_NOT_FOUND)
-            except PermissionDenied as e:
-                return Response({"detail": str(e)}, status=status.HTTP_403_FORBIDDEN)
-            except ValidationError as e:
-                return Response({"detail": e.detail if hasattr(e, 'detail') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
-            except APIException as e:
-                return Response({"detail": e.detail if hasattr(e, 'detail') else str(e)}, status=status.HTTP_400_BAD_REQUEST)
-            except Exception as e:
-                print(f"Unexpected error in PartialCloseTradeView: {str(e)}") # Basic logging
-                return Response({"detail": "An unexpected error occurred while partially closing the trade."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        serializer.is_valid(raise_exception=True)
+        volume_to_close = serializer.validated_data['volume_to_close']
+        result = partially_close_trade(
+            user=request.user,
+            trade_id=valid_trade_id,
+            volume_to_close=volume_to_close
+        )
+        return Response(result, status=status.HTTP_200_OK)
 
 
 # ----- Watchlist Views -----

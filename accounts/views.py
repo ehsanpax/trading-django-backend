@@ -175,6 +175,18 @@ class FetchAccountDetailsView(APIView):
             return Response({"detail": account_details["error"]}, status=status.HTTP_400_BAD_REQUEST)
         return Response(account_details, status=status.HTTP_200_OK)
 
+from rest_framework import generics
+from .serializers import UserRegistrationSerializer
+
+
+class UserRegistrationView(generics.CreateAPIView):
+    """
+    POST /accounts/register/
+    Creates a new user account. The account will be inactive until approved by an admin.
+    """
+    serializer_class = UserRegistrationSerializer
+    permission_classes = [permissions.AllowAny]  # Allow anyone to register
+
 from rest_framework import viewsets
 from accounts.models import ProfitTakingProfile
 from .serializers import ProfitTakingProfileSerializer, UserSerializer # Added UserSerializer

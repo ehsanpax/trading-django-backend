@@ -189,6 +189,7 @@ REST_FRAMEWORK = {
         # ... other authentication classes if necessary
     ],
     "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
+    "EXCEPTION_HANDLER": "trading_platform.exceptions.custom_exception_handler",
 }
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(hours=8),

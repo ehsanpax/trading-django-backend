@@ -46,7 +46,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-def calculate_position_size(account_id, symbol, account_equity, risk_percent, stop_loss_distance, take_profit_price, trade_direction, db=None, symbol_info=None, market_prices=None):
+def calculate_position_size(account_id, symbol, account_equity, risk_percent, stop_loss_distance, take_profit_price, trade_direction, limit_price=None, db=None, symbol_info=None, market_prices=None):
     """
     Calculates position size based on risk parameters.
     
@@ -70,7 +70,7 @@ def calculate_position_size(account_id, symbol, account_equity, risk_percent, st
     if "error" in market_prices:
         return {"error": f"Failed to fetch market price: {market_prices['error']}"}
 
-    entry_price = market_prices["ask"] if trade_direction.upper() == "SELL" else market_prices["bid"]
+    entry_price = limit_price if limit_price is not None else (market_prices["ask"] if trade_direction.upper() == "SELL" else market_prices["bid"])
     if entry_price is None:
         raise ValueError("Market price fetch failed – entry price is None")
     
@@ -129,7 +129,7 @@ def calculate_position_size(account_id, symbol, account_equity, risk_percent, st
 
 
 def validate_trade_request(account_id: str, user, symbol: str, trade_direction: str, 
-                           stop_loss_distance: float, take_profit_price: float, risk_percent: float):
+                           stop_loss_distance: float, take_profit_price: float, risk_percent: float, limit_price: float = None):
     """
     Validates trade parameters by calculating the appropriate lot size and stop-loss.
     In a real-world scenario, you’d retrieve symbol info and market prices from your MT5 service.
@@ -151,6 +151,7 @@ def validate_trade_request(account_id: str, user, symbol: str, trade_direction: 
             risk_percent=risk_percent,
             stop_loss_distance=stop_loss_distance,
             trade_direction=trade_direction,
+            limit_price=limit_price,
             symbol_info=symbol_info,
             take_profit_price=take_profit_price,
             market_prices=market_prices

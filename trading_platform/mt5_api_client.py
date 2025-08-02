@@ -6,6 +6,7 @@ import uuid
 import logging
 from typing import Dict, Any, Optional, Callable, List
 from datetime import datetime
+from trades.exceptions import BrokerAPIError, BrokerConnectionError
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +50,7 @@ class MT5APIClient:
                 async with websockets.connect(ws_url, ping_interval=20, ping_timeout=20) as ws:
                     self.ws = ws
                     self.is_connected = True
-                    #logger.info(f"WebSocket connected for account {self.internal_account_id}")
+                    logger.info(f"WebSocket connected for account {self.internal_account_id}")
 
                     # Resubscribe to all necessary data upon connection
                     for symbol in self.price_listeners.keys():
@@ -67,6 +68,7 @@ class MT5APIClient:
 
                             if message_type == "account_info":
                                 self.last_account_info = data.get("data", {})
+                                #logger.info(f"Received account info for {self.internal_account_id}: {self.last_account_info}")
                                 if not self.initial_data_received.is_set():
                                     self.initial_data_received.set()
                                 for listener in self.account_info_listeners:
@@ -214,7 +216,6 @@ class MT5APIClient:
 
     def _post(self, endpoint: str, json_data: Dict[str, Any]) -> Dict[str, Any]:
         try:
-            #logger.info(f"Sending POST request to {endpoint} with data: {json_data}")
             headers = {'Content-Type': 'application/json'}
             response = requests.post(
                 f"{self.base_url}{endpoint}",
@@ -222,22 +223,44 @@ class MT5APIClient:
                 headers=headers,
                 timeout=10
             )
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.Timeout:
-            return {"error": "Request to MT5 API service timed out."}
+            if not response.ok:
+                try:
+                    error_data = response.json()
+                    error_message = error_data.get("detail", "No detail provided")
+                    if isinstance(error_message, list) and error_message:
+                        error_message = error_message[0].get("msg", str(error_message))
+                    raise BrokerAPIError(f"MT5 API Error: {error_message} (Status {response.status_code})")
+                except json.JSONDecodeError:
+                    raise BrokerAPIError(f"MT5 API Error: {response.text} (Status {response.status_code})")
+
+            data = response.json()
+            logger.info(f"Response from MT5 API ({endpoint}): {data}")
+            return data
+        except requests.exceptions.Timeout as e:
+            raise BrokerConnectionError("Request to MT5 API service timed out.") from e
         except requests.exceptions.RequestException as e:
-            return {"error": f"Request to MT5 API service failed: {e}"}
+            raise BrokerConnectionError(f"Request to MT5 API service failed: {e}") from e
 
     def _delete(self, endpoint: str) -> Dict[str, Any]:
         try:
             response = requests.delete(f"{self.base_url}{endpoint}", timeout=10)
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.Timeout:
-            return {"error": "Request to MT5 API service timed out."}
+            if not response.ok:
+                try:
+                    error_data = response.json()
+                    error_message = error_data.get("detail", "No detail provided")
+                    if isinstance(error_message, list) and error_message:
+                        error_message = error_message[0].get("msg", str(error_message))
+                    raise BrokerAPIError(f"MT5 API Error: {error_message} (Status {response.status_code})")
+                except json.JSONDecodeError:
+                    raise BrokerAPIError(f"MT5 API Error: {response.text} (Status {response.status_code})")
+
+            data = response.json()
+            logger.info(f"Response from MT5 API ({endpoint}): {data}")
+            return data
+        except requests.exceptions.Timeout as e:
+            raise BrokerConnectionError("Request to MT5 API service timed out.") from e
         except requests.exceptions.RequestException as e:
-            return {"error": f"Request to MT5 API service failed: {e}"}
+            raise BrokerConnectionError(f"Request to MT5 API service failed: {e}") from e
 
     def connect(self) -> Dict[str, Any]:
         return self._post("/mt5/connect", self._get_auth_payload())
