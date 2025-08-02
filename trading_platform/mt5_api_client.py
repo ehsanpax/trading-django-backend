@@ -234,7 +234,7 @@ class MT5APIClient:
                     raise BrokerAPIError(f"MT5 API Error: {response.text} (Status {response.status_code})")
 
             data = response.json()
-            logger.info(f"Response from MT5 API ({endpoint}): {data}")
+            #logger.info(f"Response from MT5 API ({endpoint}): {data}")
             return data
         except requests.exceptions.Timeout as e:
             raise BrokerConnectionError("Request to MT5 API service timed out.") from e

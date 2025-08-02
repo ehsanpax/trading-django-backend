@@ -22,7 +22,7 @@ from trades.services import close_trade_globally, TradeService
 from trades.serializers import ExecuteTradeOutputSerializer
 from rest_framework.exceptions import APIException, PermissionDenied, ValidationError
 from trading.models import Trade  # Import Trade model for DoesNotExist exception
-
+import uuid
 
 class ExecuteAITradeView(APIView):
     """Accepts AI trade payload, injects an account, forwards to ExecuteTradeView."""
@@ -38,8 +38,18 @@ class ExecuteAITradeView(APIView):
         payload = serializer.validated_data
 
         print("Validated Payload ExecuteAITradeView:", payload)
+        uuid_account_id = None
+        try:
+            uuid_account_id = uuid.UUID(payload.get("account_id"), version=4)
+        except (ValueError, TypeError):
+            pass
+        if uuid_account_id:
+            account = Account.objects.filter(id=uuid_account_id, user=request.user).first()
+        else:
+            account = Account.objects.filter(simple_id=int(payload.get("account_id")), user=request.user).first()
 
-        # account = select_next_account() # Removed: account_id now comes from payload
+        account_id = str(account.id) if account else None
+        payload["account_id"] = account_id
         trade_payload = {}
         trade_payload["account_id"] = str(payload.get("account_id"))
         trade_payload["symbol"] = payload.get("symbol")
@@ -56,11 +66,7 @@ class ExecuteAITradeView(APIView):
 
         direction = payload.get("direction", "BUY").upper()
         symbol = payload.get("symbol")
-        account_id = payload.get("account_id")
 
-        account = Account.objects.filter(
-            Q(Q(id=account_id) | Q(simple_id=account_id)) & Q(user=request.user)
-        ).first()
         if not account:
             return Response(
                 {

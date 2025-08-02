@@ -20,6 +20,7 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         self.account_id = None
         self.user = None
         self.mt5_client = None
+        self.is_active = False
         self.account_info = {}
         self.open_positions = []
         self.ticket_to_uuid_map = {}
@@ -49,7 +50,7 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         and populates the order ticket-to-UUID mapping.
         """
         Order = apps.get_model('trading', 'Order')
-        logger.info(f"Populating order UUID map for account {self.account_id}")
+        #logger.info(f"Populating order UUID map for account {self.account_id}")
         pending_orders_db = await sync_to_async(list)(
             Order.objects.filter(
                 account_id=self.account_id,
@@ -84,6 +85,7 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
             return
 
         await self.accept()
+        self.is_active = True
         logger.info(f"Account WebSocket connected for account {self.account_id}")
 
         self.mt5_client = await connection_manager.get_client(
@@ -115,6 +117,7 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         """
         Handles a WebSocket disconnection.
         """
+        self.is_active = False
         if self.mt5_client:
             self.mt5_client.unregister_account_info_listener(self.send_account_update)
             self.mt5_client.unregister_open_positions_listener(self.send_positions_update)
@@ -131,11 +134,15 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
 
     async def send_account_update(self, account_info):
         """Callback for account info updates from the MT5APIClient."""
+        if not self.is_active:
+            return
         self.account_info = account_info
         await self.send_combined_update()
 
     async def send_positions_update(self, open_positions):
         """Callback for open positions updates from the MT5APIClient."""
+        if not self.is_active:
+            return
         all_positions = open_positions
         pending_orders = [p for p in all_positions if isinstance(p, dict) and p.get('type') == 'pending_order']
         open_trades = [p for p in all_positions if isinstance(p, dict) and p.get('type') != 'pending_order']
@@ -147,7 +154,7 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         previous_order_tickets = set(self.order_ticket_to_uuid_map.keys())
 
         if current_order_tickets != previous_order_tickets:
-            logger.info("Change in pending orders detected. Refreshing order UUID map from DB.")
+            #logger.info("Change in pending orders detected. Refreshing order UUID map from DB.")
             await self._populate_order_uuid_map()
 
         await self.send_combined_update(pending_orders=pending_orders)

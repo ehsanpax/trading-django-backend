@@ -124,7 +124,7 @@ class UpdateStopLossSerializer(serializers.Serializer):
         required=True
     )
     value = serializers.DecimalField(max_digits=10, decimal_places=5, required=False, allow_null=True) # For distance
-    specific_price = serializers.DecimalField(max_digits=10, decimal_places=5, required=False, allow_null=True) # For specific price
+    specific_price = serializers.DecimalField(max_digits=15, decimal_places=5, required=False, allow_null=True) # For specific price
 
     def validate(self, data):
         sl_update_type = data.get('sl_update_type')
