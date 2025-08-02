@@ -49,8 +49,8 @@ urlpatterns = [
     path("api/price/", include("price.urls")),
     path("api/charts/", include("charts.urls")),
     path("api/indicators/", include("indicators.urls")),
+    path("api/fundamental/", include("fundamental.urls")),
     path("api/", include("trading.urls")),
-    path("fundamental/", include("fundamental.urls")),
 ]
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
