@@ -632,6 +632,9 @@ class AllPendingOrdersView(APIView):
     def get(self, request):
         accounts = Account.objects.filter(user=request.user)
         all_pending_orders = []
+        account_id = self.request.query_params.get("account", None)
+        if account_id:
+            accounts = accounts.filter(Q(id=account_id) | Q(simple_id=True))
 
         for account in accounts:
             try:
