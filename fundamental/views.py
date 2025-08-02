@@ -30,8 +30,6 @@ class EconomicCalendarAPIView(APIView):
                         'actual': item.get('actual'),
                         'previous': item.get('previous'),
                         'forecast': item.get('forecast'),
-                        'source_url': item.get('source_url'),  # if available
-                        'graph': item.get('graph'),            # if available
                         'currency': currency_obj,
                     }
                 )

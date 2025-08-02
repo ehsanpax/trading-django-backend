@@ -17,8 +17,6 @@ class EconomicCalendar(models.Model):
     actual = models.CharField(max_length=200, blank=True, null=True)
     previous = models.CharField(max_length=200, blank=True, null=True)  
     forecast = models.CharField(max_length=200, blank=True, null=True)  
-    source_url = models.URLField(blank=True, null=True)  
-    graph=models.CharField(max_length=50, blank=True, null=True) 
     currency = models.ForeignKey(Currency, on_delete=models.CASCADE)  
 
     def __str__(self):
