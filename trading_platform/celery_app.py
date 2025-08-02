@@ -23,6 +23,10 @@ app.conf.beat_schedule = {
         'task': 'trades.tasks.scan_profit_targets',
         'schedule': crontab(minute='*/1'),  # Run every 1 minute
     },
+    'reconcile-open-positions': {
+        'task': 'trades.tasks.reconcile_open_positions',
+        'schedule': crontab(minute=0, hour='*/1'),  # Run every hour at the beginning of the hour
+    },
     # Example of an existing task (if any, adjust as needed or remove if not present)
     # 'run-daily-at-midnight': {
     #     'task': 'indicators.tasks.run_daily_at_midnight',
