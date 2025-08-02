@@ -38,7 +38,7 @@ class EconomicCalendarAPIView(APIView):
                 currency_code = item["currency"]
                 currency_obj, _ = Currency.objects.get_or_create(currency=currency_code)
 
-                # Update or create the event
+                
                 EconomicCalendar.objects.update_or_create(
                     event=event,
                     event_time=event_time,
@@ -84,6 +84,7 @@ class EconomicCalendarEventListAPIView(APIView):
 
         if currency:
             queryset = queryset.filter(currency__currency=currency)
+            print(111)
 
         return queryset
 
