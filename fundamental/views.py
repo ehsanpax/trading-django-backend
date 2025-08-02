@@ -25,7 +25,7 @@ class EconomicCalendarAPIView(APIView):
             try:
                 event = item["event"]
                 event_time_str = item["event_time"]  # e.g., "2025-01-16 00:00:00"
-                if not event_time_str: 
+                if not event_time_str:
                     continue
                 event_time_naive = datetime.strptime(
                     event_time_str, "%Y-%m-%d %H:%M:%S"
