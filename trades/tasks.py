@@ -252,3 +252,88 @@ def diagnostic_task(message: str):
     import logging
     logger = logging.getLogger(__name__)
     logger.info(f"DIAGNOSTIC TASK RECEIVED: {message}")
+
+
+@shared_task(name="trades.tasks.reconcile_open_positions")
+def reconcile_open_positions():
+    """
+    Periodically checks for discrepancies between open trades in the local database
+    and the actual open positions on the MT5 platform. If a trade is marked as 'open'
+    locally but is no longer open on MT5, it triggers a synchronization to update
+    the local state.
+    """
+    task_name = "reconcile_open_positions"
+    print(f"CELERY TASK: {task_name} CALLED at {timezone.now()}")
+
+    active_mt5_accounts = MT5Account.objects.filter(account__is_active=True)
+    
+    if not active_mt5_accounts.exists():
+        print(f"{task_name}: No active MT5 accounts found.")
+        return f"{task_name}: No active MT5 accounts."
+
+    total_synced = 0
+    total_errors = 0
+
+    for mt5_account in active_mt5_accounts:
+        account = mt5_account.account
+        log_prefix = f"{task_name} (Account: {account.id}, MT5 Login: {mt5_account.account_number}): "
+
+        # 1. Query for open trades in the local database first to avoid unnecessary API calls
+        local_open_trades = Trade.objects.filter(account=account, trade_status="open")
+
+        if not local_open_trades.exists():
+            print(f"{log_prefix}No open trades found in the database. Skipping.")
+            continue
+
+        print(f"{log_prefix}Found {local_open_trades.count()} open trade(s) in DB. Checking against platform.")
+
+        try:
+            # 2. If local open trades exist, then connect and fetch platform positions
+            connector = MT5APIClient(
+                base_url=settings.MT5_API_BASE_URL,
+                account_id=mt5_account.account_number,
+                password=mt5_account.encrypted_password,
+                broker_server=mt5_account.broker_server,
+                internal_account_id=str(account.id)
+            )
+
+            platform_positions_response = connector.get_all_open_positions_rest()
+            if "error" in platform_positions_response:
+                print(f"{log_prefix}Error fetching open positions from platform: {platform_positions_response['error']}")
+                total_errors += 1
+                continue
+
+            platform_open_positions = platform_positions_response.get("open_positions", [])
+            platform_position_ids = {str(pos['ticket']) for pos in platform_open_positions if 'ticket' in pos}
+            print(f"{log_prefix}Found {len(platform_position_ids)} open position(s) on platform.")
+
+            # 3. Compare and find discrepancies
+            for trade in local_open_trades:
+                if not trade.position_id:
+                    print(f"{log_prefix}Skipping local trade {trade.id} because it has no position_id.")
+                    continue
+
+                if str(trade.position_id) not in platform_position_ids:
+                    print(f"{log_prefix}Discrepancy found! Trade {trade.id} (PositionID: {trade.position_id}) is 'open' locally but not on the platform. Triggering sync.")
+                    try:
+                        sync_result = synchronize_trade_with_platform(trade_id=trade.id)
+                        if sync_result.get("error"):
+                            print(f"{log_prefix}Error synchronizing trade {trade.id}: {sync_result['error']}")
+                            total_errors += 1
+                        else:
+                            print(f"{log_prefix}Successfully synchronized trade {trade.id}.")
+                            total_synced += 1
+                    except Exception as e_sync:
+                        print(f"{log_prefix}Exception during synchronization for trade {trade.id}: {e_sync}")
+                        total_errors += 1
+                else:
+                    print(f"{log_prefix}Trade {trade.id} (PositionID: {trade.position_id}) is correctly marked as open.")
+
+        except Exception as e_account:
+            print(f"{log_prefix}An unexpected error occurred while processing this account: {e_account}")
+            import traceback
+            traceback.print_exc()
+            total_errors += 1
+
+    print(f"{task_name} finished. Synced: {total_synced}, Errors: {total_errors}.")
+    return f"{task_name}: Synced {total_synced}, Errors {total_errors}."

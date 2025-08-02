@@ -143,8 +143,9 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         self.open_positions = open_trades
 
         # --- Efficiently check if the pending order list has changed ---
-        current_order_tickets = {str(p.get('ticket')) for p in pending_orders}
+        current_order_tickets = {str(p['ticket']) for p in pending_orders if p and 'ticket' in p}
         previous_order_tickets = set(self.order_ticket_to_uuid_map.keys())
+
         if current_order_tickets != previous_order_tickets:
             logger.info("Change in pending orders detected. Refreshing order UUID map from DB.")
             await self._populate_order_uuid_map()
