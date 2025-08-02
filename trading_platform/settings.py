@@ -74,6 +74,7 @@ INSTALLED_APPS = [
     "ta",  # Technical Analysis app
     "AI",  # AI Prompts app
     "charts",
+    "fundamental"
 ]
 
 
