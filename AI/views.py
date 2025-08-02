@@ -77,9 +77,13 @@ class TradeJournalViewset(ModelViewSet):
     pagination_class = None  # Disable pagination for simplicity
 
     def get_queryset(self):
-        return (
+        queryset = (
             super()
             .get_queryset()
             .filter(trade__account__user=self.request.user)
             .order_by("-created_at")
         )
+        account_id = self.request.query_params.get("account", None)
+        if account_id:
+            queryset = queryset.filter(trade__account__id=account_id)
+        return queryset
