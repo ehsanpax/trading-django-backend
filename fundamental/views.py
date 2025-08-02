@@ -6,6 +6,8 @@ from .models import EconomicCalendar, Currency
 from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.authentication import TokenAuthentication
+from rest_framework.generics import ListAPIView
+from .serializers import EconomicCalendarSerializer
 
 
 class EconomicCalendarAPIView(APIView):
@@ -61,3 +63,10 @@ class EconomicCalendarAPIView(APIView):
         return Response(
             {"message": "Data processed successfully."}, status=status.HTTP_200_OK
         )
+
+
+class EconomicCalendarEventListAPIView(ListAPIView):
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [IsAuthenticated]
+    queryset = EconomicCalendar.objects.all().order_by('-event_time')
+    serializer_class = EconomicCalendarSerializer
