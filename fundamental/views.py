@@ -8,6 +8,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.authentication import TokenAuthentication
 from rest_framework.generics import ListAPIView
 from .serializers import EconomicCalendarSerializer
+from django.utils.dateparse import parse_date
 
 
 class EconomicCalendarAPIView(APIView):
@@ -65,8 +66,28 @@ class EconomicCalendarAPIView(APIView):
         )
 
 
-class EconomicCalendarEventListAPIView(ListAPIView):
+class EconomicCalendarEventListAPIView(APIView):
     authentication_classes = [TokenAuthentication]
     permission_classes = [IsAuthenticated]
-    queryset = EconomicCalendar.objects.all().order_by('-event_time')
     serializer_class = EconomicCalendarSerializer
+
+    def get_queryset(self):
+        queryset = EconomicCalendar.objects.all().order_by('-event_time')
+
+        # query parameters
+        date_from = self.request.query_params.get('date_from')
+        date_to = self.request.query_params.get('date_to')
+        currency = self.request.query_params.get('currency')
+
+        if date_from and date_to:
+            queryset = queryset.filter(event_time__date__gte=date_from, event_time__date__lte=date_to)
+
+        if currency:
+            queryset = queryset.filter(currency__currency=currency)
+
+        return queryset
+
+    def get(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+        serializer = self.serializer_class(queryset, many=True)
+        return Response(serializer.data)
