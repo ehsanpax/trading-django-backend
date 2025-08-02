@@ -8,6 +8,6 @@ urlpatterns = [
         EconomicCalendarAPIView.as_view(),
         name="economic_calendar",
     ),
-     path('economic-calendar-list/', EconomicCalendarEventListAPIView.as_view(), name='economic-calendar-list'),
+    path('economic-calendar-list/', EconomicCalendarEventListAPIView.as_view(), name='economic-calendar-list'),
 ]
 

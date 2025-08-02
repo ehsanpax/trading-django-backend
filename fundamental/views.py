@@ -84,7 +84,6 @@ class EconomicCalendarEventListAPIView(APIView):
 
         if currency:
             queryset = queryset.filter(currency__currency=currency)
-            print(111)
 
         return queryset
 

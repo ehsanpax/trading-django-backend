@@ -12,7 +12,6 @@ class Currency(models.Model):
 class EconomicCalendar(models.Model): 
     event_time = models.DateTimeField(auto_now=False, auto_now_add=False)
     impact = models.CharField(blank=True, null=True) 
-    country = models.CharField(max_length=200, blank=True, null=True)
     event = models.CharField()
     actual = models.CharField(max_length=200, blank=True, null=True)
     previous = models.CharField(max_length=200, blank=True, null=True)  
