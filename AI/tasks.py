@@ -48,12 +48,8 @@ def execute_session_schedule(self, schedule_id):
         }
         request = requests.post(
             session_endpoint_url,
-            data=data,
+            json=data,
             timeout=None,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Token {schedule.session.user_token}",
-            },
         )
 
         return result_message
