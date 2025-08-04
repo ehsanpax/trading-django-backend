@@ -984,6 +984,7 @@ def cancel_pending_order(user, order_id: str) -> dict:
     """
     broker_order_id = None
     order_id_uuid = None
+    order = None
     try:
         order_id_uuid = UUID(order_id, version=4)  # Try to parse as UUID
     except Exception:
@@ -994,12 +995,10 @@ def cancel_pending_order(user, order_id: str) -> dict:
         pass
     if broker_order_id:
         order = Order.objects.filter(
-            Q(broker_order_id=broker_order_id) & Q(account__user=user)
+            broker_order_id=broker_order_id, account__user=user
         ).first()
     elif order_id_uuid:
-        order = Order.objects.filter(
-            Q(id=order_id_uuid) & Q(account__user=user)
-        ).first()
+        order = Order.objects.filter(id=order_id_uuid, account__user=user).first()
 
     if not order:
         raise ValidationError(f"Order with id {order_id} not found.")
@@ -1007,7 +1006,7 @@ def cancel_pending_order(user, order_id: str) -> dict:
     if order.account.user != user:
         raise PermissionDenied("Unauthorized to cancel this order.")
 
-    if order.status != Order.Status.PENDING:
+    if order.status != Order.Status.PENDING.value:
         raise ValidationError(f"Order is not pending, its status is '{order.status}'.")
 
     if order.account.platform == "MT5":
