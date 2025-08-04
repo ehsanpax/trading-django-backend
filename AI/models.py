@@ -162,7 +162,7 @@ class SessionScheduleTask(models.Model):
     schedule = models.ForeignKey(
         SessionSchedule, on_delete=models.CASCADE, related_name="tasks"
     )
-    task_id = models.CharField(max_length=255, unique=True)
+    task_id = models.CharField(max_length=255)
     status = models.CharField(
         max_length=50,
         choices=SessionScheduleTaskStatusChoices.choices,
