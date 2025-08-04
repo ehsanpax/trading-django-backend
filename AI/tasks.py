@@ -26,13 +26,14 @@ def process_one_time_schedules():
 
 @shared_task(bind=True)
 def execute_session_schedule(self, schedule_id):
+    task_record = None
     try:
         schedule = SessionSchedule.objects.get(id=schedule_id)
         # Here you would add the logic that needs to be executed.
         # For now, we'll just simulate a successful execution.
         result_message = f"Successfully executed schedule {schedule.name}"
 
-        SessionScheduleTask.objects.create(
+        task_record = SessionScheduleTask.objects.create(
             schedule=schedule,
             task_id=self.request.id,
             status=SessionScheduleTaskStatusChoices.STARTED.value,
@@ -58,10 +59,9 @@ def execute_session_schedule(self, schedule_id):
         return f"Schedule with id {schedule_id} not found."
     except Exception as e:
         # Handle other potential errors
-        SessionScheduleTask.objects.create(
-            schedule_id=schedule_id,
-            task_id=self.request.id,
-            status=SessionScheduleTaskStatusChoices.FAILURE.value,
-            result=str(e),
-        )
+        if task_record:
+            task_record.status = SessionScheduleTaskStatusChoices.FAILURE.value
+            task_record.result = str(e)
+            task_record.save()
+
         return f"Failed to execute schedule {schedule_id}: {e}"
