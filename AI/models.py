@@ -76,7 +76,7 @@ class SessionSchedule(models.Model):
         choices=ScheduleRecurrenceChoices.choices,
         default=ScheduleRecurrenceChoices.MINUTELY.value,
     )
-    start_at = models.DateTimeField()
+    start_at = models.DateTimeField(null=True, blank=True)
     end_at = models.DateTimeField(null=True, blank=True)
     excluded_days = ArrayField(
         models.CharField(max_length=255, choices=WeekDayChoices.choices),
@@ -84,5 +84,5 @@ class SessionSchedule(models.Model):
         default=list,
     )
     excluded_time_ranges = models.JSONField(default=list, blank=True)
-    context = models.TextField()
+    context = models.TextField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
