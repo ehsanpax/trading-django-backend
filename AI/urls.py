@@ -15,6 +15,13 @@ urlpatterns = [
         name="prompt-list-create",
     ),
     path(
+        "prompts/<uuid:pk>/",
+        PromptViewSet.as_view(
+            {"get": "retrieve", "put": "partial_update", "delete": "destroy"}
+        ),
+        name="prompt-detail",
+    ),
+    path(
         "session-executions/",
         StoreSessionExecutionViewset.as_view(),
         name="session-execution-create",
