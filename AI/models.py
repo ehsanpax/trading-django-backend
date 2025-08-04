@@ -58,7 +58,8 @@ class ChatSession(models.Model):
     @property
     def user_token(self):
         return next(
-            Token.objects.filter(user=self.user).values_list("key", flat=True), None
+            list(Token.objects.filter(user=self.user).values_list("key", flat=True)),
+            None,
         )
 
 
@@ -169,6 +170,3 @@ class SessionScheduleTask(models.Model):
     )
     result = models.TextField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        unique_together = ("schedule", "task_id")
