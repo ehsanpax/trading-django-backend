@@ -4,7 +4,6 @@ from uuid import uuid4
 
 
 class Prompt(models.Model):
-    id = models.UUIDField(primary_key=True, default=uuid4)
     name = models.CharField(max_length=255)
     description = models.TextField(blank=True, null=True)
     user_prompt = models.TextField()
