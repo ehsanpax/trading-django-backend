@@ -10,16 +10,16 @@ from .views import (
 
 urlpatterns = [
     path(
-        "prompts/",
-        PromptViewSet.as_view({"get": "list", "post": "create"}),
-        name="prompt-list-create",
-    ),
-    path(
         "prompts/<uuid:pk>/",
         PromptViewSet.as_view(
             {"get": "retrieve", "put": "partial_update", "delete": "destroy"}
         ),
         name="prompt-detail",
+    ),
+    path(
+        "prompts/",
+        PromptViewSet.as_view({"get": "list", "post": "create"}),
+        name="prompt-list-create",
     ),
     path(
         "session-executions/",

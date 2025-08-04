@@ -15,7 +15,10 @@ class PromptSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         user = self.context["request"].user
-        prompt = Prompt.objects.create(user=user, **validated_data)
+        name = validated_data.pop("name")
+        prompt, _ = Prompt.objects.update_or_create(
+            user=user, name=name, defaults=validated_data
+        )
         return prompt
 
 
