@@ -5,6 +5,7 @@ from django.db import models
 from trading.models import Trade, Order
 from trades.serializers import TradeSerializer, OrderSerializer
 from .choices import WeekDayChoices
+import datetime
 
 
 class PromptSerializer(serializers.ModelSerializer):
@@ -130,6 +131,15 @@ class SessionScheduleSerializer(serializers.ModelSerializer):
         session_id = validated_data.pop("session_id")
         name = validated_data.pop("name")
         session = ChatSession.objects.filter(external_session_id=session_id).first()
+        if validated_data["start_at"]:
+            validated_data["start_at"] = validated_data["start_at"].replace(
+                tzinfo=datetime.timezone.utc
+            )
+        if validated_data["end_at"]:
+            validated_data["end_at"] = validated_data["end_at"].replace(
+                tzinfo=datetime.timezone.utc
+            )
+
         schedule, created = SessionSchedule.objects.update_or_create(
             session=session,
             name=name,
