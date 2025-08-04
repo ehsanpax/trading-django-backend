@@ -23,3 +23,10 @@ class WeekDayChoices(TextChoices):
     FRIDAY = "FRIDAY"
     SATURDAY = "SATURDAY"
     SUNDAY = "SUNDAY"
+
+
+class SessionScheduleTaskStatusChoices(TextChoices):
+    STARTED = "STARTED"
+    PENDING = "PENDING"
+    SUCCESS = "SUCCESS"
+    FAILURE = "FAILURE"

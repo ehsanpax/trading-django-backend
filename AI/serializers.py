@@ -99,7 +99,22 @@ class TradeJournalSerializer(serializers.ModelSerializer):
 
 
 class SessionScheduleSerializer(serializers.ModelSerializer):
+    session_id = serializers.CharField()
+    external_session_id = serializers.CharField(
+        source="session.external_session_id", read_only=True
+    )
+
     class Meta:
         model = SessionSchedule
         fields = "__all__"
         read_only_fields = ["created_at"]
+
+    def create(self, validated_data):
+        session_id = validated_data.pop("session_id")
+        session = ChatSession.objects.get(external_session_id=session_id)
+        schedule, created = SessionSchedule.objects.update_or_create(
+            session=session,
+            name=validated_data["name"],
+            defaults=validated_data,
+        )
+        return schedule

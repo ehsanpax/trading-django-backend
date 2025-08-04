@@ -79,3 +79,5 @@ yarl==1.19.0
 zope.interface==7.2
 whitenoise==6.2.0
 django-environ
+django-celery-results
+django-celery-beat
