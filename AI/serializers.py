@@ -109,7 +109,7 @@ class SessionScheduleSerializer(serializers.ModelSerializer):
     external_session_id = serializers.CharField(
         source="session.external_session_id", read_only=True
     )
-    excepted_days = serializers.ListField(
+    excluded_days = serializers.ListField(
         child=serializers.ChoiceField(
             choices=WeekDayChoices.choices,
             allow_blank=True,
