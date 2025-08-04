@@ -1,5 +1,12 @@
 from django.contrib import admin
-from .models import Execution, ChatSession, SessionExecution
+from .models import Execution, ChatSession, SessionExecution, Prompt
+
+
+@admin.register(Prompt)
+class PromptAdmin(admin.ModelAdmin):
+    list_display = ("id", "user", "created_at", "name")
+    search_fields = ("id", "name", "user__username")
+    list_filter = ("created_at", "user")
 
 
 @admin.register(Execution)

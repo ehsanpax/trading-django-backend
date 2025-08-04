@@ -4,13 +4,14 @@ from uuid import uuid4
 
 
 class Prompt(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid4)
     name = models.CharField(max_length=255)
     description = models.TextField(blank=True, null=True)
     user_prompt = models.TextField()
     active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     config = models.JSONField(default=dict)
-    version = models.CharField(max_length=50)
+    version = models.IntegerField(default=1)
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="ai_prompts")
     is_globally_shared = models.BooleanField(default=False)
 
@@ -19,6 +20,20 @@ class Prompt(models.Model):
 
     class Meta:
         unique_together = ("name", "version", "user")
+
+    def save(self, *args, **kwargs):
+        last_version_number = 0
+        last_version = (
+            Prompt.objects.filter(name=self.name, user=self.user)
+            .exclude(pk=self.pk)
+            .order_by("-version")
+            .first()
+        )
+        if last_version and last_version.version:
+            last_version_number = last_version.version
+        self.version = last_version_number + 1
+
+        super().save(*args, **kwargs)
 
 
 class Execution(models.Model):

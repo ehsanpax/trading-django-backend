@@ -7,12 +7,17 @@ from trades.serializers import TradeSerializer, OrderSerializer
 
 
 class PromptSerializer(serializers.ModelSerializer):
+    id = serializers.UUIDField(read_only=True)
+    version = serializers.IntegerField(read_only=True)
+
     class Meta:
         model = Prompt
-        fields = ["id", "name", "prompt", "version", "user", "is_globally_shared"]
-        read_only_fields = [
-            "user"
-        ]  # User is set by the view, not directly by the client
+        exclude = ["user", "active", "is_globally_shared"]
+
+    def create(self, validated_data):
+        user = self.context["request"].user
+        prompt = Prompt.objects.create(user=user, **validated_data)
+        return prompt
 
 
 class SessionExecutionSerializer(serializers.Serializer):

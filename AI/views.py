@@ -19,6 +19,7 @@ class PromptViewSet(viewsets.ModelViewSet):
     queryset = Prompt.objects.all()
     serializer_class = PromptSerializer
     permission_classes = [permissions.IsAuthenticated]
+    authentication_classes = [TokenAuthentication]
 
     def get_queryset(self):
         """
@@ -27,13 +28,15 @@ class PromptViewSet(viewsets.ModelViewSet):
         """
         user = self.request.user
         if user.is_authenticated:
-            return Prompt.objects.filter(user=user) | Prompt.objects.filter(
-                is_globally_shared=True
-            )
-        return Prompt.objects.filter(is_globally_shared=True)
-
-    def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
+            queryset = Prompt.objects.filter(
+                Q(user=user) | Q(is_globally_shared=True)
+            ).order_by("-created_at")
+        else:
+            queryset = Prompt.objects.filter(is_globally_shared=True)
+        prompt_name = self.request.query_params.get("name", None)
+        if prompt_name:
+            queryset = queryset.filter(name=prompt_name)
+        return queryset
 
 
 class StoreSessionExecutionViewset(APIView):
