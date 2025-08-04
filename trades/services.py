@@ -982,9 +982,24 @@ def cancel_pending_order(user, order_id: str) -> dict:
     """
     Cancels a pending order on the platform and updates its status in the database.
     """
-    order = Order.objects.filter(
-        Q(Q(id=order_id) | Q(broker_order_id=order_id)) & Q(account__user=user)
-    ).first()
+    broker_order_id = None
+    order_id_uuid = None
+    try:
+        order_id_uuid = UUID(order_id, version=4)  # Try to parse as UUID
+    except Exception:
+        pass
+    try:
+        broker_order_id = int(order_id)  # Try to parse as integer
+    except Exception:
+        pass
+    if broker_order_id:
+        order = Order.objects.filter(
+            Q(broker_order_id=broker_order_id) & Q(account__user=user)
+        ).first()
+    elif order_id_uuid:
+        order = Order.objects.filter(
+            Q(id=order_id_uuid) & Q(account__user=user)
+        ).first()
 
     if not order:
         raise ValidationError(f"Order with id {order_id} not found.")

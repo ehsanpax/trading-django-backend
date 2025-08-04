@@ -650,7 +650,7 @@ class CancelPendingOrderView(APIView):
     authentication_classes = [TokenAuthentication, JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
-    def delete(self, request, order_id: uuid.UUID):
+    def delete(self, request, order_id: str):
         result = cancel_pending_order(user=request.user, order_id=order_id)
         return Response(result, status=status.HTTP_200_OK)
 
