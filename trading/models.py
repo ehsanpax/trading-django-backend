@@ -236,6 +236,12 @@ class Order(models.Model):
         default=Status.PENDING,
     )
 
+    # Risk-related fields, copied from the initial trade request
+    risk_percent = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    projected_profit = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True)
+    projected_loss = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True)
+    rr_ratio = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+
     # Data returned from broker/platform (ticket, deal ids, etc.)
     broker_order_id = models.BigIntegerField(null=True, blank=True)
     broker_deal_id = models.BigIntegerField(null=True, blank=True)
@@ -295,11 +301,14 @@ class Order(models.Model):
             entry_price=price,
             stop_loss=self.stop_loss or Decimal("0"),
             profit_target=self.take_profit or Decimal("0"),
-            risk_percent=Decimal("0"),  # set if known
+            risk_percent=self.risk_percent or Decimal("0"),
+            projected_profit=self.projected_profit or Decimal("0"),
+            projected_loss=self.projected_loss or Decimal("0"),
+            rr_ratio=self.rr_ratio or Decimal("0"),
             trade_status="open",
             order_id=self.broker_order_id,
             deal_id=broker_deal_id,
-            position_id=None,
+            position_id=broker_deal_id,
         )
 
         self.trade = trade

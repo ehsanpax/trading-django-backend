@@ -335,6 +335,10 @@ class TradeService:
             time_in_force=self.data.get("time_in_force", "GTC"),
             broker_order_id=resp["order_id"],
             status=resp.get("status", "pending"),
+            risk_percent=Decimal(self.data["risk_percent"]),
+            projected_profit=Decimal(self.data["projected_profit"]),
+            projected_loss=Decimal(self.data["projected_loss"]),
+            rr_ratio=Decimal(self.data["rr_ratio"]),
         )
 
         trade = None
