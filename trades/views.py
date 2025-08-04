@@ -632,37 +632,13 @@ class AllPendingOrdersView(APIView):
 
     def get(self, request):
         accounts = Account.objects.filter(user=request.user)
-        all_pending_orders = []
         account_id = self.request.query_params.get("account", None)
         if account_id:
             accounts = accounts.filter(Q(id=account_id) | Q(simple_id=True))
-
+        pending_orders = []
         for account in accounts:
-            try:
-                pending_orders_data = get_pending_orders(account)
-                # Add account info to each order for better context on the frontend
-                for order in pending_orders_data:
-                    order["account_id"] = str(account.id)
-                    order["account_name"] = account.name
-                all_pending_orders.extend(pending_orders_data)
-            except APIException as e:
-                # Log the error and continue to the next account
-                logger.error(
-                    f"Could not fetch pending orders for account {account.id}: {e}"
-                )
-                continue
-            except NotImplementedError:
-                # Skip platforms that are not implemented
-                continue
-            except Exception as e:
-                logger.error(
-                    f"Unexpected error fetching pending orders for account {account.id}: {e}"
-                )
-                continue
-
-        return Response(
-            {"pending_orders": all_pending_orders}, status=status.HTTP_200_OK
-        )
+            pending_orders.extend(get_pending_orders(account))
+        return Response({"pending_orders": pending_orders}, status=status.HTTP_200_OK)
 
 
 class CancelPendingOrderView(APIView):
