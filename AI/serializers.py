@@ -110,22 +110,26 @@ class SessionScheduleSerializer(serializers.ModelSerializer):
     external_session_id = serializers.CharField(
         source="session.external_session_id", read_only=True
     )
-    excluded_days = serializers.ListField(
-        child=serializers.ChoiceField(
-            choices=WeekDayChoices.choices,
-            allow_blank=True,
-            allow_null=True,
-            required=False,
-        ),
-        allow_empty=True,
-        allow_null=True,
-        required=False,
-    )
+    excluded_days = serializers.CharField(allow_blank=True, allow_null=True, required=False)
 
     class Meta:
         model = SessionSchedule
         fields = "__all__"
         read_only_fields = ["created_at"]
+
+    def validate_excluded_days(self, value):
+        new_value = []
+        if value:
+            days = value.split(",")
+            for day in days:
+                day = day.strip()
+                if day not in WeekDayChoices.values:
+                    raise serializers.ValidationError(
+                        f"Invalid day: {day}. Must be one of {', '.join(WeekDayChoices.values)}."
+                    )
+                if day not in new_value:
+                    new_value.append(day)
+        return new_value
 
     def create(self, validated_data):
         session_id = validated_data.pop("session_id")
