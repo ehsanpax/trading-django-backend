@@ -38,7 +38,7 @@ def execute_session_schedule(self, schedule_id):
             status=SessionScheduleTaskStatusChoices.STARTED,
             result=result_message,
         )
-        session_endpoint_url = "https://endlessly-central-gelding.ngrok-free.app/webhook/dc176d73-f5b8-4d0b-b8a1-f7fbe9a0edd3"
+        session_endpoint_url = "https://endlessly-central-gelding.ngrok-free.app/webhook/08dbc21f-2055-47ea-8aaf-c1dfe2dbc69f"
         data = {
             "context": schedule.context,
             "session_id": schedule.session.external_session_id,
