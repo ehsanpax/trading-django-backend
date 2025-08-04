@@ -8,6 +8,7 @@ from .models import Account, MT5Account
 from trading_platform.mt5_api_client import connection_manager
 from trades.tasks import trigger_trade_synchronization
 from trades.listeners import PositionUpdateListener
+from monitoring.services import monitoring_service
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,14 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         self.is_active = True
         logger.info(f"Account WebSocket connected for account {self.account_id}")
 
+        monitoring_service.register_connection(
+            self.channel_name,
+            self.user,
+            self.account_id,
+            "account",
+            {}
+        )
+
         self.mt5_client = await connection_manager.get_client(
             base_url=settings.MT5_API_BASE_URL,
             account_id=mt5_account.account_number,
@@ -118,6 +127,7 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         """
         Handles a WebSocket disconnection.
         """
+        monitoring_service.unregister_connection(self.channel_name)
         self.is_active = False
         if self.mt5_client:
             self.mt5_client.unregister_account_info_listener(self.send_account_update)
@@ -128,6 +138,7 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         """
         Handles incoming messages from the client.
         """
+        monitoring_service.update_client_message(self.channel_name, content)
         action = content.get("action")
         if action == "unsubscribe":
             logger.info(f"Unsubscribe request received for account {self.account_id}. Closing connection.")
@@ -235,3 +246,4 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
             }
         }
         await self.send_json(payload)
+        monitoring_service.update_server_message(self.channel_name, payload)

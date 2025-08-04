@@ -11,6 +11,7 @@ from django.conf import settings
 import websockets, aiohttp
 from datetime import datetime, timedelta
 from indicators.services import IndicatorService
+from monitoring.services import monitoring_service
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,14 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
         self.symbol = self.scope["url_route"]["kwargs"]["symbol"]
 
         await self.accept()
+
+        monitoring_service.register_connection(
+            self.channel_name,
+            self.scope.get("user"),
+            self.account_id,
+            "price",
+            {"symbol": self.symbol}
+        )
         
         if not self.account_id:
             await self.send_json({"error": "Account ID not provided"})
@@ -95,6 +104,7 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
             return
 
     async def disconnect(self, close_code):
+        monitoring_service.unregister_connection(self.channel_name)
         #logger.info(f"🔻 WebSocket disconnected for Account: {self.account_id} - {self.symbol}")
         if self.platform == "MT5" and self.mt5_client:
             self.mt5_client.unregister_price_listener(self.symbol, self.send_price_update)
@@ -105,6 +115,7 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
         #logger.info(f"🔻 WebSocket closed for Account: {self.account_id} - {self.symbol}")
 
     async def receive_json(self, content):
+        monitoring_service.update_client_message(self.channel_name, content)
         #logger.info(f"Received message from client for account {self.account_id} - {self.symbol}: {json.dumps(content)}")
         action = content.get("type") or content.get("action")
 
@@ -280,11 +291,14 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
         }
         #logger.info(f"Sending price update for {self.symbol} to client for account {self.account_id}: {json.dumps(payload)}")
         await self.send_json(payload)
+        monitoring_service.update_server_message(self.channel_name, payload)
 
     async def send_candle_update(self, candle_data):
         """Callback function to handle candle updates, calculating indicators on actual close."""
         # Always send the raw candle data to the client for the live chart line
-        await self.send_json({"type": "new_candle", "data": candle_data})
+        payload = {"type": "new_candle", "data": candle_data}
+        await self.send_json(payload)
+        monitoring_service.update_server_message(self.channel_name, payload)
 
         if not self.active_indicators:
             return
