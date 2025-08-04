@@ -23,7 +23,7 @@ urlpatterns = [
         name="prompt-list-create",
     ),
     path(
-        "session-schedules/<uuid:pk>/",
+        "session-schedules/<pk>/",
         SessionScheduleViewset.as_view(
             {"get": "retrieve", "put": "partial_update", "delete": "destroy"}
         ),
