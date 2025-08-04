@@ -111,7 +111,9 @@ class SessionScheduleViewset(ModelViewSet):
         )
         session_id = self.request.query_params.get("session_id", None)
         if session_id:
-            queryset = queryset.filter(session__id=session_id)
+            queryset = queryset.filter(
+                Q(session__id=session_id) | Q(session__external_session_id=session_id)
+            )
         name = self.request.query_params.get("name", None)
         if name:
             queryset = queryset.filter(name__iexact=name)
