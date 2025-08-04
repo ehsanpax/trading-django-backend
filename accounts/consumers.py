@@ -7,6 +7,7 @@ from django.apps import apps
 from .models import Account, MT5Account
 from trading_platform.mt5_api_client import connection_manager
 from trades.tasks import trigger_trade_synchronization
+from trades.listeners import PositionUpdateListener
 
 logger = logging.getLogger(__name__)
 
@@ -178,7 +179,17 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
 
         new_tickets = current_trade_tickets - previous_trade_tickets
         if new_tickets:
-            logger.info(f"Detected {len(new_tickets)} new trades. Refreshing trade UUID map from DB.")
+            logger.info(f"Detected {len(new_tickets)} new trades: {new_tickets}")
+            new_positions_data = [pos for pos in self.open_positions if str(pos.get('ticket')) in new_tickets]
+            
+            # Get the account instance
+            account = await sync_to_async(Account.objects.get)(id=self.account_id)
+            
+            # Process these new positions to check for filled pending orders
+            await PositionUpdateListener.process_new_positions(account, new_positions_data)
+
+            # After processing, refresh the trade UUID map to include the new trades
+            logger.info("Refreshing trade UUID map from DB after processing new trades.")
             await self._populate_trade_uuid_map()
 
     async def send_combined_update(self, pending_orders: list = []):
