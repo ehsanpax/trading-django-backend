@@ -111,10 +111,11 @@ class SessionScheduleSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         session_id = validated_data.pop("session_id")
+        name = validated_data.pop("name")
         session = ChatSession.objects.get(external_session_id=session_id)
         schedule, created = SessionSchedule.objects.update_or_create(
             session=session,
-            name=validated_data["name"],
+            name=name,
             defaults=validated_data,
         )
         return schedule
