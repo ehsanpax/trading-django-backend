@@ -1,7 +1,6 @@
 from django.urls import path
-from .views import AccountListCreateView, AccountDetailView
+from .views import EquityCurveView
 
 urlpatterns = [
-    path('accounts/', AccountListCreateView.as_view(), name='account-list-create'),
-    path('accounts/<uuid:id>/', AccountDetailView.as_view(), name='account-detail'),
+    path('equity-curve/<uuid:account_id>/', EquityCurveView.as_view(), name='equity-curve'),
 ]
