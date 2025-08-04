@@ -41,9 +41,9 @@ def execute_session_schedule(self, schedule_id):
         session_endpoint_url = "https://endlessly-central-gelding.ngrok-free.app/webhook/08dbc21f-2055-47ea-8aaf-c1dfe2dbc69f"
         data = {
             "context": schedule.context,
-            "session_id": schedule.session.external_session_id,
-            "system_session_id": schedule.session.id,
-            "trading_account_api_key": schedule.session.user_token,
+            "session_id": str(schedule.session.external_session_id),
+            "system_session_id": str(schedule.session.id),
+            "trading_account_api_key": str(schedule.session.user_token),
             "backend_url": settings.BACKEND_URL,
         }
         request = requests.post(
