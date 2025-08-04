@@ -102,13 +102,23 @@ class TradeJournalSerializer(serializers.ModelSerializer):
 class SessionScheduleSerializer(serializers.ModelSerializer):
     session_id = serializers.CharField()
     session = serializers.PrimaryKeyRelatedField(
-        queryset=ChatSession.objects.all(), allow_null=True
+        queryset=ChatSession.objects.all(),
+        allow_null=True,
+        required=False,
     )
     external_session_id = serializers.CharField(
         source="session.external_session_id", read_only=True
     )
     excepted_days = serializers.ListField(
-        child=serializers.ChoiceField(choices=WeekDayChoices.choices), allow_empty=True
+        child=serializers.ChoiceField(
+            choices=WeekDayChoices.choices,
+            allow_blank=True,
+            allow_null=True,
+            required=False,
+        ),
+        allow_empty=True,
+        allow_null=True,
+        required=False,
     )
 
     class Meta:
