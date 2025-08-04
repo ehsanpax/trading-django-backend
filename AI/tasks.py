@@ -35,7 +35,7 @@ def execute_session_schedule(self, schedule_id):
         SessionScheduleTask.objects.create(
             schedule=schedule,
             task_id=self.request.id,
-            status=SessionScheduleTaskStatusChoices.STARTED,
+            status=SessionScheduleTaskStatusChoices.STARTED.value,
             result=result_message,
         )
         session_endpoint_url = "https://endlessly-central-gelding.ngrok-free.app/webhook/08dbc21f-2055-47ea-8aaf-c1dfe2dbc69f"
@@ -61,7 +61,7 @@ def execute_session_schedule(self, schedule_id):
         SessionScheduleTask.objects.create(
             schedule_id=schedule_id,
             task_id=self.request.id,
-            status=SessionScheduleTaskStatusChoices.FAILURE,
+            status=SessionScheduleTaskStatusChoices.FAILURE.value,
             result=str(e),
         )
         return f"Failed to execute schedule {schedule_id}: {e}"
