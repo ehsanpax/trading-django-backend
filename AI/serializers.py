@@ -4,6 +4,7 @@ from trade_journal.models import TradeJournal
 from django.db import models
 from trading.models import Trade, Order
 from trades.serializers import TradeSerializer, OrderSerializer
+from .choices import WeekDayChoices
 
 
 class PromptSerializer(serializers.ModelSerializer):
@@ -100,8 +101,14 @@ class TradeJournalSerializer(serializers.ModelSerializer):
 
 class SessionScheduleSerializer(serializers.ModelSerializer):
     session_id = serializers.CharField()
+    session = serializers.PrimaryKeyRelatedField(
+        queryset=ChatSession.objects.all(), allow_null=True
+    )
     external_session_id = serializers.CharField(
         source="session.external_session_id", read_only=True
+    )
+    excepted_days = serializers.ListField(
+        child=serializers.ChoiceField(choices=WeekDayChoices.choices), allow_empty=True
     )
 
     class Meta:

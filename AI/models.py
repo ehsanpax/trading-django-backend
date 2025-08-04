@@ -97,6 +97,7 @@ class SessionSchedule(models.Model):
     excluded_days = ArrayField(
         models.CharField(max_length=255, choices=WeekDayChoices.choices),
         blank=True,
+        null=True,
         default=list,
     )
     excluded_time_ranges = models.JSONField(default=list, blank=True)
