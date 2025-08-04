@@ -39,7 +39,7 @@ DEBUG = env.bool("DEBUG", default=False)
 
 ALLOWED_HOSTS = env.list("ALLOWED_HOSTS", default=["*"])
 
-
+BACKEND_URL = env.str("BACKEND_URL", default="http://localhost:8000")
 # Application definition
 
 INSTALLED_APPS = [
@@ -53,6 +53,8 @@ INSTALLED_APPS = [
     # Third-party apps
     "rest_framework",
     "rest_framework.authtoken",
+    "django_celery_results",
+    "django_celery_beat",
     # Your apps
     "trading",
     "accounts",
@@ -74,7 +76,7 @@ INSTALLED_APPS = [
     "ta",  # Technical Analysis app
     "AI",  # AI Prompts app
     "charts",
-    "fundamental"
+    "fundamental",
 ]
 
 
@@ -280,3 +282,6 @@ DATA_ROOT.mkdir(exist_ok=True)  # Ensure the directory exists
 
 OANDA_ACCESS_TOKEN = env("OANDA_ACCESS_TOKEN")
 OANDA_ENVIRONMENT = env("OANDA_ENVIRONMENT")
+
+
+CELERY_RESULT_BACKEND = "django-db"

@@ -1,0 +1,71 @@
+from celery import shared_task
+from django.utils import timezone
+from .models import SessionSchedule, SessionScheduleTask
+from .choices import SessionScheduleTaskStatusChoices, ScheduleTypeChoices
+from django.conf import settings
+import requests
+
+
+@shared_task
+def process_one_time_schedules():
+    """
+    Processes one-time schedules that are due and have not yet been executed.
+    A schedule is considered "not yet executed" if it has no related
+    SessionScheduleTask objects.
+    """
+    now = timezone.now()
+    schedules = SessionSchedule.objects.filter(
+        type=ScheduleTypeChoices.ONE_TIME.value,
+        start_at__lte=now,
+        tasks__isnull=True,  # Check if any tasks have been created for this schedule
+    )
+    for schedule in schedules:
+        # Dispatch the task for execution
+        execute_session_schedule.delay(schedule.id)
+
+
+@shared_task(bind=True)
+def execute_session_schedule(self, schedule_id):
+    try:
+        schedule = SessionSchedule.objects.get(id=schedule_id)
+        # Here you would add the logic that needs to be executed.
+        # For now, we'll just simulate a successful execution.
+        result_message = f"Successfully executed schedule {schedule.name}"
+
+        SessionScheduleTask.objects.create(
+            schedule=schedule,
+            task_id=self.request.id,
+            status=SessionScheduleTaskStatusChoices.STARTED,
+            result=result_message,
+        )
+        session_endpoint_url = "https://endlessly-central-gelding.ngrok-free.app/webhook/dc176d73-f5b8-4d0b-b8a1-f7fbe9a0edd3"
+        data = {
+            "context": schedule.context,
+            "session_id": schedule.session.external_session_id,
+            "system_session_id": schedule.session.id,
+            "trading_account_api_key": schedule.session.user_token,
+            "backend_url": settings.BACKEND_URL,
+        }
+        request = requests.post(
+            session_endpoint_url,
+            data=data,
+            timeout=None,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Token {schedule.session.user_token}",
+            },
+        )
+
+        return result_message
+    except SessionSchedule.DoesNotExist:
+        # Handle the case where the schedule is not found
+        return f"Schedule with id {schedule_id} not found."
+    except Exception as e:
+        # Handle other potential errors
+        SessionScheduleTask.objects.create(
+            schedule_id=schedule_id,
+            task_id=self.request.id,
+            status=SessionScheduleTaskStatusChoices.FAILURE,
+            result=str(e),
+        )
+        return f"Failed to execute schedule {schedule_id}: {e}"
