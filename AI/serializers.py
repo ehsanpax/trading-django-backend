@@ -3,7 +3,7 @@ from .models import Prompt, Execution, ChatSession, SessionExecution
 from trade_journal.models import TradeJournal
 from django.db import models
 from trading.models import Trade, Order
-from trading.serializers import TradeSerializer, OrderSerializer
+from trades.serializers import TradeSerializer, OrderSerializer
 
 
 class PromptSerializer(serializers.ModelSerializer):

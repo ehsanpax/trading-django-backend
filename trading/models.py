@@ -355,3 +355,25 @@ class InstrumentSpecification(models.Model):
 
     def __str__(self):
         return f"{self.symbol} (Spec)"
+
+
+class EquityDataPoint(models.Model):
+    """
+    Stores a single data point for an account's equity curve.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    account = models.ForeignKey(
+        Account,
+        on_delete=models.CASCADE,
+        related_name="equity_data"
+    )
+    date = models.DateTimeField()
+    equity = models.DecimalField(max_digits=15, decimal_places=2)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('account', 'date')
+        ordering = ['date']
+
+    def __str__(self):
+        return f"Equity for {self.account.name} at {self.date}: {self.equity}"
