@@ -10,29 +10,11 @@ class Prompt(models.Model):
     active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     config = models.JSONField(default=dict)
-    version = models.IntegerField(default=1)
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="ai_prompts")
     is_globally_shared = models.BooleanField(default=False)
 
-    def __str__(self):
-        return f"{self.name} (v{self.version})"
-
     class Meta:
-        unique_together = ("name", "version", "user")
-
-    def save(self, *args, **kwargs):
-        last_version_number = 0
-        last_version = (
-            Prompt.objects.filter(name=self.name, user=self.user)
-            .exclude(pk=self.pk)
-            .order_by("-version")
-            .first()
-        )
-        if last_version and last_version.version:
-            last_version_number = last_version.version
-        self.version = last_version_number + 1
-
-        super().save(*args, **kwargs)
+        unique_together = ("name", "user")
 
 
 class Execution(models.Model):

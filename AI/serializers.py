@@ -8,7 +8,6 @@ from trades.serializers import TradeSerializer, OrderSerializer
 
 class PromptSerializer(serializers.ModelSerializer):
     id = serializers.UUIDField(read_only=True)
-    version = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = Prompt
