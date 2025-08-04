@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Prompt, Execution, ChatSession, SessionExecution
+from .models import Prompt, Execution, ChatSession, SessionExecution, SessionSchedule
 from trade_journal.models import TradeJournal
 from django.db import models
 from trading.models import Trade, Order
@@ -96,3 +96,10 @@ class TradeJournalSerializer(serializers.ModelSerializer):
     class Meta:
         model = TradeJournal
         fields = "__all__"
+
+
+class SessionScheduleSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SessionSchedule
+        fields = "__all__"
+        read_only_fields = ["created_at"]

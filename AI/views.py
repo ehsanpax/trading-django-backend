@@ -1,10 +1,11 @@
 from rest_framework import viewsets, permissions
-from .models import Prompt, ChatSession
+from .models import Prompt, ChatSession, SessionSchedule
 from .serializers import (
     PromptSerializer,
     SessionExecutionSerializer,
     ChatSessionSerializer,
     TradeJournalSerializer,
+    SessionScheduleSerializer,
 )
 from rest_framework.views import APIView
 from rest_framework.viewsets import ModelViewSet
@@ -92,4 +93,27 @@ class TradeJournalViewset(ModelViewSet):
             queryset = queryset.filter(
                 Q(trade__account__id=account_id) | Q(trade__account__simple_id=True)
             )
+        return queryset
+
+
+class SessionScheduleViewset(ModelViewSet):
+    serializer_class = SessionScheduleSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    authentication_classes = [TokenAuthentication]
+    queryset = SessionSchedule.objects.all()
+
+    def get_queryset(self):
+        queryset = (
+            super()
+            .get_queryset()
+            .filter(session__user=self.request.user)
+            .order_by("-created_at")
+        )
+        session_id = self.request.query_params.get("session_id", None)
+        if session_id:
+            queryset = queryset.filter(session__id=session_id)
+        name = self.request.query_params.get("name", None)
+        if name:
+            queryset = queryset.filter(name__iexact=name)
+
         return queryset

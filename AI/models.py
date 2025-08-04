@@ -1,6 +1,8 @@
 from django.db import models
 from django.contrib.auth.models import User
 from uuid import uuid4
+from .choices import ScheduleTypeChoices, ScheduleRecurrenceChoices, WeekDayChoices
+from django.contrib.postgres.fields import ArrayField
 
 
 class Prompt(models.Model):
@@ -57,3 +59,30 @@ class SessionExecution(models.Model):
 
     class Meta:
         unique_together = ("session", "execution")
+
+
+class SessionSchedule(models.Model):
+    session = models.ForeignKey(
+        ChatSession, on_delete=models.CASCADE, related_name="schedules"
+    )
+    name = models.CharField(max_length=255)
+    type = models.CharField(
+        max_length=50,
+        choices=ScheduleTypeChoices.choices,
+        default=ScheduleTypeChoices.ONE_TIME.value,
+    )
+    recurrence = models.CharField(
+        max_length=50,
+        choices=ScheduleRecurrenceChoices.choices,
+        default=ScheduleRecurrenceChoices.MINUTELY.value,
+    )
+    start_at = models.DateTimeField()
+    end_at = models.DateTimeField(null=True, blank=True)
+    excluded_days = ArrayField(
+        models.CharField(max_length=255, choices=WeekDayChoices.choices),
+        blank=True,
+        default=list,
+    )
+    excluded_time_ranges = models.JSONField(default=list, blank=True)
+    context = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)

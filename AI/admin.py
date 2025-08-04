@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Execution, ChatSession, SessionExecution, Prompt
+from .models import Execution, ChatSession, SessionExecution, Prompt, SessionSchedule
 
 
 @admin.register(Prompt)
@@ -34,3 +34,10 @@ class SessionExecutionAdmin(admin.ModelAdmin):
     list_display = ("id", "session", "execution")
     search_fields = ("id", "session__id", "execution__id")
     list_filter = ("session", "execution")
+
+
+@admin.register(SessionSchedule)
+class SessionScheduleAdmin(admin.ModelAdmin):
+    list_display = ("id", "session", "name", "created_at")
+    search_fields = ("id", "session__id", "name")
+    list_filter = ("created_at", "session")
