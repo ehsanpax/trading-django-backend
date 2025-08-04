@@ -24,6 +24,7 @@ from rest_framework.exceptions import APIException, PermissionDenied, Validation
 from trading.models import Trade  # Import Trade model for DoesNotExist exception
 import uuid
 
+
 class ExecuteAITradeView(APIView):
     """Accepts AI trade payload, injects an account, forwards to ExecuteTradeView."""
 
@@ -44,9 +45,13 @@ class ExecuteAITradeView(APIView):
         except (ValueError, TypeError):
             pass
         if uuid_account_id:
-            account = Account.objects.filter(id=uuid_account_id, user=request.user).first()
+            account = Account.objects.filter(
+                id=uuid_account_id, user=request.user
+            ).first()
         else:
-            account = Account.objects.filter(simple_id=int(payload.get("account_id")), user=request.user).first()
+            account = Account.objects.filter(
+                simple_id=int(payload.get("account_id")), user=request.user
+            ).first()
 
         account_id = str(account.id) if account else None
         payload["account_id"] = account_id
@@ -161,11 +166,17 @@ class ExecuteAITradeView(APIView):
             "projected_profit": trade_payload["projected_profit"],
             "projected_loss": trade_payload["projected_loss"],
         }
-        # 2️⃣ run service
-        svc = TradeService(request.user, payload)
-        account, final_lot, sl, tp = svc.validate()
-        resp = svc.execute_on_broker(account, final_lot, sl, tp)
-        order, trade = svc.persist(account, resp, final_lot, sl, tp)
+        try:
+            # 2️⃣ run service
+            svc = TradeService(request.user, payload)
+            account, final_lot, sl, tp = svc.validate()
+            resp = svc.execute_on_broker(account, final_lot, sl, tp)
+            order, trade = svc.persist(account, resp, final_lot, sl, tp)
+        except Exception as e:
+            return Response(
+                {"error": str(e)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         # 3️⃣ build and return output
         out = svc.build_response(order, trade)
