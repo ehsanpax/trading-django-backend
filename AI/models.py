@@ -73,6 +73,8 @@ class SessionSchedule(models.Model):
     )
     recurrence = models.CharField(
         max_length=50,
+        null=True,
+        blank=True,
         choices=ScheduleRecurrenceChoices.choices,
         default=ScheduleRecurrenceChoices.MINUTELY.value,
     )
