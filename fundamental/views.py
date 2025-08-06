@@ -38,16 +38,15 @@ class EconomicCalendarAPIView(APIView):
                 currency_code = item["currency"]
                 currency_obj, _ = Currency.objects.get_or_create(currency=currency_code)
 
-                
                 EconomicCalendar.objects.update_or_create(
                     event=event,
                     event_time=event_time,
+                    currency_code=currency_obj,
                     defaults={
                         "impact": item.get("impact"),
                         "actual": item.get("actual"),
                         "previous": item.get("previous"),
                         "forecast": item.get("forecast"),
-                        "currency": currency_obj,
                     },
                 )
             except KeyError as e:
@@ -72,15 +71,17 @@ class EconomicCalendarEventListAPIView(APIView):
     serializer_class = EconomicCalendarSerializer
 
     def get_queryset(self):
-        queryset = EconomicCalendar.objects.all().order_by('-event_time')
+        queryset = EconomicCalendar.objects.all().order_by("-event_time")
 
         # query parameters
-        date_from = self.request.query_params.get('date_from')
-        date_to = self.request.query_params.get('date_to')
-        currency = self.request.query_params.get('currency')
+        date_from = self.request.query_params.get("date_from")
+        date_to = self.request.query_params.get("date_to")
+        currency = self.request.query_params.get("currency")
 
-        if date_from and date_to:
-            queryset = queryset.filter(event_time__date__gte=date_from, event_time__date__lte=date_to)
+        if date_from:
+            queryset = queryset.filter(event_time__gte=date_from)
+        if date_to:
+            queryset = queryset.filter(event_time__lte=date_to)
 
         if currency:
             queryset = queryset.filter(currency__currency=currency)
