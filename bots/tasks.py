@@ -437,28 +437,8 @@ def run_backtest(self, backtest_run_id, strategy_name, strategy_params, indicato
             indicator_data_to_save = []
             
             # Identify indicator columns by asking the strategy instance directly.
-            # This is the most robust way, as the strategy knows what it calculates.
-            indicator_columns = []
-            if hasattr(strategy_instance, 'get_indicator_column_names') and callable(strategy_instance.get_indicator_column_names):
-                try:
-                    indicator_columns = strategy_instance.get_indicator_column_names()
-                    logger.info(f"BacktestRun {backtest_run_id}: Strategy provided indicator columns: {indicator_columns}")
-                except Exception as e:
-                    logger.error(f"BacktestRun {backtest_run_id}: Error calling get_indicator_column_names on strategy: {e}", exc_info=True)
-                    # Fallback to heuristic if strategy method fails
-                    for col in df_with_all_indicators.columns:
-                        if col.startswith(('MACD', 'CMF', 'ATR', 'EMA', 'SMA', 'RSI', 'BBAND', 'STOCH', 'ADX')):
-                            indicator_columns.append(col)
-                    indicator_columns = list(set(indicator_columns))
-                    logger.warning(f"BacktestRun {backtest_run_id}: Falling back to heuristic indicator identification: {indicator_columns}")
-            else:
-                logger.warning(f"BacktestRun {backtest_run_id}: Strategy instance does not have 'get_indicator_column_names' method. Falling back to heuristic identification.")
-                # Fallback to heuristic if method is not present
-                for col in df_with_all_indicators.columns:
-                    if col.startswith(('MACD', 'CMF', 'ATR', 'EMA', 'SMA', 'RSI', 'BBAND', 'STOCH', 'ADX')):
-                        indicator_columns.append(col)
-                indicator_columns = list(set(indicator_columns))
-                logger.warning(f"BacktestRun {backtest_run_id}: Falling back to heuristic indicator identification: {indicator_columns}")
+            indicator_columns = strategy_instance.get_indicator_column_names()
+            logger.info(f"BacktestRun {backtest_run_id}: Strategy provided indicator columns: {indicator_columns}")
 
             logger.info(f"BacktestRun {backtest_run_id}: Final list of indicator columns for saving: {indicator_columns}")
 

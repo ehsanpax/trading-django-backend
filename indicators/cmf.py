@@ -9,6 +9,7 @@ class CMF(BaseIndicator):
     """
     NAME = "CMF"
     DISPLAY_NAME = "Chaikin Money Flow"
+    PANE_TYPE = "pane"
     PARAMETERS = [
         BotParameter(
             name="length",

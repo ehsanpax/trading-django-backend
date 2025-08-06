@@ -23,7 +23,11 @@ from .serializers import (
 from .models import BacktestOhlcvData, BacktestIndicatorData
 from . import services
 from accounts.models import Account
-from bots.services import StrategyManager # Import StrategyManager
+from bots.services import StrategyManager
+from bots.registry import get_indicator_class
+from analysis.utils.data_processor import load_m1_data_from_parquet, resample_data
+import pandas as pd
+from decimal import Decimal
 
 # Add logger to views
 import logging
@@ -315,72 +319,122 @@ class BacktestChartDataAPIView(APIView):
         logger.info(f"Fetching chart data for BacktestRun ID: {backtest_run_id}")
         backtest_run = get_object_or_404(BacktestRun, id=backtest_run_id)
 
-        # Permission check: Ensure the user can access this backtest run's data
         user = request.user
         if not (user.is_staff or user.is_superuser or backtest_run.config.bot_version.bot.created_by == user):
             raise PermissionDenied("You do not have permission to access chart data for this backtest run.")
 
+        requested_timeframe = request.query_params.get('timeframe')
+        original_timeframe = backtest_run.config.timeframe
+
         try:
-            # 1. Fetch OHLCV data
-            # Order by timestamp initially from the database
-            ohlcv_queryset = BacktestOhlcvData.objects.filter(backtest_run=backtest_run).order_by('timestamp')
-
-            # Process OHLCV data for Lightweight Charts (LWC)
-            # LWC requires: [{ time: seconds, open, high, low, close }]
-            # And strict ascending order by 'time' with no duplicates.
-
-            # Using a dictionary to handle potential duplicates after flooring to seconds
-            # We'll keep the 'last' encountered bar for a given second if duplicates exist after conversion.
-            ohlcv_data_lwc_map = {}
-            for o in ohlcv_queryset:
-                # Convert timestamp to Unix seconds (integer).
-                # Use int() to ensure it's a whole number of seconds, as required by LWC.
-                time_in_seconds = int(o.timestamp.timestamp())
-
-                # Store the bar. If a duplicate time_in_seconds occurs, this will overwrite
-                # the previous one, effectively keeping the last bar for that second.
-                ohlcv_data_lwc_map[time_in_seconds] = {
-                    "time": time_in_seconds,
-                    "open": float(o.open), # Ensure numeric types (float or int)
-                    "high": float(o.high),
-                    "low": float(o.low),
-                    "close": float(o.close),
-                    # "volume": float(o.volume) if hasattr(o, 'volume') else 0.0, # Include if volume is in your model
-                }
-
-            # Convert map values to a list and sort explicitly by time.
-            # This ensures strict ascending order and that no duplicates remain,
-            # as map keys are unique.
-            ohlcv_data_lwc = sorted(ohlcv_data_lwc_map.values(), key=lambda k: k['time'])
-
-            # Optional: Add a backend validation check to log any remaining issues
-            for i in range(1, len(ohlcv_data_lwc)):
-                if ohlcv_data_lwc[i]['time'] <= ohlcv_data_lwc[i-1]['time']:
-                    logger.error(
-                        f"Backend OHLCV data sorting issue: Index {i}, Time {ohlcv_data_lwc[i]['time']}, "
-                        f"Prev Time {ohlcv_data_lwc[i-1]['time']}. This should not happen after map & sort."
-                    )
-
-            logger.info(f"Prepared {len(ohlcv_data_lwc)} OHLCV bars for frontend.")
-
-
-            # 2. Fetch Indicator data and group by indicator_name
-            indicator_queryset = BacktestIndicatorData.objects.filter(backtest_run=backtest_run).order_by('indicator_name', 'timestamp')
-
+            ohlcv_data_lwc = []
             indicator_data_grouped = {}
-            for record in indicator_queryset:
-                # Lightweight Charts also expects seconds for time series
-                point = {"time": int(record.timestamp.timestamp()), "value": float(record.value)}
-                if record.indicator_name not in indicator_data_grouped:
-                    indicator_data_grouped[record.indicator_name] = [point]
-                else:
-                    indicator_data_grouped[record.indicator_name].append(point)
 
-            # Ensure each indicator series is also sorted by time and de-duplicated (optional but good practice)
-            for key in indicator_data_grouped:
-                # Use a dict for de-duplication within each indicator series, keeping the last value for a given second
-                series_map = {p['time']: p for p in indicator_data_grouped[key]}
-                indicator_data_grouped[key] = sorted(series_map.values(), key=lambda k: k['time'])
+            # If a new timeframe is requested and it's different from the original, resample on the fly
+            if requested_timeframe and requested_timeframe != original_timeframe:
+                logger.info(f"Resampling on-the-fly for {backtest_run_id} to timeframe: {requested_timeframe}")
+                
+                # 1. Load raw M1 data for the backtest period
+                raw_m1_df = load_m1_data_from_parquet(
+                    instrument_symbol=backtest_run.instrument_symbol,
+                    start_date=backtest_run.data_window_start,
+                    end_date=backtest_run.data_window_end
+                )
+
+                if raw_m1_df.empty:
+                    raise ValueError("No raw M1 data found for the specified period to perform resampling.")
+
+                # 2. Resample to the requested timeframe
+                resampled_df = resample_data(raw_m1_df, requested_timeframe)
+                
+                # 3. Recalculate indicators on the new resampled data
+                bot_version = backtest_run.config.bot_version
+                strategy_instance = StrategyManager.instantiate_strategy(
+                    strategy_name=bot_version.strategy_name,
+                    instrument_symbol=backtest_run.instrument_symbol,
+                    account_id="BACKTEST_ACCOUNT",
+                    instrument_spec=None,
+                    strategy_params=bot_version.strategy_params,
+                    indicator_configs=bot_version.indicator_configs,
+                    risk_settings=backtest_run.config.risk_json
+                )
+                
+                df_with_indicators = strategy_instance._ensure_indicators(resampled_df)
+                
+                # 4. Format OHLCV data for Lightweight Charts
+                ohlcv_data_lwc = [
+                    {
+                        "time": int(row.Index.timestamp()),
+                        "open": float(row.open),
+                        "high": float(row.high),
+                        "low": float(row.low),
+                        "close": float(row.close),
+                    }
+                    for row in df_with_indicators.itertuples()
+                ]
+
+                # 5. Format Indicator data
+                indicator_columns = strategy_instance.get_indicator_column_names()
+                for col_name in indicator_columns:
+                    base_indicator_name = col_name.split('_')[0]
+                    indicator_cls = get_indicator_class(base_indicator_name)
+                    pane_type = indicator_cls.PANE_TYPE if indicator_cls else 'pane'
+                    
+                    if col_name in df_with_indicators.columns:
+                        series_map = {}
+                        valid_series = df_with_indicators[col_name].dropna()
+                        for timestamp, value in valid_series.items():
+                            time_in_seconds = int(timestamp.timestamp())
+                            series_map[time_in_seconds] = {"time": time_in_seconds, "value": float(value)}
+                        
+                        indicator_entry = {
+                            "data": sorted(series_map.values(), key=lambda k: k['time'])
+                        }
+                        if pane_type == 'pane':
+                            indicator_entry['pane'] = 'new'
+                        
+                        indicator_data_grouped[col_name] = indicator_entry
+
+            else:
+                # Original behavior: Fetch pre-calculated data from the database
+                logger.info(f"Fetching pre-calculated data for {backtest_run_id} with original timeframe: {original_timeframe}")
+                ohlcv_queryset = BacktestOhlcvData.objects.filter(backtest_run=backtest_run).order_by('timestamp')
+                ohlcv_data_lwc_map = {
+                    int(o.timestamp.timestamp()): {
+                        "time": int(o.timestamp.timestamp()),
+                        "open": float(o.open),
+                        "high": float(o.high),
+                        "low": float(o.low),
+                        "close": float(o.close),
+                    }
+                    for o in ohlcv_queryset
+                }
+                ohlcv_data_lwc = sorted(ohlcv_data_lwc_map.values(), key=lambda k: k['time'])
+
+                indicator_queryset = BacktestIndicatorData.objects.filter(backtest_run=backtest_run).order_by('indicator_name', 'timestamp')
+                
+                # Group points by indicator name first
+                temp_indicator_groups = {}
+                for record in indicator_queryset:
+                    if record.indicator_name not in temp_indicator_groups:
+                        temp_indicator_groups[record.indicator_name] = []
+                    point = {"time": int(record.timestamp.timestamp()), "value": float(record.value)}
+                    temp_indicator_groups[record.indicator_name].append(point)
+
+                # Now, structure it with the pane type
+                for name, points in temp_indicator_groups.items():
+                    base_indicator_name = name.split('_')[0]
+                    indicator_cls = get_indicator_class(base_indicator_name)
+                    pane_type = indicator_cls.PANE_TYPE if indicator_cls else 'pane'
+                    
+                    series_map = {p['time']: p for p in points}
+                    indicator_entry = {
+                        "data": sorted(series_map.values(), key=lambda k: k['time'])
+                    }
+                    if pane_type == 'pane':
+                        indicator_entry['pane'] = 'new'
+                    
+                    indicator_data_grouped[name] = indicator_entry
 
 
             # 3. Fetch and serialize Trade Markers from simulated_trades_log
@@ -421,6 +475,7 @@ class BacktestChartDataAPIView(APIView):
                 "trade_markers": trade_markers_serialized,
                 "backtest_run_id": str(backtest_run.id), # Convert UUID to string for JSON serialization
                 "instrument_symbol": backtest_run.instrument_symbol,
+                "original_timeframe": original_timeframe,
                 "data_window_start": backtest_run.data_window_start.isoformat(),
                 "data_window_end": backtest_run.data_window_end.isoformat()
             }

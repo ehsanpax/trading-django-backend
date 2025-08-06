@@ -72,14 +72,15 @@ class BacktestConfigSerializer(serializers.ModelSerializer):
 class BacktestRunSerializer(serializers.ModelSerializer):
     config_label = serializers.CharField(source='config.label', read_only=True, allow_null=True)
     bot_name = serializers.CharField(source='config.bot_version.bot.name', read_only=True)
+    original_timeframe = serializers.CharField(source='config.timeframe', read_only=True)
 
     class Meta:
         model = BacktestRun
         fields = [
-            'id', 'config', 'instrument_symbol', 'config_label', 'bot_name', 'data_window_start', 
+            'id', 'config', 'instrument_symbol', 'config_label', 'bot_name', 'original_timeframe', 'data_window_start', 
             'data_window_end', 'equity_curve', 'stats', 'simulated_trades_log', 'status', 'progress', 'created_at'
         ]
-        read_only_fields = ['id', 'instrument_symbol', 'equity_curve', 'stats', 'simulated_trades_log', 'created_at', 'config_label', 'bot_name', 'progress']
+        read_only_fields = ['id', 'instrument_symbol', 'equity_curve', 'stats', 'simulated_trades_log', 'created_at', 'config_label', 'bot_name', 'progress', 'original_timeframe']
 
 class LiveRunSerializer(serializers.ModelSerializer):
     bot_name = serializers.CharField(source='bot_version.bot.name', read_only=True)
