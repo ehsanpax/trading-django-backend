@@ -12,6 +12,7 @@ import logging
 import pandas as pd # Added for pd.Timestamp
 
 from .utils import data_fetcher, data_processor # Import actual utilities
+from bots.registry import get_indicator_class
 # from ..analysis import core_analysis # This import might be problematic due to relative path, direct import of modules is better
 import importlib
 
@@ -23,6 +24,7 @@ ANALYSIS_MODULE_MAPPING = {
     'TREND_CONTINUATION': 'trend_continuation',
     'VWAP_CONDITIONAL': 'vwap_conditional',
     'ATR_SCENARIO': 'atr_scenario',
+    'ATR_SQUEEZE_BREAKOUT': 'atr_squeeze_breakout',
 }
 
 
@@ -217,6 +219,72 @@ def update_daily_history_task():
 
 
 @shared_task
+def calculate_indicators_dynamically(df: pd.DataFrame, indicator_configs: list) -> pd.DataFrame:
+    """
+    Calculates indicators on a DataFrame based on a list of configurations.
+    """
+    if not indicator_configs:
+        return df
+
+    df_with_indicators = df.copy()
+    for config in indicator_configs:
+        indicator_name = config.get('name')
+        params = config.get('params', {})
+        output_name = config.get('output_name')
+
+        if not indicator_name:
+            logger.warning("Skipping indicator config because 'name' is missing.")
+            continue
+
+        IndicatorClass = get_indicator_class(indicator_name)
+        if not IndicatorClass:
+            logger.error(f"Indicator '{indicator_name}' not found in registry.")
+            continue
+
+        indicator_instance = IndicatorClass()
+
+        # --- Start of new logic for type conversion ---
+        typed_params = {}
+        for param_def in indicator_instance.PARAMETERS:
+            param_name = param_def.name
+            if param_name in params:
+                value = params[param_name]
+                param_type = param_def.parameter_type
+                try:
+                    if param_type == 'int':
+                        typed_params[param_name] = int(value)
+                    elif param_type == 'float':
+                        typed_params[param_name] = float(value)
+                    else:
+                        typed_params[param_name] = value # Keep as string for 'enum', etc.
+                except (ValueError, TypeError):
+                    logger.warning(f"Could not convert param '{param_name}' with value '{value}' to type '{param_type}'. Using default.")
+                    typed_params[param_name] = param_def.default_value
+            else:
+                typed_params[param_name] = param_def.default_value
+        # --- End of new logic ---
+
+        # Store original columns to identify the new one
+        original_columns = set(df_with_indicators.columns)
+        
+        df_with_indicators = indicator_instance.calculate(df_with_indicators, **typed_params)
+        
+        # Identify the newly added column
+        new_columns = set(df_with_indicators.columns) - original_columns
+        if len(new_columns) == 1:
+            new_column_name = new_columns.pop()
+            if output_name and new_column_name != output_name:
+                df_with_indicators.rename(columns={new_column_name: output_name}, inplace=True)
+                logger.info(f"Calculated {indicator_name} and renamed column to {output_name}")
+        elif len(new_columns) > 1:
+            logger.warning(f"Indicator {indicator_name} added multiple columns. Renaming with output_name is not supported in this case.")
+        elif len(new_columns) == 0:
+            logger.warning(f"Indicator {indicator_name} did not add any new columns.")
+
+    return df_with_indicators
+
+
+@shared_task
 def run_analysis_job_task(job_id_str):
     job_id = uuid.UUID(job_id_str) # Convert string back to UUID
     logger.info(f"Task run_analysis_job_task started for job {job_id}")
@@ -250,7 +318,11 @@ def run_analysis_job_task(job_id_str):
 
         m1_df = data_processor.load_m1_data_from_parquet(job.instrument.symbol, start_ts, end_ts)
         if m1_df.empty:
-            raise ValueError(f"No M1 data loaded for {job.instrument.symbol} between {job.start_date} and {job.end_date}.")
+            logger.warning(f"No M1 data found for {job.instrument.symbol} between {job.start_date} and {job.end_date}. Triggering data fetch.")
+            job.status = 'FETCHING_DATA'
+            job.save()
+            fetch_missing_instrument_data_task.delay(job.instrument.symbol, str(job.job_id))
+            return
 
         # 2. Resample data to target timeframe
         resampled_df = data_processor.resample_data(m1_df, job.target_timeframe)
@@ -259,8 +331,8 @@ def run_analysis_job_task(job_id_str):
 
         job.status = 'CALCULATING_INDICATORS'
         job.save()
-        # 3. Calculate indicators (currently a placeholder)
-        df_with_indicators = data_processor.calculate_all_indicators(resampled_df)
+        # 3. Calculate indicators dynamically
+        df_with_indicators = calculate_indicators_dynamically(resampled_df, job.indicator_configs)
 
         job.status = 'RUNNING_ANALYSIS'
         job.save()
@@ -280,9 +352,8 @@ def run_analysis_job_task(job_id_str):
         if not hasattr(analysis_module, 'run_analysis'):
             raise AttributeError(f"Analysis module {analysis_module_name} does not have a 'run_analysis' function.")
 
-        # Prepare parameters for the analysis function (if any are stored in the job or are standard)
-        # For now, passing empty dict for params. This can be extended.
-        analysis_params = {} 
+        # Prepare parameters for the analysis function
+        analysis_params = job.analysis_params
         
         logger.info(f"Calling {analysis_module_name}.run_analysis for job {job_id}")
         analysis_result_data = analysis_module.run_analysis(df_with_indicators, **analysis_params)
