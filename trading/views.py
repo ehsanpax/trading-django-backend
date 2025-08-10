@@ -4,7 +4,7 @@ from rest_framework import status
 from django.shortcuts import get_object_or_404
 from accounts.models import Account
 from .services import calculate_equity_curve
-from .serializers import EquityDataPointSerializer
+from .equity_serializers import EquityDataPointSerializer
 from rest_framework.permissions import IsAuthenticated
 from datetime import datetime, timedelta
 

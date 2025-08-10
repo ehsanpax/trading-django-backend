@@ -199,9 +199,17 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
             # Process these new positions to check for filled pending orders
             await PositionUpdateListener.process_new_positions(account, new_positions_data)
 
-            # After processing, refresh the trade UUID map to include the new trades
-            logger.info("Refreshing trade UUID map from DB after processing new trades.")
-            await self._populate_trade_uuid_map()
+        # After processing, refresh the trade UUID map to include the new trades
+        logger.info("Refreshing trade UUID map from DB after processing new trades.")
+        await self._populate_trade_uuid_map()
+
+        # --- Update drawdown and run-up for each open trade ---
+        for pos in self.open_positions:
+            trade_id = self.ticket_to_uuid_map.get(str(pos.get('ticket')))
+            if trade_id:
+                await sync_to_async(PositionUpdateListener.on_position_update)(
+                    trade_id, pos.get('profit', 0)
+                )
 
     async def send_combined_update(self, pending_orders: list = []):
         """Combines the latest account info, positions, and pending orders and sends to the client."""

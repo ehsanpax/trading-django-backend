@@ -78,6 +78,7 @@ INSTALLED_APPS = [
     "charts",
     "fundamental",
     "monitoring",
+    "user",
 ]
 
 

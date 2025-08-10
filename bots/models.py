@@ -95,6 +95,8 @@ class BacktestRun(models.Model):
     # status (e.g., pending, running, completed, failed) could be useful
     status = models.CharField(max_length=50, default="pending")
     progress = models.IntegerField(default=0, help_text="Backtest progress percentage")
+    runtime_fingerprint = models.JSONField(null=True, blank=True, help_text="Versions of code and libraries used for this run.")
+    random_seed = models.PositiveIntegerField(null=True, blank=True, help_text="Seed for any random operations to ensure reproducibility.")
 
     class Meta:
         ordering = ['-created_at']

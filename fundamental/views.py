@@ -9,6 +9,9 @@ from rest_framework.authentication import TokenAuthentication
 from rest_framework.generics import ListAPIView
 from .serializers import EconomicCalendarSerializer
 from django.utils.dateparse import parse_date
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class EconomicCalendarAPIView(APIView):
@@ -41,7 +44,7 @@ class EconomicCalendarAPIView(APIView):
                 EconomicCalendar.objects.update_or_create(
                     event=event,
                     event_time=event_time,
-                    currency_code=currency_obj,
+                    currency=currency_obj,
                     defaults={
                         "impact": item.get("impact"),
                         "actual": item.get("actual"),
@@ -49,16 +52,10 @@ class EconomicCalendarAPIView(APIView):
                         "forecast": item.get("forecast"),
                     },
                 )
-            except KeyError as e:
-                return Response(
-                    {"detail": f"Missing field: {str(e)}"},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            except ValueError as e:
-                return Response(
-                    {"detail": f"Date parsing error: {str(e)}"},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+            except Exception as e:
+                logger.error(f"Missing key in item: {e}")
+                continue
+
 
         return Response(
             {"message": "Data processed successfully."}, status=status.HTTP_200_OK

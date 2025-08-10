@@ -6,6 +6,9 @@ import pandas as pd
 import json
 from django.views.decorators.http import require_POST, require_GET
 from django.views.decorators.csrf import csrf_exempt
+from accounts.models import Account
+from django.db.models import Q
+import uuid
 
 @require_GET
 def get_historical_candles(request):
@@ -15,6 +18,13 @@ def get_historical_candles(request):
     count = request.GET.get('count')
     start_time_str = request.GET.get('start_time')
     end_time_str = request.GET.get('end_time')
+    try:
+        account_id = uuid.UUID(account_id, version=4)
+        account = Account.objects.filter(id=account_id).first()
+    except Exception as e:
+        account = Account.objects.filter(id=int(account_id)).first()
+    
+    account_id = account.id
 
     if not all([account_id, symbol, resolution]):
         return JsonResponse({"error": "Missing required parameters: account_id, symbol, resolution"}, status=400)

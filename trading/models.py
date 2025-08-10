@@ -66,6 +66,20 @@ class Trade(models.Model):
         null=True, blank=True,
         help_text="Snapshot of precomputed indicators at entry"
     )
+    max_runup = models.DecimalField(
+        max_digits=15,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Maximum profit reached by the trade"
+    )
+    max_drawdown = models.DecimalField(
+        max_digits=15,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Maximum loss experienced by the trade"
+    )
 
     def __str__(self):
         return f"Trade {self.id} on {self.instrument}"
@@ -138,6 +152,12 @@ class TradePerformance(models.Model):
     win_rate = models.DecimalField(max_digits=5, decimal_places=2, default=0.00)
     average_rr_ratio = models.DecimalField(max_digits=5, decimal_places=2, default=0.00)
     max_drawdown = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
+    max_account_drawdown = models.DecimalField(
+        max_digits=15,
+        decimal_places=2,
+        default=0.00,
+        help_text="Maximum account drawdown percentage or value"
+    )
     profit_factor = models.DecimalField(max_digits=5, decimal_places=2, default=0.00)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -354,8 +374,8 @@ class InstrumentSpecification(models.Model):
     # swap_long = models.DecimalField(max_digits=10, decimal_places=5, null=True, blank=True)
     # swap_short = models.DecimalField(max_digits=10, decimal_places=5, null=True, blank=True)
 
-    created_at = models.DateTimeField(auto_now_add=True)
-    last_updated = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True, null=True)
+    last_updated = models.DateTimeField(auto_now=True, null=True)
 
     class Meta:
         verbose_name = "Instrument Specification"

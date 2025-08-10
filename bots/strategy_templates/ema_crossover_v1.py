@@ -132,7 +132,11 @@ class EMACrossoverV1(BaseStrategy):
             self.price_digits = 3
 
         logger.info(f"EMA Crossover Strategy (class {self.NAME}) initialized for {self.instrument_symbol}. Params: {self.strategy_params}")
-        logger.info(f"Instrument Spec derived: tick_size={self.tick_size}, contract_size={self.contract_size}, digits={self.price_digits}")
+        logger.info(f"Instrument Spec derived: tick_size={self.tick_size}, tick_value={self.tick_value}, contract_size={self.contract_size}, digits={self.price_digits}")
+
+        # Sanity check for non-JPY pairs with unusual tick sizes
+        if "JPY" not in (self.instrument_symbol or "").upper() and self.tick_size < 0.0001:
+            logger.warning(f"Unusually small tick_size ({self.tick_size}) for non-JPY pair {self.instrument_symbol}. This may cause issues with lot size calculation.")
 
     def _get_default_param(self, param_name: str) -> Any:
         for param_def in self.PARAMETERS:
@@ -168,6 +172,7 @@ class EMACrossoverV1(BaseStrategy):
 
     def _calculate_lot_size(self, account_equity: float, sl_pips: float) -> Optional[float]:
         if account_equity <= 0 or self.risk_per_trade_percent <= 0 or sl_pips <= 0:
+            logger.warning(f"[{self.instrument_symbol}] Lot size calculation skipped: Invalid input. account_equity={account_equity}, risk_per_trade_percent={self.risk_per_trade_percent}, sl_pips={sl_pips}")
             return None
         
         risk_amount_per_trade = account_equity * self.risk_per_trade_percent
@@ -183,6 +188,13 @@ class EMACrossoverV1(BaseStrategy):
             cash_risk_per_lot = (price_risk_per_unit / self.tick_size) * self.tick_value
             if cash_risk_per_lot > 0:
                 calculated_lot_size = risk_amount_per_trade / cash_risk_per_lot
+                
+                logger.debug(
+                    f"[{self.instrument_symbol}] Lot Size Calculation: "
+                    f"account_equity={account_equity}, risk_per_trade_percent={self.risk_per_trade_percent}, risk_amount_per_trade={risk_amount_per_trade}, "
+                    f"sl_pips={sl_pips}, tick_size={self.tick_size}, tick_value={self.tick_value}, "
+                    f"cash_risk_per_lot={cash_risk_per_lot}, initial_lot_size={calculated_lot_size}"
+                )
                 
                 if self.instrument_spec and self.instrument_spec.volume_step is not None and self.instrument_spec.volume_step > 0:
                     vol_step = float(self.instrument_spec.volume_step)
