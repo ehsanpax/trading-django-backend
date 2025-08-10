@@ -7,7 +7,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.shortcuts import get_object_or_404
 from django.db.models import Q
-
+import uuid
 
 class TradeJournalViewSet(viewsets.ModelViewSet):
     """
@@ -24,11 +24,14 @@ class TradeJournalViewSet(viewsets.ModelViewSet):
         user = self.request.user
         # Base queryset for user's journals, ensuring through trade -> account -> user
         queryset = TradeJournal.objects.filter(trade__account__user=user)
+
         if account_id:
-            # Filter by specific account if provided
-            queryset = queryset.filter(
-                Q(trade__account__id=account_id) | Q(trade__account__simple_id=True)
-            )
+            try:
+                account_id = uuid.UUID(account_id, version=4)
+                queryset = queryset.filter(trade__account__id=account_id, trade__account__user=self.request.user)
+            except Exception:
+                queryset = queryset.filter(trade__account__name__iexact=str(account_id), trade__account__user=self.request.user)
+
 
         # Allow filtering by a specific trade_id passed as a query parameter
         trade_id = self.request.query_params.get("trade", None)

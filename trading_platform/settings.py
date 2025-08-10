@@ -79,6 +79,8 @@ INSTALLED_APPS = [
     "fundamental",
     "monitoring",
     "user",
+    "core",
+    "task_logs",
 ]
 
 
@@ -212,6 +214,10 @@ LOGGING = {
             "format": "[%(asctime)s] %(levelname)s %(name)s: %(message)s",
             "datefmt": "%Y-%m-%d %H:%M:%S",
         },
+        "task_formatter": {
+            "format": "[%(asctime)s] [%(levelname)s] [%(name)s] [%(process)d] %(message)s",
+            "datefmt": "%Y-%m-%d %H:%M:%S",
+        },
     },
     "handlers": {
         "console": {
@@ -223,6 +229,11 @@ LOGGING = {
             "filename": LOG_DIR / "application.log",
             "formatter": "standard",
         },
+        "db_log": {
+            "level": "INFO",
+            "class": "task_logs.handlers.DatabaseLogHandler",
+            "formatter": "task_formatter",
+        },
     },
     "loggers": {
         "": {  # root logger
@@ -231,6 +242,11 @@ LOGGING = {
         },
         "django": {
             "handlers": ["console", "file"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "bots": {
+            "handlers": ["console", "file", "db_log"],
             "level": "INFO",
             "propagate": False,
         },

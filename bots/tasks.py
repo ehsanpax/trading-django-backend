@@ -9,6 +9,7 @@ from django.db import transaction
 #from asgiref.sync import async_to_sync
 #from channels.layers import get_channel_layer
 import time
+import numpy as np
 
 from .models import LiveRun, BacktestRun, BotVersion, BacktestConfig, BacktestOhlcvData, BacktestIndicatorData
 from accounts.models import Account
@@ -17,8 +18,13 @@ from trading.models import InstrumentSpecification
 
 # Data processing utilities
 from analysis.utils.data_processor import load_footprint_data_from_parquet, load_m1_data_from_parquet, resample_data
+from analysis.metrics import calculate_portfolio_stats
 import pandas as pd
 from datetime import timedelta
+
+# New engine imports
+from .engine import BacktestEngine
+from .adapters import LegacyStrategyAdapter
 
 # It's good practice to get a logger instance per module
 logger = logging.getLogger(__name__)
@@ -41,8 +47,6 @@ def _bulk_insert_in_batches(model, objects_to_create, batch_size=500, logger=log
             logger.debug(f"Saved batch {i // batch_size + 1}/{(total_objects + batch_size - 1) // batch_size} for {model.__name__}.")
         except Exception as e:
             logger.error(f"Error saving batch for {model.__name__} (batch {i // batch_size + 1}): {e}", exc_info=True)
-            # Depending on criticality, you might re-raise or handle differently.
-            # For now, we log and continue, but the backtest might have incomplete data.
             raise # Re-raise to ensure the task fails if a batch fails.
 
     logger.info(f"Finished saving all {total_objects} objects for {model.__name__}.")
@@ -127,11 +131,16 @@ def live_loop(self, live_run_id, strategy_name, strategy_params, indicator_confi
 
 
 @shared_task(bind=True, max_retries=3)
-def run_backtest(self, backtest_run_id, strategy_name, strategy_params, indicator_configs, instrument_symbol, timeframe, data_window_start, data_window_end, risk_settings, slippage_ms, slippage_r):
+def run_backtest(self, backtest_run_id, strategy_name, strategy_params, indicator_configs, instrument_symbol, timeframe, data_window_start, data_window_end, risk_settings, random_seed=None):
     # Import StrategyManager locally to break circular dependency
     from bots.services import StrategyManager
 
+    if random_seed is not None:
+        np.random.seed(random_seed)
+        logger.info(f"BacktestRun {backtest_run_id}: Random seed set to {random_seed}")
+
     logger.info(f"run_backtest task started for BacktestRun ID: {backtest_run_id}")
+    ohlcv_df = None  # Initialize ohlcv_df to None
     try:
         backtest_run = BacktestRun.objects.select_related(
             'config__bot_version__bot__account'
@@ -145,35 +154,16 @@ def run_backtest(self, backtest_run_id, strategy_name, strategy_params, indicato
         bot = bot_version.bot
         
         if not instrument_symbol:
-            logger.error(f"BacktestRun {backtest_run.id} is missing an instrument_symbol. Cannot run backtest.")
-            backtest_run.status = 'FAILED'
-            backtest_run.stats = {'error': "BacktestRun instrument_symbol is not set."}
-            backtest_run.save(update_fields=['status', 'stats'])
-            return
+            raise ValueError("BacktestRun instrument_symbol is not set.")
 
-        instrument_spec_instance = None # Renamed to avoid conflict with model name
+        instrument_spec_instance = None
         try:
             instrument_spec_instance = InstrumentSpecification.objects.get(symbol=instrument_symbol)
             logger.info(f"Found InstrumentSpecification for {instrument_symbol}")
         except InstrumentSpecification.DoesNotExist:
-            logger.warning(f"InstrumentSpecification not found for {instrument_symbol}. Using defaults. Lot size/P&L may be inaccurate.")
+            logger.warning(f"InstrumentSpecification not found for {instrument_symbol}. Using defaults.")
 
-        # Instantiate the strategy using StrategyManager
-        strategy_instance = StrategyManager.instantiate_strategy(
-            strategy_name=strategy_name,
-            instrument_symbol=instrument_symbol,
-            account_id="BACKTEST_ACCOUNT", # Placeholder for backtesting
-            instrument_spec=instrument_spec_instance,
-            strategy_params=strategy_params,
-            indicator_configs=indicator_configs,
-            risk_settings=risk_settings
-        )
-        logger.info(f"Successfully loaded strategy: {strategy_name} for symbol {instrument_symbol}")
-        
-        logger.info(f"BacktestRun {backtest_run_id}: Retrieving M1 OHLCV data for {instrument_symbol} from "
-                    f"{data_window_start} to {data_window_end}.")
-        
-        # Load raw M1 data
+        # Load and prepare data first
         raw_m1_ohlcv_df = load_m1_data_from_parquet(
             instrument_symbol=instrument_symbol,
             start_date=data_window_start,
@@ -181,312 +171,108 @@ def run_backtest(self, backtest_run_id, strategy_name, strategy_params, indicato
         )
 
         if raw_m1_ohlcv_df.empty:
-            logger.warning(f"No M1 OHLCV data loaded for {instrument_symbol} for backtest {backtest_run_id}.")
-            backtest_run.status = 'FAILED'
-            backtest_run.stats = {'error': "No historical M1 OHLCV data for the period/symbol."}
-            backtest_run.save(update_fields=['status', 'stats'])
-            return
+            raise ValueError("No historical M1 OHLCV data for the period/symbol.")
 
-        logger.info(f"Loaded {len(raw_m1_ohlcv_df)} raw M1 OHLCV bars.")
-
-        # Resample data to the desired timeframe if not M1
-        target_timeframe = timeframe
-        if target_timeframe != 'M1':
-            logger.info(f"Resampling M1 data to {target_timeframe} for backtest {backtest_run_id}.")
-            ohlcv_df = resample_data(raw_m1_ohlcv_df, target_timeframe)
-            if ohlcv_df.empty:
-                logger.warning(f"Resampling to {target_timeframe} resulted in empty DataFrame for backtest {backtest_run_id}.")
-                backtest_run.status = 'FAILED'
-                backtest_run.stats = {'error': f"Resampling to {target_timeframe} resulted in no data."}
-                backtest_run.save(update_fields=['status', 'stats'])
-                return
-            logger.info(f"Resampled to {len(ohlcv_df)} {target_timeframe} bars.")
+        if timeframe != 'M1':
+            ohlcv_df = resample_data(raw_m1_ohlcv_df, timeframe)
         else:
             ohlcv_df = raw_m1_ohlcv_df
-            logger.info(f"Using original M1 data for backtest {backtest_run_id}.")
-
-        # --- Save OHLCV Data (now using the potentially resampled ohlcv_df) ---
-        try:
-            logger.info(f"BacktestRun {backtest_run_id}: Preparing to save OHLCV data...")
-            ohlcv_data_to_save = [
-                BacktestOhlcvData(
-                    backtest_run=backtest_run,
-                    timestamp=row.Index, # row.Index is the timestamp
-                    open=row.open,
-                    high=row.high,
-                    low=row.low,
-                    close=row.close,
-                    volume=row.volume if 'volume' in row else None
-                )
-                for row in ohlcv_df.itertuples() # itertuples is generally faster
-            ]
-            _bulk_insert_in_batches(BacktestOhlcvData, ohlcv_data_to_save, batch_size=500, logger=logger)
-            #gc.collect() # Explicit garbage collection after saving OHLCV data
-        except Exception as e_ohlcv:
-            logger.error(f"BacktestRun {backtest_run_id}: Error saving OHLCV data: {e_ohlcv}", exc_info=True)
-            # This is a critical error for charting, so re-raise to fail the backtest task.
-            raise 
-
-        min_bars_needed = strategy_instance.get_min_bars_needed(buffer_bars=10) # Use strategy's own calculation
-
-        if len(ohlcv_df) < min_bars_needed:
-            logger.warning(f"Not enough {target_timeframe} data ({len(ohlcv_df)}) for lookback ({min_bars_needed}).")
-            backtest_run.status = 'FAILED'
-            backtest_run.stats = {'error': f"Not enough historical {target_timeframe} data for strategy lookback."}
-            backtest_run.save(update_fields=['status', 'stats'])
-            return
-
-        simulated_equity_curve = []
-        simulated_trades = [] # Stores closed trade details
-        open_sim_positions = [] # Stores dicts of currently open positions
-
-        current_sim_equity = float(bot.account.balance) if bot.account and bot.account.balance is not None else 100000.0
-        initial_equity = current_sim_equity
         
-        # --- Prepare DataFrame with all indicators for the entire period ---
-        # The strategy's _ensure_indicators method typically adds indicator columns to a df
-        # It's often a protected method, but we call it here for efficiency to avoid recalculating in the loop.
-        # Ensure the strategy's _ensure_indicators handles copying internally or pass a copy.
-        # BoxBreakoutV1Strategy._ensure_indicators creates its own copy.
-        df_with_all_indicators = ohlcv_df # Default if strategy doesn't have _ensure_indicators
-        if hasattr(strategy_instance, '_ensure_indicators') and callable(strategy_instance._ensure_indicators):
-            try:
-                logger.info(f"BacktestRun {backtest_run_id}: Calling strategy's _ensure_indicators method for all data.")
-                df_with_all_indicators = strategy_instance._ensure_indicators(ohlcv_df) # Pass the potentially resampled df
-                logger.info(f"BacktestRun {backtest_run_id}: Strategy's _ensure_indicators method completed.")
-                #gc.collect() # Explicit garbage collection after indicator calculation
-            except Exception as e_ensure_ind:
-                logger.error(f"BacktestRun {backtest_run_id}: Error calling _ensure_indicators on full dataset: {e_ensure_ind}", exc_info=True)
-                # Fallback to original ohlcv_df, indicators might be calculated per tick then
-                df_with_all_indicators = ohlcv_df
-        else:
-            logger.warning(f"BacktestRun {backtest_run_id}: Strategy instance does not have an _ensure_indicators method. Indicators might be calculated per tick.")
+        if ohlcv_df.empty:
+            raise ValueError(f"Resampling to {timeframe} resulted in no data.")
 
+        logger.info(f"Loaded and prepared {len(ohlcv_df)} bars of {timeframe} data.")
 
-        # Use strategy's derived tick_size and tick_value for P&L
-        tick_size = Decimal(str(strategy_instance.tick_size))
-        tick_value = Decimal(str(strategy_instance.tick_value)) # Value of 1 tick for 1 lot
+        # Instantiate the legacy strategy
+        legacy_strategy_instance = StrategyManager.instantiate_strategy(
+            strategy_name=strategy_name,
+            instrument_symbol=instrument_symbol,
+            account_id="BACKTEST_ACCOUNT",
+            instrument_spec=instrument_spec_instance,
+            strategy_params=strategy_params,
+            indicator_configs=indicator_configs,
+            risk_settings=risk_settings
+        )
+        logger.info(f"Successfully loaded legacy strategy: {strategy_name}")
 
-        if ohlcv_df.index.is_monotonic_increasing:
-             first_processing_timestamp = ohlcv_df.index[min_bars_needed -1]
-             simulated_equity_curve.append({'timestamp': first_processing_timestamp.isoformat(), 'equity': current_sim_equity})
-        else:
-            logger.warning("OHLCV DataFrame index is not monotonically increasing. Equity curve might be incorrect.")
-            # Fallback or error handling for non-monotonic index
-            simulated_equity_curve.append({'timestamp': "N/A", 'equity': current_sim_equity})
+        # Calculate indicators and add them to the DataFrame
+        ohlcv_df = legacy_strategy_instance._calculate_indicators(ohlcv_df)
+        logger.info("Calculated and added indicators to the DataFrame.")
 
-
-        logger.info(f"BacktestRun {backtest_run_id}: Starting simulation loop from index {min_bars_needed}.")
+        # The engine now handles equity, trades, etc.
+        initial_equity = float(bot.account.balance) if bot.account and bot.account.balance is not None else 100000.0
         
-        total_bars = len(df_with_all_indicators)
-        processed_bars = 0
-        last_progress_update = time.time()
+        # --- Initialize the new Backtest Engine (NOW that we have data) ---
+        logger.info(f"BacktestRun {backtest_run_id}: Initializing the new BacktestEngine.")
+        engine = BacktestEngine(
+            strategy=None, # Will be set after adapter is created
+            data=ohlcv_df,
+            execution_config=config.execution_config,
+            tick_size=Decimal(str(instrument_spec_instance.tick_size)),
+            tick_value=Decimal(str(instrument_spec_instance.tick_value)),
+            initial_equity=initial_equity,
+            risk_settings=risk_settings,
+            filter_settings=strategy_params.get("filters", {}) # Assuming filters are passed in strategy_params
+        )
 
-        for i in range(min_bars_needed, total_bars): # Iterate using df_with_all_indicators
-            # Slice from df_with_all_indicators to ensure indicators are available if pre-calculated
-            current_window_df = df_with_all_indicators.iloc[i - min_bars_needed : i+1] 
-            current_bar = current_window_df.iloc[-1] 
-            current_timestamp = current_window_df.index[-1]
+        # Adapt the legacy strategy to the new StrategyInterface, passing the engine instance
+        strategy_adapter = LegacyStrategyAdapter(legacy_strategy=legacy_strategy_instance, engine=engine)
+        engine.strategy = strategy_adapter # Set the strategy on the engine
+        logger.info("Wrapped legacy strategy in adapter and linked with the new engine.")
 
-            processed_bars += 1
-            
-            # --- Progress Update ---
-            current_time = time.time()
-            if current_time - last_progress_update > 2:  # Update every 2 seconds
-                progress = int((processed_bars / (total_bars - min_bars_needed)) * 100)
-                backtest_run.progress = progress
-                backtest_run.save(update_fields=['progress'])
-                
-                """channel_layer = get_channel_layer()
-                async_to_sync(channel_layer.group_send)(
-                    f"backtest_{backtest_run_id}",
-                    {
-                        "type": "backtest_progress",
-                        "progress": progress,
-                    }
-                )"""
-                last_progress_update = current_time
+        # --- Save OHLCV Data ---
+        ohlcv_data_to_save = [
+            BacktestOhlcvData(
+                backtest_run=backtest_run, timestamp=row.Index, open=row.open,
+                high=row.high, low=row.low, close=row.close, volume=row.volume
+            ) for row in ohlcv_df.itertuples()
+        ]
+        _bulk_insert_in_batches(BacktestOhlcvData, ohlcv_data_to_save)
 
-            # --- Check SL/TP for open positions ---
-            positions_to_remove_indices = []
-            for idx, open_pos in enumerate(open_sim_positions):
-                pos_closed = False
-                exit_price = None
-                closure_reason = None
-                
-                open_pos_sl = Decimal(str(open_pos['stop_loss']))
-                open_pos_tp = Decimal(str(open_pos['take_profit']))
-                current_low = Decimal(str(current_bar['low']))
-                current_high = Decimal(str(current_bar['high']))
+        engine.run()
+        logger.info(f"BacktestRun {backtest_run_id}: BacktestEngine has finished its run.")
 
-                if open_pos['direction'] == 'BUY':
-                    if current_low <= open_pos_sl: 
-                        pos_closed = True; exit_price = open_pos_sl; closure_reason = 'SL_HIT'
-                    elif current_high >= open_pos_tp: 
-                        pos_closed = True; exit_price = open_pos_tp; closure_reason = 'TP_HIT'
-                elif open_pos['direction'] == 'SELL':
-                    if current_high >= open_pos_sl: 
-                        pos_closed = True; exit_price = open_pos_sl; closure_reason = 'SL_HIT'
-                    elif current_low <= open_pos_tp: 
-                        pos_closed = True; exit_price = open_pos_tp; closure_reason = 'TP_HIT'
-                
-                if pos_closed:
-                    entry_price = Decimal(str(open_pos['entry_price']))
-                    volume = Decimal(str(open_pos['volume']))
-                    pnl = Decimal('0.0')
-                    if tick_size > 0: # Avoid division by zero if tick_size is invalid
-                        if open_pos['direction'] == 'BUY':
-                            price_diff_ticks = (exit_price - entry_price) / tick_size
-                        else: # SELL
-                            price_diff_ticks = (entry_price - exit_price) / tick_size
-                        pnl = price_diff_ticks * tick_value * volume
-                    
-                    current_sim_equity += float(pnl)
-                    
-                    simulated_trades.append({
-                        **open_pos, 
-                        'exit_price': float(exit_price), 
-                        'exit_timestamp': current_timestamp.isoformat(),
-                        'pnl': float(pnl), 
-                        'status': 'CLOSED',
-                        'closure_reason': closure_reason
-                    })
-                    positions_to_remove_indices.append(idx)
-                    logger.info(f"Sim CLOSE: PosID {open_pos.get('id', 'N/A')} {open_pos['direction']} {open_pos['volume']} {open_pos['symbol']} @{open_pos['entry_price']} by {closure_reason} @{exit_price}. P&L: {pnl:.2f}. Equity: {current_sim_equity:.2f}")
-
-            # Remove closed positions (iterating in reverse to handle indices correctly)
-            for idx in sorted(positions_to_remove_indices, reverse=True):
-                del open_sim_positions[idx]
-
-            # --- Call strategy for new signals ---
-            actions = strategy_instance.run_tick(df_current_window=current_window_df.copy(), account_equity=current_sim_equity)
-            
-            for action in actions:
-                if action['action'] == 'OPEN_TRADE':
-                    trade_details = action['details']
-                    # TODO: Apply slippage from config to trade_details['price']
-                    
-                    new_pos_id = uuid.uuid4()
-                    new_open_position = {
-                        'id': str(new_pos_id), # Convert UUID to string
-                        'entry_price': float(trade_details['price']),
-                        'volume': float(trade_details['volume']),
-                        'direction': trade_details['direction'].upper(),
-                        'stop_loss': float(trade_details['stop_loss']),
-                        'take_profit': float(trade_details['take_profit']),
-                        'entry_timestamp': current_timestamp.isoformat(),
-                        'symbol': trade_details['symbol'],
-                        'comment': trade_details.get('comment', '')
-                    }
-                    open_sim_positions.append(new_open_position)
-                    logger.info(f"Sim OPEN: PosID {new_pos_id} {new_open_position['direction']} {new_open_position['volume']} {new_open_position['symbol']} @{new_open_position['entry_price']} SL:{new_open_position['stop_loss']} TP:{new_open_position['take_profit']}")
-
-            simulated_equity_curve.append({'timestamp': current_timestamp.isoformat(), 'equity': round(current_sim_equity, 2)})
-            #gc.collect() # Explicit garbage collection after each loop iteration
-        # Close any remaining open positions at the end of the backtest period (e.g., with last bar's close)
-        if open_sim_positions:
-            logger.info(f"End of backtest: Closing {len(open_sim_positions)} remaining open positions.")
-            last_bar_close = Decimal(str(ohlcv_df.iloc[-1]['close']))
-            for open_pos in list(open_sim_positions): # Iterate over a copy
-                entry_price = Decimal(str(open_pos['entry_price']))
-                volume = Decimal(str(open_pos['volume']))
-                pnl = Decimal('0.0')
-                if tick_size > 0:
-                    if open_pos['direction'] == 'BUY':
-                        price_diff_ticks = (last_bar_close - entry_price) / tick_size
-                    else: # SELL
-                        price_diff_ticks = (entry_price - last_bar_close) / tick_size
-                    pnl = price_diff_ticks * tick_value * volume
-                
-                current_sim_equity += float(pnl)
-                simulated_trades.append({
-                    **open_pos,
-                    'exit_price': float(last_bar_close),
-                    'exit_timestamp': ohlcv_df.index[-1].isoformat(),
-                    'pnl': float(pnl),
-                    'status': 'CLOSED',
-                    'closure_reason': 'END_OF_BACKTEST'
-                })
-                open_sim_positions.remove(open_pos)
-                logger.info(f"Sim EOB CLOSE: PosID {open_pos.get('id', 'N/A')} P&L: {pnl:.2f}. Equity: {current_sim_equity:.2f}")
-            # Add final equity point after closing all EOB positions
-            simulated_equity_curve.append({'timestamp': ohlcv_df.index[-1].isoformat(), 'equity': round(current_sim_equity, 2)})
-
-
-        logger.info(f"BacktestRun {backtest_run_id}: Simulation loop finished. Processed {len(ohlcv_df) - min_bars_needed +1} bars.")
-
-        final_stats = {
+        # --- Post-processing and saving results ---
+        simulated_trades = engine.trades
+        simulated_equity_curve = engine.equity_curve
+        current_sim_equity = engine.equity
+        
+        base_stats = {
             "total_trades": len(simulated_trades),
-            "initial_equity": initial_equity,
-            "final_equity": round(current_sim_equity, 2),
-            "net_pnl": round(current_sim_equity - initial_equity, 2),
-            "winning_trades": len([t for t in simulated_trades if t.get('pnl', 0) > 0]),
-            "losing_trades": len([t for t in simulated_trades if t.get('pnl', 0) < 0]),
+            "initial_equity": engine.initial_equity,
+            "final_equity": current_sim_equity,
+            "net_pnl": current_sim_equity - engine.initial_equity,
         }
-        if simulated_trades:
-            final_stats["first_trade_entry_time"] = simulated_trades[0].get('entry_timestamp')
-            final_stats["last_trade_exit_time"] = simulated_trades[-1].get('exit_timestamp')
         
+        advanced_stats = calculate_portfolio_stats(simulated_equity_curve, simulated_trades)
+        final_stats = {**base_stats, **advanced_stats}
+
         backtest_run.equity_curve = simulated_equity_curve
         backtest_run.stats = final_stats
-        backtest_run.simulated_trades_log = simulated_trades # Save the log of simulated trades
+        backtest_run.simulated_trades_log = simulated_trades
         
-        # --- Save Indicator Data ---
-        try:
-            logger.info(f"BacktestRun {backtest_run_id}: Preparing to save Indicator data...")
+        # --- Save Indicator Data (if available on legacy instance) ---
+        if hasattr(legacy_strategy_instance, 'get_indicator_column_names'):
+            indicator_columns = legacy_strategy_instance.get_indicator_column_names()
+            df_with_indicators = getattr(legacy_strategy_instance, 'df', ohlcv_df)
             indicator_data_to_save = []
-            
-            # Identify indicator columns by asking the strategy instance directly.
-            indicator_columns = strategy_instance.get_indicator_column_names()
-            logger.info(f"BacktestRun {backtest_run_id}: Strategy provided indicator columns: {indicator_columns}")
-
-            logger.info(f"BacktestRun {backtest_run_id}: Final list of indicator columns for saving: {indicator_columns}")
-
-            # Ensure the DataFrame index is unique before processing for indicators
-            if not df_with_all_indicators.index.is_unique:
-                logger.warning(f"BacktestRun {backtest_run_id}: Duplicate timestamps found in df_with_all_indicators. Dropping duplicates for indicator saving.")
-                df_with_all_indicators = df_with_all_indicators[~df_with_all_indicators.index.duplicated(keep='first')]
-
-            # Prepare indicator data for bulk_create
             for col_name in indicator_columns:
-                if col_name in df_with_all_indicators.columns:
-                    # Filter out NaN values for the current indicator column
-                    valid_indicator_series = df_with_all_indicators[col_name].dropna()
-                    for timestamp, value in valid_indicator_series.items():
+                if col_name in df_with_indicators.columns:
+                    valid_series = df_with_indicators[col_name].dropna()
+                    for timestamp, value in valid_series.items():
                         indicator_data_to_save.append(
                             BacktestIndicatorData(
-                                backtest_run=backtest_run,
-                                timestamp=timestamp,
-                                indicator_name=col_name,
-                                value=Decimal(str(value)) # Ensure Decimal conversion
+                                backtest_run=backtest_run, timestamp=timestamp,
+                                indicator_name=col_name, value=Decimal(str(value))
                             )
                         )
-            
-            _bulk_insert_in_batches(BacktestIndicatorData, indicator_data_to_save, batch_size=500, logger=logger)
-            #gc.collect() # Explicit garbage collection after saving Indicator data
-        except Exception as e_indicator:
-            logger.error(f"BacktestRun {backtest_run_id}: Error saving Indicator data: {e_indicator}", exc_info=True)
-            # This is a critical error for charting, so re-raise to fail the backtest task.
-            raise 
+            _bulk_insert_in_batches(BacktestIndicatorData, indicator_data_to_save)
 
         backtest_run.status = 'COMPLETED'
         backtest_run.progress = 100
         backtest_run.save(update_fields=['equity_curve', 'stats', 'simulated_trades_log', 'status', 'progress'])
-        logger.info(f"BacktestRun {backtest_run_id} completed. Stats: {final_stats}")
-        
-        #Final progress update
-        """channel_layer = get_channel_layer()
-        async_to_sync(channel_layer.group_send)(
-            f"backtest_{backtest_run_id}",
-            {
-                "type": "backtest_progress",
-                "progress": 100,
-                "status": "COMPLETED"
-            }
-        )"""
+        logger.info(f"BacktestRun {backtest_run_id} completed with new engine. Stats: {final_stats}")
 
-    except BacktestRun.DoesNotExist:
-        logger.error(f"BacktestRun with ID {backtest_run_id} does not exist.")
     except Exception as e:
         logger.error(f"Error in run_backtest for BacktestRun ID {backtest_run_id}: {e}", exc_info=True)
         try:

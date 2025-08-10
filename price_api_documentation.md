@@ -39,9 +39,34 @@ The request body must be a JSON object with the following structure:
 - `count` (integer, optional): The number of candles to retrieve.
 - `start_time` (string, optional): The start time for the data range in ISO 8601 format.
 - `end_time` (string, optional): The end time for the data range in ISO 8601 format.
-- `indicators` (array, optional): A list of indicators to calculate.
+- `indicators` (array, optional): A list of indicator objects to calculate. Each object should have a `name` (string) and a `params` (object) key.
 
 **Note:** You must provide either `count` or both `start_time` and `end_time`.
+
+## Example Request
+
+```json
+{
+  "account_id": "your_account_id",
+  "symbol": "EURUSD",
+  "resolution": "H1",
+  "count": 200,
+  "indicators": [
+    {
+      "name": "EMA",
+      "params": {
+        "length": 50
+      }
+    },
+    {
+      "name": "RSI",
+      "params": {
+        "length": 14
+      }
+    }
+  ]
+}
+```
 
 ## Response Body
 
@@ -65,7 +90,7 @@ The API returns a JSON object containing the OHLCV data and the calculated indic
 
 ## Available Indicators
 
-Below is a list of all available indicators and their parameters.
+The list of available indicators is discovered dynamically at runtime. The following is a non-exhaustive list of common indicators and their parameters.
 
 ### Average True Range (`ATR`)
 
@@ -158,4 +183,3 @@ Below is a list of all available indicators and their parameters.
 | `prev_low_color` | str | Color for the previous day's low line. | `lightcoral` |
 | `prev_low_style` | enum | Line style for the previous day's low. | `dashed` |
 | `prev_low_width` | int | Line width for the previous day's low. | `1` |
-

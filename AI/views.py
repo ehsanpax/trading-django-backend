@@ -14,6 +14,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from trade_journal.models import TradeJournal
 from django.db.models import Q
+import uuid
 
 
 class PromptViewSet(viewsets.ModelViewSet):
@@ -90,9 +91,12 @@ class TradeJournalViewset(ModelViewSet):
         )
         account_id = self.request.query_params.get("account", None)
         if account_id:
-            queryset = queryset.filter(
-                Q(trade__account__id=account_id) | Q(trade__account__simple_id=True)
-            )
+            try:
+                account_id = uuid.UUID(account_id, version=4)
+                queryset = queryset.filter(trade__account__id=account_id, trade__account__user=self.request.user)
+            except Exception:
+                queryset = queryset.filter(trade__account__name__iexact=str(account_id), trade__account__user=self.request.user)
+
         return queryset
 
 

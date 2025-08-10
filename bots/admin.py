@@ -1,5 +1,10 @@
 from django.contrib import admin
-from .models import Bot, BotVersion, BacktestConfig, BacktestRun, LiveRun
+from .models import Bot, BotVersion, BacktestConfig, BacktestRun, LiveRun, ExecutionConfig
+
+@admin.register(ExecutionConfig)
+class ExecutionConfigAdmin(admin.ModelAdmin):
+    list_display = ('name', 'slippage_model', 'slippage_value', 'commission_units', 'commission_per_unit', 'spread_pips')
+    search_fields = ('name',)
 
 @admin.register(Bot)
 class BotAdmin(admin.ModelAdmin):
@@ -17,7 +22,7 @@ class BotVersionAdmin(admin.ModelAdmin):
 
 @admin.register(BacktestConfig)
 class BacktestConfigAdmin(admin.ModelAdmin):
-    list_display = ('label', 'bot_version', 'slippage_ms', 'slippage_r', 'created_at')
+    list_display = ('label', 'bot_version', 'execution_config', 'created_at')
     list_filter = ('bot_version__bot__name',)
     search_fields = ('label', 'bot_version__bot__name')
     readonly_fields = ('id', 'created_at')

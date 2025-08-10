@@ -22,9 +22,10 @@ from .serializers import (
 )
 from .models import BacktestOhlcvData, BacktestIndicatorData
 from . import services
+from .compiler import GraphCompiler
 from accounts.models import Account
 from bots.services import StrategyManager
-from bots.registry import get_indicator_class
+from core.registry import indicator_registry, operator_registry, action_registry
 from analysis.utils.data_processor import load_m1_data_from_parquet, resample_data
 import pandas as pd
 from decimal import Decimal
@@ -85,6 +86,24 @@ class IndicatorMetadataAPIView(APIView):
         except Exception as e:
             logger.error(f"Error fetching indicator metadata: {e}", exc_info=True)
             return Response({"error": "Could not retrieve indicator metadata."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class NodeMetadataAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        nodes = {
+            "indicators": StrategyManager.get_available_indicators_metadata(),
+            "operators": [
+                {"name": name, "params": op.PARAMS_SCHEMA}
+                for name, op in operator_registry.get_all_operators().items()
+            ],
+            "actions": [
+                {"name": name, "params": ac.PARAMS_SCHEMA}
+                for name, ac in action_registry.get_all_actions().items()
+            ],
+        }
+        return Response(nodes, status=status.HTTP_200_OK)
 
 
 class BotViewSet(viewsets.ModelViewSet):
@@ -153,6 +172,45 @@ class BotVersionViewSet(viewsets.ModelViewSet):
                 logger.error(f"Error creating BotVersion: {e}", exc_info=True)
                 return Response({"detail": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['post'], url_path='from-graph')
+    def create_from_graph(self, request, *args, **kwargs):
+        # Simplified serializer for graph-based creation
+        bot_id = request.data.get('bot_id')
+        strategy_graph = request.data.get('strategy_graph')
+        notes = request.data.get('notes')
+
+        if not bot_id or not strategy_graph:
+            return Response({"detail": "bot_id and strategy_graph are required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            bot = get_object_or_404(Bot, id=bot_id)
+            if not (request.user.is_staff or request.user.is_superuser or bot.created_by == request.user):
+                return Response({"detail": "You do not have permission to create a version for this bot."},
+                                status=status.HTTP_403_FORBIDDEN)
+
+            # Validate the graph with the compiler
+            compiler = GraphCompiler(strategy_graph)
+            compiler.validate()
+
+            bot_version = BotVersion.objects.create(
+                bot=bot,
+                strategy_graph=strategy_graph,
+                notes=notes,
+                # Set other fields to default/empty if they don't apply
+                strategy_name="graph_based_strategy",
+                strategy_params={},
+                indicator_configs=[]
+            )
+            response_serializer = BotVersionSerializer(bot_version)
+            return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+        except Bot.DoesNotExist:
+            return Response({"detail": "Bot not found."}, status=status.HTTP_404_NOT_FOUND)
+        except ValueError as ve:
+            return Response({"detail": f"Invalid strategy graph: {ve}"}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            logger.error(f"Error creating BotVersion from graph: {e}", exc_info=True)
+            return Response({"detail": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class BacktestConfigViewSet(viewsets.ModelViewSet):
@@ -239,7 +297,10 @@ class LaunchBacktestAPIView(APIView):
                 )
 
                 # Then, launch the backtest with the new backtest_run_id
-                services.launch_backtest(backtest_run_id=backtest_run.id)
+                services.launch_backtest(
+                    backtest_run_id=backtest_run.id,
+                    random_seed=data.get('random_seed')
+                )
                 
                 response_serializer = BacktestRunSerializer(backtest_run)
                 return Response(response_serializer.data, status=status.HTTP_202_ACCEPTED)
@@ -323,128 +384,40 @@ class BacktestChartDataAPIView(APIView):
         if not (user.is_staff or user.is_superuser or backtest_run.config.bot_version.bot.created_by == user):
             raise PermissionDenied("You do not have permission to access chart data for this backtest run.")
 
-        requested_timeframe = request.query_params.get('timeframe')
-        original_timeframe = backtest_run.config.timeframe
-
         try:
-            ohlcv_data_lwc = []
-            indicator_data_grouped = {}
-
-            # If a new timeframe is requested and it's different from the original, resample on the fly
-            if requested_timeframe and requested_timeframe != original_timeframe:
-                logger.info(f"Resampling on-the-fly for {backtest_run_id} to timeframe: {requested_timeframe}")
-                
-                # 1. Load raw M1 data for the backtest period
-                raw_m1_df = load_m1_data_from_parquet(
-                    instrument_symbol=backtest_run.instrument_symbol,
-                    start_date=backtest_run.data_window_start,
-                    end_date=backtest_run.data_window_end
-                )
-
-                if raw_m1_df.empty:
-                    raise ValueError("No raw M1 data found for the specified period to perform resampling.")
-
-                # 2. Resample to the requested timeframe
-                resampled_df = resample_data(raw_m1_df, requested_timeframe)
-                
-                # 3. Recalculate indicators on the new resampled data
-                bot_version = backtest_run.config.bot_version
-                strategy_instance = StrategyManager.instantiate_strategy(
-                    strategy_name=bot_version.strategy_name,
-                    instrument_symbol=backtest_run.instrument_symbol,
-                    account_id="BACKTEST_ACCOUNT",
-                    instrument_spec=None,
-                    strategy_params=bot_version.strategy_params,
-                    indicator_configs=bot_version.indicator_configs,
-                    risk_settings=backtest_run.config.risk_json
-                )
-                
-                df_with_indicators = strategy_instance._ensure_indicators(resampled_df)
-                
-                # 4. Format OHLCV data for Lightweight Charts
-                ohlcv_data_lwc = [
-                    {
-                        "time": int(row.Index.timestamp()),
-                        "open": float(row.open),
-                        "high": float(row.high),
-                        "low": float(row.low),
-                        "close": float(row.close),
-                    }
-                    for row in df_with_indicators.itertuples()
-                ]
-
-                # 5. Format Indicator data
-                indicator_columns = strategy_instance.get_indicator_column_names()
-                for col_name in indicator_columns:
-                    base_indicator_name = col_name.split('_')[0]
-                    indicator_cls = get_indicator_class(base_indicator_name)
-                    pane_type = indicator_cls.PANE_TYPE if indicator_cls else 'pane'
-                    
-                    if col_name in df_with_indicators.columns:
-                        series_map = {}
-                        valid_series = df_with_indicators[col_name].dropna()
-                        for timestamp, value in valid_series.items():
-                            time_in_seconds = int(timestamp.timestamp())
-                            series_map[time_in_seconds] = {"time": time_in_seconds, "value": float(value)}
-                        
-                        indicator_entry = {
-                            "data": sorted(series_map.values(), key=lambda k: k['time'])
-                        }
-                        if pane_type == 'pane':
-                            indicator_entry['pane'] = 'new'
-                        
-                        indicator_data_grouped[col_name] = indicator_entry
-
-            else:
-                # Original behavior: Fetch pre-calculated data from the database
-                logger.info(f"Fetching pre-calculated data for {backtest_run_id} with original timeframe: {original_timeframe}")
-                ohlcv_queryset = BacktestOhlcvData.objects.filter(backtest_run=backtest_run).order_by('timestamp')
-                ohlcv_data_lwc_map = {
-                    int(o.timestamp.timestamp()): {
-                        "time": int(o.timestamp.timestamp()),
-                        "open": float(o.open),
-                        "high": float(o.high),
-                        "low": float(o.low),
-                        "close": float(o.close),
-                    }
-                    for o in ohlcv_queryset
+            # Fetch OHLCV data from the database
+            ohlcv_queryset = BacktestOhlcvData.objects.filter(backtest_run=backtest_run).order_by('timestamp')
+            ohlcv_data_lwc = [
+                {
+                    "time": int(o.timestamp.timestamp()),
+                    "open": float(o.open),
+                    "high": float(o.high),
+                    "low": float(o.low),
+                    "close": float(o.close),
                 }
-                ohlcv_data_lwc = sorted(ohlcv_data_lwc_map.values(), key=lambda k: k['time'])
+                for o in ohlcv_queryset
+            ]
 
-                indicator_queryset = BacktestIndicatorData.objects.filter(backtest_run=backtest_run).order_by('indicator_name', 'timestamp')
-                
-                # Group points by indicator name first
-                temp_indicator_groups = {}
-                for record in indicator_queryset:
-                    if record.indicator_name not in temp_indicator_groups:
-                        temp_indicator_groups[record.indicator_name] = []
-                    point = {"time": int(record.timestamp.timestamp()), "value": float(record.value)}
-                    temp_indicator_groups[record.indicator_name].append(point)
+            # Fetch Indicator data from the database
+            indicator_queryset = BacktestIndicatorData.objects.filter(backtest_run=backtest_run).order_by('indicator_name', 'timestamp')
+            indicator_data_grouped = {}
+            temp_indicator_groups = {}
+            for record in indicator_queryset:
+                if record.indicator_name not in temp_indicator_groups:
+                    temp_indicator_groups[record.indicator_name] = []
+                point = {"time": int(record.timestamp.timestamp()), "value": float(record.value)}
+                temp_indicator_groups[record.indicator_name].append(point)
 
-                # Now, structure it with the pane type
-                for name, points in temp_indicator_groups.items():
-                    base_indicator_name = name.split('_')[0]
-                    indicator_cls = get_indicator_class(base_indicator_name)
-                    pane_type = indicator_cls.PANE_TYPE if indicator_cls else 'pane'
-                    
-                    series_map = {p['time']: p for p in points}
-                    indicator_entry = {
-                        "data": sorted(series_map.values(), key=lambda k: k['time'])
-                    }
-                    if pane_type == 'pane':
-                        indicator_entry['pane'] = 'new'
-                    
-                    indicator_data_grouped[name] = indicator_entry
+            for name, points in temp_indicator_groups.items():
+                indicator_data_grouped[name] = {
+                    "data": sorted(points, key=lambda k: k['time'])
+                }
 
-
-            # 3. Fetch and serialize Trade Markers from simulated_trades_log
+            # Fetch and serialize Trade Markers from the backtest run's JSON log
             raw_trades_log = backtest_run.simulated_trades_log or []
-
-            # Pre-process markers to ensure timestamps are in seconds and numeric values are floats
             processed_trade_markers = []
             for t in raw_trades_log:
                 try:
-                    # Convert ISO format string to datetime object, handle 'Z' for UTC, then to Unix timestamp in seconds
                     entry_dt = datetime.fromisoformat(t['entry_timestamp'].replace('Z', '+00:00'))
                     entry_time_s = int(entry_dt.timestamp())
 
@@ -458,39 +431,26 @@ class BacktestChartDataAPIView(APIView):
                         "entry_price": float(t['entry_price']),
                         "direction": t['direction'],
                         "exit_timestamp": exit_time_s,
-                        "exit_price": float(t['exit_price']) if t.get('exit_price') is not None else None,
-                        "pnl": float(t['pnl']) if t.get('pnl') is not None else None,
-                        # Add other fields if needed by BacktestTradeMarkerSerializer
+                        "exit_price": float(t.get('exit_price')),
+                        "pnl": float(t.get('pnl')),
                     })
                 except (ValueError, KeyError, TypeError) as e:
                     logger.error(f"Error processing trade marker: {t} - {e}", exc_info=True)
-                    continue # Skip malformed markers
+                    continue
 
             trade_markers_serialized = BacktestTradeMarkerSerializer(processed_trade_markers, many=True).data
 
-            # Prepare data for the main chart_data response
+            # Prepare the final response data
             chart_data = {
-                "ohlcv_data": ohlcv_data_lwc, # Using LWC-compatible data
+                "ohlcv_data": ohlcv_data_lwc,
                 "indicator_data": indicator_data_grouped,
                 "trade_markers": trade_markers_serialized,
-                "backtest_run_id": str(backtest_run.id), # Convert UUID to string for JSON serialization
+                "backtest_run_id": str(backtest_run.id),
                 "instrument_symbol": backtest_run.instrument_symbol,
-                "original_timeframe": original_timeframe,
+                "original_timeframe": backtest_run.config.timeframe,
                 "data_window_start": backtest_run.data_window_start.isoformat(),
                 "data_window_end": backtest_run.data_window_end.isoformat()
             }
-
-            # --- DEBUG EXPORT ---
-            # Use the string representation of the UUID for the filename
-            debug_file_path = Path(settings.BASE_DIR) / 'analysis_data' / f'backtest_chart_data_{str(backtest_run.id)}.json'
-            try:
-                debug_file_path.parent.mkdir(parents=True, exist_ok=True) # Ensure directory exists
-                with open(debug_file_path, 'w') as f:
-                    json.dump(chart_data, f, indent=4)
-                logger.info(f"Debug: Exported chart data to {debug_file_path}")
-            except Exception as e:
-                logger.error(f"Debug: Failed to export chart data to file {debug_file_path}: {e}", exc_info=True)
-            # --- END DEBUG EXPORT ---
 
             return Response(chart_data, status=status.HTTP_200_OK)
 

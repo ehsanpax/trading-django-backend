@@ -169,16 +169,9 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
             await self.send_json({"error": "Timeframe not set. Please subscribe to a timeframe first."})
             return
 
-        # Determine the required history for the indicator
-        indicator_class = self.indicator_service.get_indicator_class(indicator_name)
-        if not indicator_class:
-            await self.send_json({"error": f"Indicator '{indicator_name}' not found."})
-            return
-        
-        required_history = indicator_class().required_history(**params)
-        
-        # Fetch enough data to cover the initial chart load and the indicator's required history.
-        candles_to_fetch = max(required_history + 50, 500)
+        # With the new IndicatorInterface, we don't have a required_history method.
+        # We'll fetch a fixed, generous amount of data and let the indicator compute method handle it.
+        candles_to_fetch = 500
 
         candles = await sync_to_async(self.get_historical_candles)(self.symbol, self.timeframe, candles_to_fetch)
         if "error" in candles:

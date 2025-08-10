@@ -39,19 +39,13 @@ class ExecuteAITradeView(APIView):
         payload = serializer.validated_data
 
         print("Validated Payload ExecuteAITradeView:", payload)
-        uuid_account_id = None
-        try:
-            uuid_account_id = uuid.UUID(payload.get("account_id"), version=4)
-        except (ValueError, TypeError):
-            pass
-        if uuid_account_id:
-            account = Account.objects.filter(
-                id=uuid_account_id, user=request.user
-            ).first()
-        else:
-            account = Account.objects.filter(
-                simple_id=int(payload.get("account_id")), user=request.user
-            ).first()
+        account = None
+        if account_id:
+            try:
+                account_id = uuid.UUID(account_id, version=4)
+                account = Account.objects.filter(id=account_id, user=request.user).first()
+            except Exception:
+                account = Account.objects.filter(name__iexact=str(account_id), user=request.user).first()
 
         account_id = str(account.id) if account else None
         payload["account_id"] = account_id

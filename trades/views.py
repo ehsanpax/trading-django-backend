@@ -397,7 +397,11 @@ class AllOpenPositionsLiveView(APIView):
         db_trade_order_ids = set()
         account_id = self.request.query_params.get("account", None)
         if account_id:
-            user_accounts = user_accounts.filter(Q(id=account_id) | Q(simple_id=True))
+            try:
+                account_id = uuid.UUID(account_id, version=4)
+                user_accounts = user_accounts.filter(id=account_id)
+            except Exception:
+                user_accounts = user_accounts.filter(name__iexact=str(account_id)) 
 
         # 1. Fetch all open trades from the database for the user
         db_trades = Trade.objects.filter(account__in=user_accounts, trade_status="open")
@@ -633,8 +637,14 @@ class AllPendingOrdersView(APIView):
     def get(self, request):
         accounts = Account.objects.filter(user=request.user)
         account_id = self.request.query_params.get("account_id", None)
+
         if account_id:
-            accounts = accounts.filter(Q(id=account_id) | Q(simple_id=account_id))
+            try:
+                account_id = uuid.UUID(account_id, version=4)
+                accounts = Account.objects.filter(id=account_id, user=request.user)
+            except Exception:
+                accounts = Account.objects.filter(name__iexact=str(account_id), user=request.user)
+            
         pending_orders = []
         for account in accounts:
             pending_orders.extend(get_pending_orders(account))

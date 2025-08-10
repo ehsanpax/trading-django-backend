@@ -12,7 +12,7 @@ import logging
 import pandas as pd # Added for pd.Timestamp
 
 from .utils import data_fetcher, data_processor # Import actual utilities
-from bots.registry import get_indicator_class
+from core.registry import indicator_registry
 # from ..analysis import core_analysis # This import might be problematic due to relative path, direct import of modules is better
 import importlib
 
@@ -221,7 +221,7 @@ def update_daily_history_task():
 @shared_task
 def calculate_indicators_dynamically(df: pd.DataFrame, indicator_configs: list) -> pd.DataFrame:
     """
-    Calculates indicators on a DataFrame based on a list of configurations.
+    Calculates indicators on a DataFrame based on a list of configurations using the new IndicatorInterface.
     """
     if not indicator_configs:
         return df
@@ -230,56 +230,33 @@ def calculate_indicators_dynamically(df: pd.DataFrame, indicator_configs: list) 
     for config in indicator_configs:
         indicator_name = config.get('name')
         params = config.get('params', {})
-        output_name = config.get('output_name')
-
+        
         if not indicator_name:
             logger.warning("Skipping indicator config because 'name' is missing.")
             continue
 
-        IndicatorClass = get_indicator_class(indicator_name)
-        if not IndicatorClass:
-            logger.error(f"Indicator '{indicator_name}' not found in registry.")
-            continue
+        try:
+            # The registry uses the class name, e.g., "EMAIndicator". The config might just have "EMA".
+            if not indicator_name.endswith("Indicator"):
+                indicator_name = f"{indicator_name}Indicator"
 
-        indicator_instance = IndicatorClass()
+            IndicatorClass = indicator_registry.get_indicator(indicator_name)
+            indicator_instance = IndicatorClass()
 
-        # --- Start of new logic for type conversion ---
-        typed_params = {}
-        for param_def in indicator_instance.PARAMETERS:
-            param_name = param_def.name
-            if param_name in params:
-                value = params[param_name]
-                param_type = param_def.parameter_type
-                try:
-                    if param_type == 'int':
-                        typed_params[param_name] = int(value)
-                    elif param_type == 'float':
-                        typed_params[param_name] = float(value)
-                    else:
-                        typed_params[param_name] = value # Keep as string for 'enum', etc.
-                except (ValueError, TypeError):
-                    logger.warning(f"Could not convert param '{param_name}' with value '{value}' to type '{param_type}'. Using default.")
-                    typed_params[param_name] = param_def.default_value
-            else:
-                typed_params[param_name] = param_def.default_value
-        # --- End of new logic ---
+            # The new interface returns a dictionary of Series
+            indicator_outputs = indicator_instance.compute(df_with_indicators, params)
 
-        # Store original columns to identify the new one
-        original_columns = set(df_with_indicators.columns)
-        
-        df_with_indicators = indicator_instance.calculate(df_with_indicators, **typed_params)
-        
-        # Identify the newly added column
-        new_columns = set(df_with_indicators.columns) - original_columns
-        if len(new_columns) == 1:
-            new_column_name = new_columns.pop()
-            if output_name and new_column_name != output_name:
-                df_with_indicators.rename(columns={new_column_name: output_name}, inplace=True)
-                logger.info(f"Calculated {indicator_name} and renamed column to {output_name}")
-        elif len(new_columns) > 1:
-            logger.warning(f"Indicator {indicator_name} added multiple columns. Renaming with output_name is not supported in this case.")
-        elif len(new_columns) == 0:
-            logger.warning(f"Indicator {indicator_name} did not add any new columns.")
+            for output_name, series in indicator_outputs.items():
+                # Create a unique column name, e.g., EMAIndicator_ema
+                column_name = f"{indicator_name}_{output_name}"
+                df_with_indicators[column_name] = series
+            
+            logger.info(f"Calculated indicator: {indicator_name}")
+
+        except ValueError as e:
+            logger.error(f"Could not calculate indicator: {e}")
+        except Exception as e:
+            logger.error(f"An unexpected error occurred while calculating indicator '{indicator_name}': {e}", exc_info=True)
 
     return df_with_indicators
 

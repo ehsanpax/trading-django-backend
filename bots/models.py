@@ -34,6 +34,7 @@ class BotVersion(models.Model):
     strategy_name = models.CharField(max_length=255, default="", help_text="Name of the strategy from the registry, e.g., 'ema_crossover_v1'")
     strategy_params = JSONField(default=dict, help_text="Parameters for the chosen strategy")
     indicator_configs = JSONField(default=list, help_text="List of indicator configurations, e.g., [{'name': 'EMA', 'params': {'length': 20}}]")
+    strategy_graph = JSONField(null=True, blank=True, help_text="JSON representation of the no-code strategy graph")
     notes = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -52,6 +53,30 @@ class BotVersion(models.Model):
     #     # if self.pk:
     #     #     raise ValidationError("BotVersion instances are immutable.")
     #     super().save(*args, **kwargs)
+
+
+class ExecutionConfig(models.Model):
+    SLIPPAGE_MODEL_CHOICES = [
+        ('NONE', 'None'),
+        ('FIXED', 'Fixed Ticks'),
+        ('PERCENTAGE', 'Percentage'),
+    ]
+    COMMISSION_UNITS_CHOICES = [
+        ('PER_TRADE', 'Per Trade'),
+        ('PER_LOT', 'Per Lot'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=255, unique=True)
+    slippage_model = models.CharField(max_length=20, choices=SLIPPAGE_MODEL_CHOICES, default='NONE')
+    slippage_value = models.FloatField(default=0, help_text="Value for slippage (e.g., ticks or percentage)")
+    commission_units = models.CharField(max_length=20, choices=COMMISSION_UNITS_CHOICES, default='PER_TRADE')
+    commission_per_unit = models.DecimalField(max_digits=12, decimal_places=6, default=0)
+    spread_pips = models.FloatField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.name
 
 
 class BacktestConfig(models.Model):
@@ -74,8 +99,7 @@ class BacktestConfig(models.Model):
         help_text="Chart timeframe for the backtest (e.g., M1, H1, D1)"
     )
     risk_json = JSONField(default=dict, help_text="Custom risk settings for this backtest")
-    slippage_ms = models.IntegerField(default=0, help_text="Slippage in milliseconds")
-    slippage_r = models.DecimalField(max_digits=10, decimal_places=5, default=0.0, help_text="Slippage in R (risk units) or percentage")
+    execution_config = models.ForeignKey(ExecutionConfig, on_delete=models.PROTECT, null=True, blank=True)
     label = models.CharField(max_length=255, blank=True, null=True, help_text="User-defined label for this config")
     created_at = models.DateTimeField(auto_now_add=True)
 

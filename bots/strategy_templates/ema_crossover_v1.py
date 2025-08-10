@@ -20,7 +20,7 @@ import pandas as pd
 import pandas_ta as ta
 
 from bots.base import BaseStrategy, BotParameter
-from bots.registry import register_strategy, get_indicator_class
+from core.registry import indicator_registry
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 # Strategy Class
 # ──────────────────────────────────────────────────────────────────────────────
 
-class EMACrossoverV1(BaseStrategy):
+class EMACrossover(BaseStrategy):
     NAME = "ema_crossover_v1"
     DISPLAY_NAME = "EMA Crossover Strategy v1"
     PARAMETERS = [
@@ -149,12 +149,18 @@ class EMACrossoverV1(BaseStrategy):
         # Max of longest EMA and ATR period, plus 2 for crossover logic, plus buffer
         max_indicator_history = 0
         for req_ind in self.REQUIRED_INDICATORS:
-            indicator_class = get_indicator_class(req_ind["name"])
-            if indicator_class:
-                # Resolve dynamic parameters from strategy_params
-                resolved_params = {k: self.strategy_params.get(v, v) if isinstance(v, str) and v in self.strategy_params else v for k, v in req_ind["params"].items()}
-                max_indicator_history = max(max_indicator_history, indicator_class().required_history(**resolved_params))
-        
+            try:
+                indicator_class = indicator_registry.get_indicator(req_ind["name"])
+                if indicator_class:
+                    # This part is tricky because the new interface doesn't have required_history.
+                    # We'll have to estimate based on params. A better solution is needed long-term.
+                    # For now, let's assume the 'length' param is the history needed.
+                    resolved_params = {k: self.strategy_params.get(v, v) if isinstance(v, str) and v in self.strategy_params else v for k, v in req_ind["params"].items()}
+                    max_indicator_history = max(max_indicator_history, resolved_params.get('length', 200))
+            except ValueError:
+                # Indicator not found, use a safe default
+                max_indicator_history = max(max_indicator_history, 200)
+
         return max(max_indicator_history, self.ema_long_period, self.atr_length) + 2 + buffer_bars
 
     def get_indicator_column_names(self) -> List[str]:
@@ -305,8 +311,8 @@ class EMACrossoverV1(BaseStrategy):
             
         return actions
 
-# Register the strategy
-register_strategy(EMACrossoverV1.NAME, EMACrossoverV1)
+# The strategy is now discovered automatically by the registry.
+# No manual registration is needed.
 
 if __name__ == "__main__":
     try:
@@ -357,9 +363,9 @@ if __name__ == "__main__":
                     return length + 1
 
             # Temporarily register mock indicators for testing purposes
-            from bots.registry import INDICATOR_REGISTRY
-            INDICATOR_REGISTRY["EMA"] = MockEMAIndicator
-            INDICATOR_REGISTRY["ATR"] = MockATRIndicator
+            # In a real test, you would mock the indicator_registry instance
+            indicator_registry._indicators["EMA"] = MockEMAIndicator
+            indicator_registry._indicators["ATR"] = MockATRIndicator
 
             bot_params = {
                 "ema_short_period": 21,
@@ -369,8 +375,9 @@ if __name__ == "__main__":
                 "atr_tp_multiple": 3.0,
                 "risk_per_trade_percent": 0.01,
             }
-            bot = EMACrossoverV1( 
+            bot = EMACrossover( 
                 instrument_symbol=symbol_platform, 
+                account_id="test_account",
                 instrument_spec=mock_spec,
                 strategy_params=bot_params,
                 indicator_params={}, # No specific indicator params passed to strategy init

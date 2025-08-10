@@ -52,6 +52,7 @@ urlpatterns = [
     path("api/fundamental/", include("fundamental.urls")),
     path("api/monitoring/", include("monitoring.urls")),
     path("api/control/", include("control.urls")),
+    path("api/", include("task_logs.urls")),
     path("api/", include("trading.urls")),
 ]
 if settings.DEBUG:
