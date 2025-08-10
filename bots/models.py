@@ -31,6 +31,7 @@ class Bot(models.Model):
 class BotVersion(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     bot = models.ForeignKey(Bot, on_delete=models.CASCADE, related_name="versions")
+    version_name = models.CharField(max_length=255, blank=True, null=True, help_text="A user-friendly name for this version.")
     strategy_name = models.CharField(max_length=255, default="", help_text="Name of the strategy from the registry, e.g., 'ema_crossover_v1'")
     strategy_params = JSONField(default=dict, help_text="Parameters for the chosen strategy")
     indicator_configs = JSONField(default=list, help_text="List of indicator configurations, e.g., [{'name': 'EMA', 'params': {'length': 20}}]")
@@ -45,7 +46,7 @@ class BotVersion(models.Model):
         ordering = ['-created_at']
 
     def __str__(self):
-        return f"Version for {self.bot.name} created at {self.created_at.strftime('%Y-%m-%d %H:%M')}"
+        return f"Version {self.version_name or self.id} for {self.bot.name}"
 
     # def save(self, *args, **kwargs):
     #     # Implement immutability logic here if needed

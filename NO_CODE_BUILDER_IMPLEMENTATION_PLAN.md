@@ -90,7 +90,7 @@ This group builds the user-facing no-code tools on top of the solid foundation.
     - **Validation & Explain:** The compiler will be the natural place to add static validation. The engine will be designed to collect a `debug_trace` of node values at each step, which will be saved for the "Explain" feature.
 
 ### Phase 7: Sectioned UX Support & Engine Gates
-- **Status:** 🟡 **In Progress**
+- **Status:** ✅ **Completed**
 - **Goal:** Support the "Entry / Exit / Filters / Risk" UX by creating a lightweight adapter and adding explicit gates to the backtest engine. This allows the frontend to be built against a working backend without waiting for the full graph compiler to be perfect.
 - **Tasks:**
     - [x] **`bots/sectioned_adapter.py`:**
@@ -119,12 +119,68 @@ This group builds the user-facing no-code tools on top of the solid foundation.
     - **Explainability (Phase 9):** The explicit logging of blocked entries (`reason: "risk_max_open"`) provides the raw data needed for the "Explain" feature.
 
 ### Phase 8: The No-Code Canvas UI
-- **Status:** ⚪️ Pending
+- **Status:** 🟡 **In Progress**
 - **Goal:** Build the front-end visual tool for creating strategies.
 - **Tasks:**
-    - [ ] **Frontend:** Implement a canvas UI (e.g., using React Flow).
-    - [ ] **Nodes:** Dynamically populate the node palette from the indicator and action registries.
-    - [ ] **Integration:** Connect the canvas to the backend to save graphs and launch backtests.
+    - [ ] **UI Component Scaffolding:**
+        - Build individual UI components for each of the four sections: Entry, Exit, Risk, and Filters.
+        - **Entry/Exit:** Design a rule builder that supports nested "and"/"or" conditions. This should allow users to select an indicator, an operator (e.g., "crosses above"), and a value (either a literal or another indicator).
+        - **Risk:** Create form inputs for `fixed_lot_size`, `stop_loss_pips`, and `take_profit_pips`.
+        - **Filters:** Implement UI controls for `allowed_days_of_week` (e.g., checkboxes) and `allowed_sessions` (e.g., time range pickers).
+    - [ ] **Dynamic Population from API:**
+        - On component mount, the frontend should call the `GET /api/bots/indicators/metadata/` endpoint.
+        - Use the response to dynamically populate the list of available indicators in the Entry/Exit rule builders.
+        - When an indicator is selected, dynamically generate the necessary parameter input fields (e.g., a number input for `length` on an EMA).
+    - [ ] **State Management & JSON Construction:**
+        - As the user interacts with the UI, the frontend state should update.
+        - A derived state or selector should be responsible for constructing the final `SectionedStrategySpec` JSON object in the precise format required by the backend.
+    - [ ] **Backend Integration:**
+        - On "Run Backtest" click, the frontend should send a request to the backtest launch endpoint.
+        - The request body must include `strategy_name: "SECTIONED_SPEC"` and the fully constructed `strategy_params` object containing the `sectioned_spec` and `filters`.
+- **Backend Contract Example:**
+  ```json
+  {
+    "strategy_name": "SECTIONED_SPEC",
+    "strategy_params": {
+      "sectioned_spec": {
+        "entry": {
+          "and": [
+            {
+              "left": { "indicator": "ema", "params": { "length": 9 }, "output": "default" },
+              "op": "cross_above",
+              "right": { "indicator": "ema", "params": { "length": 21 }, "output": "default" }
+            }
+          ]
+        },
+        "exit": {
+          "or": [
+            {
+              "left": { "indicator": "rsi", "params": { "length": 14 }, "output": "default" },
+              "op": ">=",
+              "right": 70
+            },
+            {
+              "left": { "indicator": "price", "params": { "source": "close" }, "output": "default" },
+              "op": "cross_below",
+              "right": { "indicator": "ema", "params": { "length": 50 }, "output": "default" }
+            }
+          ]
+        },
+        "risk": {
+          "fixed_lot_size": 0.5,
+          "stop_loss_pips": 20,
+          "take_profit_pips": 40
+        }
+      },
+      "filters": {
+        "allowed_days_of_week": [0, 1, 2, 3, 4],
+        "allowed_sessions": [
+          { "start": "09:00", "end": "17:00" }
+        ]
+      }
+    }
+  }
+  ```
 
 ---
 

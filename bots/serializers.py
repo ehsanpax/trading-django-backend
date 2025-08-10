@@ -58,8 +58,8 @@ class BotVersionSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = BotVersion
-        fields = ['id', 'bot', 'bot_name', 'strategy_name', 'strategy_params', 'indicator_configs', 'notes', 'created_at']
-        read_only_fields = ['id', 'created_at', 'bot_name'] # All new fields are writable for creation
+        fields = ['id', 'bot', 'bot_name', 'version_name', 'strategy_name', 'strategy_params', 'indicator_configs', 'notes', 'created_at']
+        read_only_fields = ['id', 'created_at', 'bot_name']
 
 class ExecutionConfigSerializer(serializers.ModelSerializer):
     class Meta:
@@ -139,12 +139,17 @@ class LaunchBacktestSerializer(serializers.Serializer):
 
 class BotVersionCreateSerializer(serializers.Serializer):
     bot_id = serializers.UUIDField()
+    version_name = serializers.CharField(max_length=255, required=False, allow_blank=True, allow_null=True)
     strategy_name = serializers.CharField(max_length=255)
     strategy_params = serializers.JSONField(default=dict)
     indicator_configs = serializers.JSONField(default=list)
     notes = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
     def validate(self, data):
+        # Allow "SECTIONED_SPEC" to bypass the standard registry check
+        if data.get('strategy_name') == "SECTIONED_SPEC":
+            return data
+
         # Use StrategyManager and new registry for validation
         try:
             strategy_cls = strategy_registry.get_strategy(data['strategy_name'])

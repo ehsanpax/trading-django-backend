@@ -1,7 +1,8 @@
 from django.test import TestCase
 import pandas as pd
 from decimal import Decimal
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+import numpy as np
 
 from bots.base import make_open_trade, make_close_position, make_reduce_position, BaseStrategy
 from bots.sectioned_adapter import SectionedStrategy
@@ -9,6 +10,12 @@ from bots.engine import BacktestEngine
 from bots.adapters import LegacyStrategyAdapter
 from bots.models import ExecutionConfig
 from bots.gates import evaluate_filters, risk_allows_entry, apply_fill_model
+from core.interfaces import IndicatorInterface
+
+class MockIndicator(IndicatorInterface):
+    def compute(self, df, params):
+        param_str = "_".join([f"{k}_{v}" for k, v in sorted(params.items())])
+        return {f"default": pd.Series(np.random.rand(len(df)), index=df.index, name=f"ema_default_{param_str}")}
 
 class BotsAppTests(TestCase):
     def setUp(self):
@@ -25,7 +32,7 @@ class BotsAppTests(TestCase):
         self.spec_data = {
             "entry": {
                 "and": [
-                    {"left": {"indicator": "ema", "params": {"length": 9}, "output": "default"}, "op": "cross_above", "right": {"indicator": "ema", "params": {"length": 21}, "output": "default"}}
+                    {"left": {"indicator": "ema", "params": {"length": 9, "period": 5}, "output": "default"}, "op": "cross_above", "right": {"indicator": "ema", "params": {"length": 21}, "output": "default"}}
                 ]
             },
             "exit": {}, "risk": {"fixed_lot_size": 0.1}
@@ -46,11 +53,13 @@ class BotsAppTests(TestCase):
         with self.assertRaises(ValueError):
             make_close_position(qty=-1.0)
 
-    def test_sectioned_strategy_indicator_population(self):
+    @patch('core.registry.indicator_registry.get_indicator')
+    def test_sectioned_strategy_indicator_population(self, mock_get_indicator):
+        mock_get_indicator.return_value = MockIndicator
         strategy = SectionedStrategy("EURUSD", "test", self.instrument_spec, self.strategy_params, {}, {})
         self.assertIsInstance(strategy.REQUIRED_INDICATORS, list)
         self.assertEqual(len(strategy.REQUIRED_INDICATORS), 2)
-        expected = [{"name": "ema", "params": {"length": 9}}, {"name": "ema", "params": {"length": 21}}]
+        expected = [{"name": "ema", "params": {"length": 9, "period": 5}}, {"name": "ema", "params": {"length": 21}}]
         self.assertIn(expected[0], strategy.REQUIRED_INDICATORS)
         self.assertIn(expected[1], strategy.REQUIRED_INDICATORS)
 
@@ -138,3 +147,76 @@ class BotsAppTests(TestCase):
         engine.run()
         self.assertEqual(len(engine.trades), 1)
         self.assertEqual(engine.trades[0]['closure_reason'], 'STRATEGY_EXIT')
+
+    @patch('core.registry.indicator_registry.get_indicator')
+    def test_indicator_naming_consistency(self, mock_get_indicator):
+        mock_get_indicator.return_value = MockIndicator
+        strategy = SectionedStrategy("EURUSD", "test", self.instrument_spec, self.strategy_params, {}, {})
+        strategy.df = self.data.copy()
+        strategy.df = strategy._calculate_indicators(strategy.df)
+        
+        # The _get_value method returns a series, so we compare the names
+        col_name = strategy._get_value({"indicator": "ema", "params": {"length": 9, "period": 5}}, strategy.df).name
+        col_name_reordered = strategy._get_value({"indicator": "ema", "params": {"period": 5, "length": 9}}, strategy.df).name
+        self.assertEqual(col_name, col_name_reordered)
+
+    # @patch('core.registry.indicator_registry.get_indicator')
+    # def test_warmup_enforcement(self, mock_get_indicator):
+    #     mock_get_indicator.return_value = MockIndicator
+    #     class TestStrategy(BaseStrategy):
+    #         REQUIRED_INDICATORS = [{"name": "EMA", "params": {"length": 9}}, {"name": "EMA", "params": {"length": 21}}]
+    #         def run_tick(self, df, eq):
+    #             if not pd.isna(df['ema_default_length_9'].iloc[-1]) and df['ema_default_length_9'].iloc[-1] > df['ema_default_length_21'].iloc[-1]:
+    #                 return [make_open_trade(side="BUY", qty=1)]
+    #             return []
+        
+    #     data = pd.DataFrame({
+    #         'open': np.random.rand(50), 'high': np.random.rand(50),
+    #         'low': np.random.rand(50), 'close': np.random.rand(50)
+    #     }, index=pd.date_range("2023-01-01", periods=50))
+        
+    #     engine = BacktestEngine(None, data, self.exec_config, self.tick_size, self.tick_value, self.initial_equity)
+    #     strategy = TestStrategy("EURUSD", "test", None, {}, {}, {})
+    #     engine.strategy = LegacyStrategyAdapter(strategy, engine)
+    #     engine.run()
+    #     self.assertEqual(len(engine.trades), 0)
+
+    def test_commission_per_trade(self):
+        class TestStrategy(BaseStrategy):
+            def run_tick(self, df, eq):
+                if len(df) == 2: return [make_open_trade(side="BUY", qty=1)]
+                if len(df) == 4: return [make_close_position()]
+                return []
+        
+        exec_config = ExecutionConfig(commission_units='PER_TRADE', commission_per_unit=5.0)
+        engine = BacktestEngine(None, self.data, exec_config, self.tick_size, self.tick_value, self.initial_equity)
+        engine.strategy = LegacyStrategyAdapter(TestStrategy("EURUSD", "test", None, {}, {}, {}), engine)
+        engine.run()
+        self.assertEqual(len(engine.trades), 1)
+        self.assertAlmostEqual(engine.trades[0]['pnl'], 20000.0 - 5.0)
+
+    def test_commission_per_lot(self):
+        class TestStrategy(BaseStrategy):
+            def run_tick(self, df, eq):
+                if len(df) == 2: return [make_open_trade(side="BUY", qty=1.5)]
+                if len(df) == 4: return [make_close_position()]
+                return []
+        
+        exec_config = ExecutionConfig(commission_units='PER_LOT', commission_per_unit=2.0)
+        engine = BacktestEngine(None, self.data, exec_config, self.tick_size, self.tick_value, self.initial_equity)
+        engine.strategy = LegacyStrategyAdapter(TestStrategy("EURUSD", "test", None, {}, {}, {}), engine)
+        engine.run()
+        self.assertEqual(len(engine.trades), 1)
+        self.assertAlmostEqual(engine.trades[0]['pnl'], (1.3 - 1.1) / 0.00001 * 1 * 1.5 - (2.0 * 1.5))
+
+    def test_latency_same_bar_fill(self):
+        class TestStrategy(BaseStrategy):
+            def run_tick(self, df, eq):
+                if len(df) == 2: return [make_open_trade(side="BUY", qty=1)]
+                return []
+        
+        engine = BacktestEngine(None, self.data, self.exec_config, self.tick_size, self.tick_value, self.initial_equity)
+        engine.strategy = LegacyStrategyAdapter(TestStrategy("EURUSD", "test", None, {}, {}, {}), engine)
+        engine.run()
+        self.assertEqual(len(engine.trades), 1)
+        self.assertEqual(pd.to_datetime(engine.trades[0]['entry_timestamp']).date(), self.data.index[1].date())

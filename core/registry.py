@@ -6,13 +6,23 @@ import logging
 
 import indicators.definitions
 from core.interfaces import IndicatorInterface, OperatorInterface, ActionInterface
+from bots.nodes.sources import Price
 
 logger = logging.getLogger(__name__)
 
 class IndicatorRegistry:
     def __init__(self):
         self._indicators: Dict[str, Type[IndicatorInterface]] = {}
+        self._register_builtins()
         self.discover_indicators()
+
+    def _register_builtins(self):
+        """
+        Registers built-in, fundamental indicators/sources.
+        """
+        indicator_name = getattr(Price, 'NAME', Price.__name__).lower()
+        self._indicators[indicator_name] = Price
+        #logger.info(f"Registered built-in indicator: {indicator_name}")
 
     def discover_indicators(self):
         """
@@ -35,9 +45,11 @@ class IndicatorRegistry:
                             continue
 
                         # Use the NAME attribute if it exists, otherwise fall back to the class name
-                        indicator_name = getattr(item, 'NAME', item.__name__)
+                        indicator_name = getattr(item, 'NAME', item.__name__).lower()
+                        if indicator_name in self._indicators:
+                            logger.warning(f"Indicator '{indicator_name}' is being overwritten.")
                         self._indicators[indicator_name] = item
-                        logger.info(f"Discovered and registered indicator: {indicator_name}")
+                        #logger.info(f"Discovered and registered indicator: {indicator_name}")
             except Exception as e:
                 logger.error(f"Failed to load or register indicator from module '{name}': {e}", exc_info=True)
 
@@ -69,7 +81,7 @@ class OperatorRegistry:
         if name in self._operators:
             logger.warning(f"Operator '{name}' is being re-registered.")
         self._operators[name] = operator_cls
-        logger.info(f"Registered operator: {name}")
+        #logger.info(f"Registered operator: {name}")
 
     def get_operator(self, name: str) -> Type[OperatorInterface]:
         operator = self._operators.get(name)
@@ -92,7 +104,7 @@ class ActionRegistry:
         if name in self._actions:
             logger.warning(f"Action '{name}' is being re-registered.")
         self._actions[name] = action_cls
-        logger.info(f"Registered action: {name}")
+        #logger.info(f"Registered action: {name}")
 
     def get_action(self, name: str) -> Type[ActionInterface]:
         action = self._actions.get(name)
@@ -115,7 +127,7 @@ class StrategyRegistry:
         if name in self._strategies:
             logger.warning(f"Strategy '{name}' is being re-registered.")
         self._strategies[name] = strategy_cls
-        logger.info(f"Registered strategy: {name}")
+        #logger.info(f"Registered strategy: {name}")
 
     def get_strategy(self, name: str) -> Type:
         """

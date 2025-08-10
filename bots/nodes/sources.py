@@ -1,0 +1,26 @@
+from core.interfaces import IndicatorInterface
+import pandas as pd
+from typing import Dict
+
+class Price(IndicatorInterface):
+    """
+    A special indicator that provides access to the raw OHLCV data.
+    """
+    NAME = "price"
+    VERSION = 1
+    PARAMS_SCHEMA = {
+        "source": {
+            "type": "string",
+            "enum": ["open", "high", "low", "close", "volume"],
+            "default": "close",
+            "display_name": "Source",
+            "description": "The price data to use (e.g., close, high).",
+        }
+    }
+    OUTPUTS = ["default"]
+
+    def compute(self, ohlcv: pd.DataFrame, params: Dict) -> Dict[str, pd.Series]:
+        source = params.get("source", "close")
+        if source not in ohlcv.columns:
+            raise ValueError(f"Invalid source '{source}'. Available sources are {list(ohlcv.columns)}")
+        return {"default": ohlcv[source]}

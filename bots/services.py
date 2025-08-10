@@ -62,7 +62,7 @@ class StrategyManager:
                     "min_value": schema.get("min"),
                     "max_value": schema.get("max"),
                     "step": schema.get("step"),
-                    "options": schema.get("options"),
+                    "options": schema.get("options") or schema.get("enum"),
                 })
             
             metadata.append({
@@ -156,33 +156,36 @@ def create_bot_version(
     strategy_name: str,
     strategy_params: Dict[str, Any],
     indicator_configs: List[Dict[str, Any]],
-    notes: str = None
+    notes: str = None,
+    version_name: str = None
 ) -> BotVersion:
     """
     Creates a new BotVersion, validating strategy and indicator parameters.
     """
-    try:
-        strategy_cls = strategy_registry.get_strategy(strategy_name)
-        if not strategy_cls:
-            raise ValidationError(f"Strategy '{strategy_name}' not found in registry.")
-        
-        StrategyManager.validate_parameters(strategy_cls.PARAMETERS, strategy_params.copy())
-
-        for ind_config in indicator_configs:
-            ind_name = ind_config.get("name")
-            ind_params = ind_config.get("params", {})
-            indicator_cls = indicator_registry.get_indicator(ind_name)
-            # Validation for new indicator format can be added here if needed
+    if strategy_name != "SECTIONED_SPEC":
+        try:
+            strategy_cls = strategy_registry.get_strategy(strategy_name)
+            if not strategy_cls:
+                raise ValidationError(f"Strategy '{strategy_name}' not found in registry.")
             
-    except ValidationError as ve:
-        logger.error(f"Validation error creating BotVersion: {ve}")
-        raise
-    except Exception as e:
-        logger.error(f"Unexpected error during BotVersion validation: {e}", exc_info=True)
-        raise ValidationError(f"An unexpected error occurred during validation: {e}")
+            StrategyManager.validate_parameters(strategy_cls.PARAMETERS, strategy_params.copy())
+
+            for ind_config in indicator_configs:
+                ind_name = ind_config.get("name")
+                ind_params = ind_config.get("params", {})
+                indicator_cls = indicator_registry.get_indicator(ind_name)
+                # Validation for new indicator format can be added here if needed
+                
+        except ValidationError as ve:
+            logger.error(f"Validation error creating BotVersion: {ve}")
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error during BotVersion validation: {e}", exc_info=True)
+            raise ValidationError(f"An unexpected error occurred during validation: {e}")
 
     bot_version = BotVersion.objects.create(
         bot=bot,
+        version_name=version_name,
         strategy_name=strategy_name,
         strategy_params=strategy_params,
         indicator_configs=indicator_configs,

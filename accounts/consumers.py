@@ -34,7 +34,7 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         and populates the ticket-to-UUID mapping.
         """
         Trade = apps.get_model('trading', 'Trade')
-        logger.info(f"Populating trade UUID map for account {self.account_id}")
+        #logger.info(f"Populating trade UUID map for account {self.account_id}")
         open_trades = await sync_to_async(list)(
             Trade.objects.filter(
                 account_id=self.account_id,
@@ -44,7 +44,7 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         self.ticket_to_uuid_map = {
             str(trade['position_id']): str(trade['id']) for trade in open_trades
         }
-        logger.info(f"UUID map populated with {len(self.ticket_to_uuid_map)} entries.")
+        #logger.info(f"UUID map populated with {len(self.ticket_to_uuid_map)} entries.")
 
     async def _populate_order_uuid_map(self):
         """
@@ -200,7 +200,7 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
             await PositionUpdateListener.process_new_positions(account, new_positions_data)
 
         # After processing, refresh the trade UUID map to include the new trades
-        logger.info("Refreshing trade UUID map from DB after processing new trades.")
+        #logger.info("Refreshing trade UUID map from DB after processing new trades.")
         await self._populate_trade_uuid_map()
 
         # --- Update drawdown and run-up for each open trade ---

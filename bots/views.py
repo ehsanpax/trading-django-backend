@@ -156,6 +156,7 @@ class BotVersionViewSet(viewsets.ModelViewSet):
 
                 bot_version = services.create_bot_version(
                     bot=bot,
+                    version_name=data.get('version_name'),
                     strategy_name=data['strategy_name'],
                     strategy_params=data['strategy_params'],
                     indicator_configs=data['indicator_configs'],
@@ -177,6 +178,7 @@ class BotVersionViewSet(viewsets.ModelViewSet):
     def create_from_graph(self, request, *args, **kwargs):
         # Simplified serializer for graph-based creation
         bot_id = request.data.get('bot_id')
+        version_name = request.data.get('version_name')
         strategy_graph = request.data.get('strategy_graph')
         notes = request.data.get('notes')
 
@@ -195,6 +197,7 @@ class BotVersionViewSet(viewsets.ModelViewSet):
 
             bot_version = BotVersion.objects.create(
                 bot=bot,
+                version_name=version_name,
                 strategy_graph=strategy_graph,
                 notes=notes,
                 # Set other fields to default/empty if they don't apply
@@ -211,6 +214,17 @@ class BotVersionViewSet(viewsets.ModelViewSet):
         except Exception as e:
             logger.error(f"Error creating BotVersion from graph: {e}", exc_info=True)
             return Response({"detail": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=True, methods=['get'], url_path='strategy-graph')
+    def strategy_graph(self, request, pk=None):
+        bot_version = self.get_object()
+        if bot_version.strategy_graph:
+            return Response(bot_version.strategy_graph)
+        # Fallback for older versions that might use strategy_params
+        elif bot_version.strategy_params:
+            return Response(bot_version.strategy_params)
+        else:
+            return Response({}, status=status.HTTP_200_OK)
 
 
 class BacktestConfigViewSet(viewsets.ModelViewSet):

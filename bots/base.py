@@ -88,7 +88,7 @@ class BaseStrategy:
                 indicator_outputs = indicator_instance.compute(df_copy, resolved_params)
                 for output_name, series in indicator_outputs.items():
                     # Create a unique column name to avoid collisions
-                    param_str = "_".join([f"{k}_{v}" for k, v in resolved_params.items()])
+                    param_str = "_".join([f"{k}_{v}" for k, v in sorted(resolved_params.items())])
                     column_name = f"{indicator_name}_{output_name}_{param_str}"
                     df_copy[column_name] = series
             except Exception as e:

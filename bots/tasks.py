@@ -163,10 +163,42 @@ def run_backtest(self, backtest_run_id, strategy_name, strategy_params, indicato
         except InstrumentSpecification.DoesNotExist:
             logger.warning(f"InstrumentSpecification not found for {instrument_symbol}. Using defaults.")
 
-        # Load and prepare data first
+        # --- Data Loading with Warm-up Period ---
+        # Calculate the warm-up start date by subtracting a buffer period.
+        # This ensures indicators have enough data to be stable at the actual start.
+        
+        # Convert start_date string to datetime object if it's not already
+        if isinstance(data_window_start, str):
+            start_date_obj = pd.to_datetime(data_window_start)
+        else:
+            start_date_obj = data_window_start
+
+        # Estimate the duration of 200 bars for the given timeframe
+        # This is an approximation. For 'M1', it's 200 minutes. For 'H1', 200 hours.
+        # A more precise calculation might be needed for complex timeframes.
+        # Using timedelta is a robust way to handle this.
+        # Assuming timeframe is in a format like 'M1', 'H1', 'D1'
+        time_val = int(timeframe[:-1])
+        time_unit = timeframe[-1]
+        
+        if time_unit == 'M':
+            warmup_delta = timedelta(minutes=200 * time_val)
+        elif time_unit == 'H':
+            warmup_delta = timedelta(hours=200 * time_val)
+        elif time_unit == 'D':
+            warmup_delta = timedelta(days=200 * time_val)
+        else:
+            # Default to a safe but potentially large buffer if timeframe is unknown
+            warmup_delta = timedelta(days=10) 
+            logger.warning(f"Unknown timeframe unit '{time_unit}'. Defaulting to a 10-day warm-up period.")
+
+        warmup_start_date = start_date_obj - warmup_delta
+        
+        logger.info(f"Original start: {data_window_start}. Loading data from {warmup_start_date} for warm-up.")
+
         raw_m1_ohlcv_df = load_m1_data_from_parquet(
             instrument_symbol=instrument_symbol,
-            start_date=data_window_start,
+            start_date=warmup_start_date.strftime('%Y-%m-%d'),
             end_date=data_window_end
         )
 
@@ -196,8 +228,20 @@ def run_backtest(self, backtest_run_id, strategy_name, strategy_params, indicato
         logger.info(f"Successfully loaded legacy strategy: {strategy_name}")
 
         # Calculate indicators and add them to the DataFrame
-        ohlcv_df = legacy_strategy_instance._calculate_indicators(ohlcv_df)
+        ohlcv_df_with_indicators = legacy_strategy_instance._calculate_indicators(ohlcv_df)
         logger.info("Calculated and added indicators to the DataFrame.")
+
+        # --- Trim the DataFrame to the original backtest window ---
+        # This removes the warm-up period before running the backtest engine,
+        # so that the backtest results are only for the requested period.
+        original_start_date_ts = pd.to_datetime(data_window_start)
+        ohlcv_df_backtest_period = ohlcv_df_with_indicators[ohlcv_df_with_indicators.index >= original_start_date_ts]
+        
+        if ohlcv_df_backtest_period.empty:
+            raise ValueError("No data remains after trimming warm-up period. Check date ranges.")
+            
+        logger.info(f"Trimmed warm-up data. Backtest will run on {len(ohlcv_df_backtest_period)} bars from {data_window_start}.")
+
 
         # The engine now handles equity, trades, etc.
         initial_equity = float(bot.account.balance) if bot.account and bot.account.balance is not None else 100000.0
@@ -206,7 +250,7 @@ def run_backtest(self, backtest_run_id, strategy_name, strategy_params, indicato
         logger.info(f"BacktestRun {backtest_run_id}: Initializing the new BacktestEngine.")
         engine = BacktestEngine(
             strategy=None, # Will be set after adapter is created
-            data=ohlcv_df,
+            data=ohlcv_df_backtest_period, # Use the trimmed DataFrame
             execution_config=config.execution_config,
             tick_size=Decimal(str(instrument_spec_instance.tick_size)),
             tick_value=Decimal(str(instrument_spec_instance.tick_value)),
@@ -221,11 +265,12 @@ def run_backtest(self, backtest_run_id, strategy_name, strategy_params, indicato
         logger.info("Wrapped legacy strategy in adapter and linked with the new engine.")
 
         # --- Save OHLCV Data ---
+        # --- Save OHLCV Data for the actual backtest period ---
         ohlcv_data_to_save = [
             BacktestOhlcvData(
                 backtest_run=backtest_run, timestamp=row.Index, open=row.open,
                 high=row.high, low=row.low, close=row.close, volume=row.volume
-            ) for row in ohlcv_df.itertuples()
+            ) for row in ohlcv_df_backtest_period.itertuples()
         ]
         _bulk_insert_in_batches(BacktestOhlcvData, ohlcv_data_to_save)
 

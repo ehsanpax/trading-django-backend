@@ -122,10 +122,11 @@ class BacktestEngine:
             pnl = price_diff_ticks * self.tick_value * volume
 
         if self.execution_config:
+            commission = Decimal(str(self.execution_config.commission_per_unit or '0'))
             if self.execution_config.commission_units == 'PER_TRADE':
-                pnl -= self.execution_config.commission_per_unit
+                pnl -= commission
             elif self.execution_config.commission_units == 'PER_LOT':
-                pnl -= self.execution_config.commission_per_unit * volume
+                pnl -= commission * volume
         
         self.equity += float(pnl)
         
@@ -236,10 +237,11 @@ class BacktestEngine:
 
             # commissions (optional, same as close)
             if self.execution_config:
+                commission = Decimal(str(self.execution_config.commission_per_unit or '0'))
                 if self.execution_config.commission_units == 'PER_TRADE':
-                    pnl -= self.execution_config.commission_per_unit
+                    pnl -= commission
                 elif self.execution_config.commission_units == 'PER_LOT':
-                    pnl -= self.execution_config.commission_per_unit * reduce_now
+                    pnl -= commission * reduce_now
 
             self.equity += float(pnl)
             pos['volume'] = float(Decimal(str(pos['volume'])) - reduce_now)
