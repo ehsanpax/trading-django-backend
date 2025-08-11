@@ -35,10 +35,28 @@ class SectionedStrategy(BaseStrategy):
         self.risk_config = strategy_params.get("risk", {})
         self.filters_config = strategy_params.get("filters", {})
 
-        # --- Fix: Populate self.REQUIRED_INDICATORS for the base class ---
         # This ensures the _calculate_indicators method in BaseStrategy works correctly.
         reqs = self.required_indicators()
         self.REQUIRED_INDICATORS = [{"name": r.name, "params": r.params} for r in reqs]
+        
+        # --- Fix: Also populate a list of the final column names for easy access later ---
+        self.indicator_column_names = []
+        from core.registry import indicator_registry
+        for r in reqs:
+            try:
+                indicator_cls = indicator_registry.get_indicator(r.name)
+                indicator_instance = indicator_cls()
+                # Correctly inspect the indicator's defined outputs.
+                # Most indicators have one, so we'll take the first.
+                if indicator_instance.OUTPUTS:
+                    output_name = indicator_instance.OUTPUTS[0]
+                    param_str = "_".join([f"{k}_{v}" for k, v in sorted(r.params.items())])
+                    column_name = f"{r.name}_{output_name}_{param_str}".lower()
+                    self.indicator_column_names.append(column_name)
+                else:
+                    logger.warning(f"Indicator '{r.name}' has no defined OUTPUTS.")
+            except Exception as e:
+                logger.warning(f"Could not generate column name for indicator {r.name}: {e}")
         # --- End Fix ---
 
     def required_indicators(self) -> List[IndicatorRequest]:
@@ -152,9 +170,9 @@ class SectionedStrategy(BaseStrategy):
             left_series = left_val
             right_series = right_val
 
-        if comparison_op == "crosses_above":
+        if comparison_op in ["crosses_above", "crossesabove", "cross_above"]:
             return left_series.iloc[-2] < right_series.iloc[-2] and left_series.iloc[-1] > right_series.iloc[-1]
-        elif comparison_op == "crosses_below":
+        elif comparison_op in ["crosses_below", "crossesbelow", "cross_below"]:
             return left_series.iloc[-2] > right_series.iloc[-2] and left_series.iloc[-1] < right_series.iloc[-1]
         elif comparison_op == ">":
             return left_series.iloc[-1] > right_series.iloc[-1]
@@ -166,6 +184,7 @@ class SectionedStrategy(BaseStrategy):
     def _get_value(self, operand: dict | str | int | float, df: pd.DataFrame) -> pd.Series | float:
         """
         Resolves an operand to either a DataFrame series or a literal value.
+        This method is designed to be resilient to different indicator column naming conventions.
         """
         if isinstance(operand, (int, float)):
             return operand
@@ -175,15 +194,29 @@ class SectionedStrategy(BaseStrategy):
         if isinstance(operand, dict):
             operand_type = operand.get("type")
             if operand_type == "indicator":
-                name = operand["name"]
+                name = operand["name"].lower()
                 params = operand.get("params", {})
-                # Default output name is the indicator name in lowercase, e.g., 'ema' for 'EMA'
-                output = operand.get("output", name.lower())
                 param_str = "_".join([f"{k}_{v}" for k, v in sorted(params.items())])
-                column_name = f"{name}_{output}_{param_str}"
-                if column_name not in df.columns:
-                    raise ValueError(f"Indicator column '{column_name}' not found in DataFrame. Available: {df.columns.tolist()}")
-                return df[column_name]
+
+                # Convention 1: Output defaults to the indicator's name (e.g., 'ema_ema_...').
+                output_as_name = operand.get("output", name).lower()
+                column_name_v1 = f"{name}_{output_as_name}_{param_str}"
+                if column_name_v1 in df.columns:
+                    return df[column_name_v1]
+
+                # Convention 2 (Fallback): Output defaults to 'default' (e.g., 'price_default_...').
+                output_as_default = operand.get("output", "default").lower()
+                column_name_v2 = f"{name}_{output_as_default}_{param_str}"
+                if column_name_v2 in df.columns:
+                    return df[column_name_v2]
+                
+                # If neither convention finds a column, raise an error.
+                raise ValueError(
+                    f"Indicator column for '{name}' with params {params} not found. "
+                    f"Tried '{column_name_v1}' and '{column_name_v2}'. "
+                    f"Available columns: {df.columns.tolist()}"
+                )
+
             elif operand_type == "literal":
                 return operand.get("value")
 

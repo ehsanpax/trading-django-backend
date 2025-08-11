@@ -5,6 +5,7 @@ from typing import Dict, Type
 import logging
 
 import indicators.definitions
+import bots.nodes.operators as operators
 from core.interfaces import IndicatorInterface, OperatorInterface, ActionInterface
 from bots.nodes.sources import Price
 
@@ -75,6 +76,28 @@ indicator_registry = IndicatorRegistry()
 class OperatorRegistry:
     def __init__(self):
         self._operators: Dict[str, Type[OperatorInterface]] = {}
+        self.discover_operators()
+
+    def discover_operators(self):
+        """
+        Dynamically discovers and registers operators from the 'bots.nodes.operators' module.
+        """
+        for item_name, item in inspect.getmembers(operators, inspect.isclass):
+            # Check if the class has the required attributes and methods of the protocol
+            if (hasattr(item, 'VERSION') and
+                hasattr(item, 'PARAMS_SCHEMA') and
+                hasattr(item, 'compute') and
+                callable(getattr(item, 'compute'))):
+                
+                # Heuristic to avoid registering the protocol itself or base classes
+                if 'interface' in item.__name__.lower() or item.__module__ == 'core.interfaces':
+                    continue
+
+                operator_name = getattr(item, 'NAME', item.__name__).lower()
+                if operator_name in self._operators:
+                    logger.warning(f"Operator '{operator_name}' is being overwritten.")
+                self._operators[operator_name] = item
+                #logger.info(f"Discovered and registered operator: {operator_name}")
 
     def register(self, name: str, operator_cls: Type[OperatorInterface]):
         """Registers a single operator class."""

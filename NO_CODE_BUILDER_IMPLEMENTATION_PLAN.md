@@ -117,6 +117,7 @@ This group builds the user-facing no-code tools on top of the solid foundation.
 - **Hooks for Future Phases:**
     - **No-Code Canvas UI (Phase 8):** The frontend will generate a JSON spec that conforms to `SectionedStrategySpec`, providing an immediate, working backend for the visual builder.
     - **Explainability (Phase 9):** The explicit logging of blocked entries (`reason: "risk_max_open"`) provides the raw data needed for the "Explain" feature.
+    - **Live Trading Tick Data:** The `Price` data source now supports a "tick" option. The live trading engine (`live_loop` in `bots/tasks.py`) will need to be implemented to fetch real-time ticks and pass them to the strategy.
 
 ### Phase 8: The No-Code Canvas UI
 - **Status:** 🟡 **In Progress**
@@ -163,6 +164,11 @@ This group builds the user-facing no-code tools on top of the solid foundation.
               "left": { "indicator": "price", "params": { "source": "close" }, "output": "default" },
               "op": "cross_below",
               "right": { "indicator": "ema", "params": { "length": 50 }, "output": "default" }
+            },
+            {
+              "left": { "indicator": "price", "params": { "source": "tick" }, "output": "default" },
+              "op": ">",
+              "right": { "indicator": "price", "params": { "source": "high" }, "output": "default" }
             }
           ]
         },
@@ -210,3 +216,23 @@ These phases can be implemented after the core no-code functionality is live.
 the original plan can be found here: https://chatgpt.com/share/68980939-0008-8005-9a9d-6d150146df3f
 
 Do not attempt to make changes to the frontend directly, instead provide instructions to the user to pass onto the frontend team.
+
+### Frontend Instructions
+
+1.  **Fetch All Node Metadata:**
+    *   The frontend should make a single GET request to `/api/bots/nodes/metadata/`. This endpoint provides all necessary metadata in one response.
+    *   The response will be a JSON object with keys: `indicators`, `operators`, and `actions`.
+
+2.  **Populate Indicator Dropdown:**
+    *   Use the `indicators` array from the response to populate the indicator selection dropdown.
+    *   The `display_name` field should be used for the dropdown text.
+    *   When an indicator is selected, use its `parameters` array to dynamically generate the necessary input fields.
+    *   For parameters of type `string` with an `options` array (e.g., the "source" for the "Price" indicator), a dropdown should be displayed.
+
+3.  **Populate Operator Dropdown:**
+    *   Use the `operators` array from the response to populate the operator selection dropdown.
+    *   The `name` field should be used for the dropdown text and as the value sent to the backend (e.g., `"cross_above"`, `">="`).
+
+4.  **Constructing the JSON:**
+    *   When building the `SectionedStrategySpec` JSON, the `indicator` field should contain the `name` of the selected indicator.
+    *   The `op` field should contain the `name` of the selected operator.

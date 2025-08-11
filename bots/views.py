@@ -218,13 +218,18 @@ class BotVersionViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'], url_path='strategy-graph')
     def strategy_graph(self, request, pk=None):
         bot_version = self.get_object()
+        graph_data = {}
         if bot_version.strategy_graph:
-            return Response(bot_version.strategy_graph)
+            graph_data = bot_version.strategy_graph
         # Fallback for older versions that might use strategy_params
         elif bot_version.strategy_params:
-            return Response(bot_version.strategy_params)
-        else:
-            return Response({}, status=status.HTTP_200_OK)
+            graph_data = bot_version.strategy_params
+        
+        response_data = {
+            'version_name': bot_version.version_name,
+            'strategy_graph': graph_data
+        }
+        return Response(response_data, status=status.HTTP_200_OK)
 
 
 class BacktestConfigViewSet(viewsets.ModelViewSet):

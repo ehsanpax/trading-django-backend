@@ -178,8 +178,12 @@ def run_backtest(self, backtest_run_id, strategy_name, strategy_params, indicato
         # A more precise calculation might be needed for complex timeframes.
         # Using timedelta is a robust way to handle this.
         # Assuming timeframe is in a format like 'M1', 'H1', 'D1'
-        time_val = int(timeframe[:-1])
-        time_unit = timeframe[-1]
+        import re
+        match = re.match(r"([A-Z]+)(\d+)", timeframe)
+        if not match:
+            raise ValueError(f"Invalid timeframe format: {timeframe}")
+        time_unit, time_val_str = match.groups()
+        time_val = int(time_val_str)
         
         if time_unit == 'M':
             warmup_delta = timedelta(minutes=200 * time_val)
@@ -212,6 +216,9 @@ def run_backtest(self, backtest_run_id, strategy_name, strategy_params, indicato
         
         if ohlcv_df.empty:
             raise ValueError(f"Resampling to {timeframe} resulted in no data.")
+
+        # Add tick data for the Price source
+        ohlcv_df['tick'] = ohlcv_df['close']
 
         logger.info(f"Loaded and prepared {len(ohlcv_df)} bars of {timeframe} data.")
 
@@ -296,11 +303,33 @@ def run_backtest(self, backtest_run_id, strategy_name, strategy_params, indicato
         backtest_run.stats = final_stats
         backtest_run.simulated_trades_log = simulated_trades
         
-        # --- Save Indicator Data (if available on legacy instance) ---
-        if hasattr(legacy_strategy_instance, 'get_indicator_column_names'):
+        # --- Save Indicator Data ---
+        indicator_data_to_save = []
+        
+        # Case 1: Modern SectionedStrategy with pre-computed column names
+        if hasattr(legacy_strategy_instance, 'indicator_column_names'):
+            logger.info("Processing indicators for a SectionedStrategy.")
+            df_with_indicators = ohlcv_df_backtest_period
+            for col_name in legacy_strategy_instance.indicator_column_names:
+                if col_name in df_with_indicators.columns:
+                    valid_series = df_with_indicators[col_name].dropna()
+                    for timestamp, value in valid_series.items():
+                        indicator_data_to_save.append(
+                            BacktestIndicatorData(
+                                backtest_run=backtest_run,
+                                timestamp=timestamp,
+                                indicator_name=col_name,
+                                value=Decimal(str(value))
+                            )
+                        )
+                else:
+                    logger.warning(f"Column '{col_name}' from indicator_column_names not found in DataFrame.")
+
+        # Case 2: Legacy strategy
+        elif hasattr(legacy_strategy_instance, 'get_indicator_column_names'):
+            logger.info("Processing indicators for a legacy strategy.")
             indicator_columns = legacy_strategy_instance.get_indicator_column_names()
-            df_with_indicators = getattr(legacy_strategy_instance, 'df', ohlcv_df)
-            indicator_data_to_save = []
+            df_with_indicators = getattr(legacy_strategy_instance, 'df', ohlcv_df_backtest_period)
             for col_name in indicator_columns:
                 if col_name in df_with_indicators.columns:
                     valid_series = df_with_indicators[col_name].dropna()
@@ -311,7 +340,11 @@ def run_backtest(self, backtest_run_id, strategy_name, strategy_params, indicato
                                 indicator_name=col_name, value=Decimal(str(value))
                             )
                         )
+        
+        if indicator_data_to_save:
             _bulk_insert_in_batches(BacktestIndicatorData, indicator_data_to_save)
+        else:
+            logger.warning(f"No indicator data was prepared for saving for BacktestRun {backtest_run_id}.")
 
         backtest_run.status = 'COMPLETED'
         backtest_run.progress = 100
