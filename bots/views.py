@@ -428,8 +428,17 @@ class BacktestChartDataAPIView(APIView):
                 temp_indicator_groups[record.indicator_name].append(point)
 
             for name, points in temp_indicator_groups.items():
+                # Extract the base indicator name (e.g., 'ema' from 'ema_close_length_9')
+                base_indicator_name = name.split('_')[0]
+                try:
+                    indicator_cls = indicator_registry.get_indicator(base_indicator_name)
+                    pane_type = getattr(indicator_cls, 'PANE_TYPE', 'OVERLAY') # Default to OVERLAY
+                except (KeyError, AttributeError):
+                    pane_type = 'OVERLAY' # Default if indicator not found or attr missing
+
                 indicator_data_grouped[name] = {
-                    "data": sorted(points, key=lambda k: k['time'])
+                    "data": sorted(points, key=lambda k: k['time']),
+                    "pane_type": pane_type
                 }
 
             # Fetch and serialize Trade Markers from the backtest run's JSON log

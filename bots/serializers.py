@@ -75,7 +75,7 @@ class BacktestConfigSerializer(serializers.ModelSerializer):
     class Meta:
         model = BacktestConfig
         fields = [
-            'id', 'bot_version', 'bot_version_info', 'timeframe', 'timeframe_display', 
+            'id', 'name', 'bot_version', 'bot_version_info', 'timeframe', 'timeframe_display',
             'risk_json', 'execution_config', 'execution_config_id', 'label', 'created_at'
         ]
         read_only_fields = ['id', 'created_at', 'bot_version_info', 'timeframe_display', 'execution_config']

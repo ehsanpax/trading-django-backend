@@ -92,6 +92,7 @@ class BacktestConfig(models.Model):
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=255, blank=True, null=True, help_text="User-defined name for this backtest config")
     bot_version = models.ForeignKey(BotVersion, on_delete=models.CASCADE, related_name="backtest_configs")
     timeframe = models.CharField(
         max_length=10,

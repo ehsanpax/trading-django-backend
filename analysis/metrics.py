@@ -80,6 +80,27 @@ def calculate_portfolio_stats(equity_curve: list, trades_log: list) -> dict:
     
     expectancy = (win_rate * float(average_win)) - ((1 - win_rate) * float(average_loss))
 
+    # 5. Detailed trade stats
+    long_trades = [t for t in trades_log if t.get('side') == 'BUY']
+    short_trades = [t for t in trades_log if t.get('side') == 'SELL']
+
+    biggest_win = max(pnl_values) if winning_trades else Decimal(0)
+    biggest_loss = min(pnl_values) if losing_trades else Decimal(0)
+
+    max_consecutive_wins = 0
+    max_consecutive_losses = 0
+    current_win_streak = 0
+    current_loss_streak = 0
+    for pnl in pnl_values:
+        if pnl > 0:
+            current_win_streak += 1
+            current_loss_streak = 0
+        else:
+            current_loss_streak += 1
+            current_win_streak = 0
+        max_consecutive_wins = max(max_consecutive_wins, current_win_streak)
+        max_consecutive_losses = max(max_consecutive_losses, current_loss_streak)
+
     return {
         "max_drawdown": float(max_drawdown_val),
         "max_drawdown_pct": float(max_drawdown_pct),
@@ -92,4 +113,11 @@ def calculate_portfolio_stats(equity_curve: list, trades_log: list) -> dict:
         "win_rate": float(win_rate),
         "average_win": float(average_win),
         "average_loss": float(average_loss),
+        "total_trades": len(pnl_values),
+        "long_trades_count": len(long_trades),
+        "short_trades_count": len(short_trades),
+        "biggest_win": float(biggest_win),
+        "biggest_loss": float(biggest_loss),
+        "max_consecutive_wins": max_consecutive_wins,
+        "max_consecutive_losses": max_consecutive_losses,
     }

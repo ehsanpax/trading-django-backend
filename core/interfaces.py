@@ -9,6 +9,7 @@ class IndicatorInterface(Protocol):
     A formal contract for all indicators.
     """
     VERSION: int
+    PANE_TYPE: str
     OUTPUTS: List[str]
     PARAMS_SCHEMA: Dict
 

@@ -349,6 +349,11 @@ def run_backtest(self, backtest_run_id, strategy_name, strategy_params, indicato
         backtest_run.status = 'COMPLETED'
         backtest_run.progress = 100
         backtest_run.save(update_fields=['equity_curve', 'stats', 'simulated_trades_log', 'status', 'progress'])
+        
+        # Log the instrument spec used
+        if instrument_spec_instance:
+            logger.info(f"BacktestRun {backtest_run_id} used InstrumentSpecification: {instrument_spec_instance.__dict__}")
+
         logger.info(f"BacktestRun {backtest_run_id} completed with new engine. Stats: {final_stats}")
 
     except Exception as e:

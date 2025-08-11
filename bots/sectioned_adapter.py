@@ -1,6 +1,7 @@
 import pandas as pd
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any
+from decimal import Decimal
 
 from bots.base import BaseStrategy, make_open_trade, make_close_position, make_reduce_position
 from core.interfaces import IndicatorRequest
@@ -12,8 +13,10 @@ class SectionedStrategySpec(BaseModel):
     """
     Pydantic model for validating the sectioned strategy specification.
     """
-    entry: dict
-    exit: dict
+    entry_long: dict = None
+    entry_short: dict = None
+    exit_long: dict = None
+    exit_short: dict = None
     filters: dict = Field(default_factory=dict)
     risk: dict
 
@@ -86,8 +89,19 @@ class SectionedStrategy(BaseStrategy):
                 for item in node:
                     walk_conditions(item)
 
-        walk_conditions(self.spec.entry)
-        walk_conditions(self.spec.exit)
+        if self.spec.entry_long:
+            walk_conditions(self.spec.entry_long)
+        if self.spec.entry_short:
+            walk_conditions(self.spec.entry_short)
+        if self.spec.exit_long:
+            walk_conditions(self.spec.exit_long)
+        if self.spec.exit_short:
+            walk_conditions(self.spec.exit_short)
+        
+        # Check for ATR in risk settings for SL
+        if self.spec.risk and self.spec.risk.get('sl', {}).get('type') == 'atr':
+            required.add(('atr', frozenset({'length': 14}.items()))) # Assuming default ATR length 14
+
         walk_conditions(self.spec.risk)
         
         indicator_requests = [IndicatorRequest(name=name, params=dict(params)) for name, params in required]
@@ -102,34 +116,94 @@ class SectionedStrategy(BaseStrategy):
         """
         actions = []
         
-        # --- Evaluate Entry Conditions ---
-        if self.spec.entry:
-            try:
-                entry_signal = self._evaluate_condition(self.spec.entry, df_current_window)
-                if entry_signal:
-                    risk_params = self.spec.risk
-                    # TODO: A more robust sizing and SL/TP calculation is needed.
-                    qty = risk_params.get("fixed_lot_size", 1.0)
-                    sl_pips = risk_params.get("stop_loss_pips")
-                    tp_pips = risk_params.get("take_profit_pips")
-                    
-                    # This is a simplified SL/TP calculation. A real one would use tick_size.
-                    current_price = df_current_window.iloc[-1]['close']
-                    sl = current_price - sl_pips * 0.0001 if sl_pips else None
-                    tp = current_price + tp_pips * 0.0001 if tp_pips else None
+        def _create_trade_action(direction: str):
+            risk_params = self.spec.risk
+            sl_config = risk_params.get("sl", {})
+            tp_pips = risk_params.get("take_profit_pips")
+            current_price = df_current_window.iloc[-1]['close']
+            sl = None
 
-                    actions.append(make_open_trade(side="BUY", qty=qty, sl=sl, tp=tp, tag="Entry Signal"))
+            if sl_config.get("type") == "atr":
+                atr_params = {'length': 14} # Assuming default ATR length 14
+                param_str = "_".join([f"{k}_{v}" for k, v in sorted(atr_params.items())])
+                atr_col_name = f"atr_atr_{param_str}"
+                
+                if atr_col_name not in df_current_window.columns:
+                    logger.error(f"ATR column '{atr_col_name}' not found in DataFrame.")
+                    return None
+
+                atr_val = df_current_window.iloc[-1][atr_col_name]
+                sl_mult = sl_config.get("mult", 1.5)
+                sl_offset = atr_val * sl_mult
+                if direction == "BUY":
+                    sl = current_price - sl_offset
+                else: # SELL
+                    sl = current_price + sl_offset
+            elif sl_config.get("type") == "pct":
+                sl_pct = sl_config.get("value", 0.01) # Default 1%
+                if direction == "BUY":
+                    sl = current_price * (1 - sl_pct)
+                else: # SELL
+                    sl = current_price * (1 + sl_pct)
+
+            tp = None
+            if tp_pips:
+                if direction == "BUY":
+                    tp = current_price + tp_pips * 0.0001
+                else: # SELL
+                    tp = current_price - tp_pips * 0.0001
+            
+            # --- Dynamic Position Sizing ---
+            risk_pct = risk_params.get("risk_pct", 0.01) # Default 1% risk
+            sl_distance = abs(current_price - sl) if sl else 0
+            
+            if sl_distance > 0 and self.instrument_spec:
+                tick_size = Decimal(str(getattr(self.instrument_spec, 'tick_size', '0.00001')))
+                tick_value = Decimal(str(getattr(self.instrument_spec, 'tick_value', '1.0')))
+                contract_size = Decimal(str(getattr(self.instrument_spec, 'contract_size', '1.0')))
+                
+                sl_ticks = Decimal(str(sl_distance)) / tick_size
+                risk_per_lot = sl_ticks * tick_value * contract_size
+                
+                if risk_per_lot > 0:
+                    total_risk_amount = Decimal(str(account_equity)) * Decimal(str(risk_pct))
+                    qty = float(total_risk_amount / risk_per_lot)
+                else:
+                    qty = risk_params.get("fixed_lot_size", 1.0)
+            else:
+                qty = risk_params.get("fixed_lot_size", 1.0) # Fallback to fixed size
+
+            return make_open_trade(side=direction, qty=qty, sl=sl, tp=tp, tag=f"Entry {direction}")
+
+        # --- Evaluate Entry Conditions ---
+        if self.spec.entry_long:
+            try:
+                if self._evaluate_condition(self.spec.entry_long, df_current_window):
+                    actions.append(_create_trade_action("BUY"))
             except Exception as e:
-                logger.error(f"Error evaluating entry condition: {e}", exc_info=True)
+                logger.error(f"Error evaluating long entry condition: {e}", exc_info=True)
+
+        if self.spec.entry_short:
+            try:
+                if self._evaluate_condition(self.spec.entry_short, df_current_window):
+                    actions.append(_create_trade_action("SELL"))
+            except Exception as e:
+                logger.error(f"Error evaluating short entry condition: {e}", exc_info=True)
 
         # --- Evaluate Exit Conditions ---
-        if self.spec.exit:
+        if self.spec.exit_long:
             try:
-                exit_signal = self._evaluate_condition(self.spec.exit, df_current_window)
-                if exit_signal:
-                    actions.append(make_close_position(side="ANY", qty="ALL", tag="Exit Signal"))
+                if self._evaluate_condition(self.spec.exit_long, df_current_window):
+                    actions.append(make_close_position(side="BUY", qty="ALL", tag="Exit Long"))
             except Exception as e:
-                logger.error(f"Error evaluating exit condition: {e}", exc_info=True)
+                logger.error(f"Error evaluating long exit condition: {e}", exc_info=True)
+        
+        if self.spec.exit_short:
+            try:
+                if self._evaluate_condition(self.spec.exit_short, df_current_window):
+                    actions.append(make_close_position(side="SELL", qty="ALL", tag="Exit Short"))
+            except Exception as e:
+                logger.error(f"Error evaluating short exit condition: {e}", exc_info=True)
             
         return actions
 
@@ -161,8 +235,10 @@ class SectionedStrategy(BaseStrategy):
              # Handle cases where one of the values is a literal
             if isinstance(left_val, (int, float)) and hasattr(right_val, 'iloc'):
                 left_series = pd.Series([left_val] * len(right_val), index=right_val.index)
+                right_series = right_val
             elif isinstance(right_val, (int, float)) and hasattr(left_val, 'iloc'):
                 right_series = pd.Series([right_val] * len(left_val), index=left_val.index)
+                left_series = left_val
             else:
                 logger.error(f"Incompatible types for comparison: {type(left_val)} and {type(right_val)}")
                 return False
@@ -174,9 +250,9 @@ class SectionedStrategy(BaseStrategy):
             return left_series.iloc[-2] < right_series.iloc[-2] and left_series.iloc[-1] > right_series.iloc[-1]
         elif comparison_op in ["crosses_below", "crossesbelow", "cross_below"]:
             return left_series.iloc[-2] > right_series.iloc[-2] and left_series.iloc[-1] < right_series.iloc[-1]
-        elif comparison_op == ">":
+        elif comparison_op in [">", "greater_than"]:
             return left_series.iloc[-1] > right_series.iloc[-1]
-        elif comparison_op == "<":
+        elif comparison_op in ["<", "less_than"]:
             return left_series.iloc[-1] < right_series.iloc[-1]
         
         raise ValueError(f"Unsupported operator: {comparison_op}")
