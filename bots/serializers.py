@@ -1,10 +1,14 @@
 from rest_framework import serializers
-from .models import Bot, BotVersion, BacktestConfig, BacktestRun, LiveRun
+from .models import Bot, BotVersion, BacktestConfig, BacktestRun, LiveRun, ExecutionConfig
 from accounts.serializers import AccountSerializer # Assuming you have this
 from django.contrib.auth import get_user_model
-from bots.base import BotParameter, BaseStrategy, BaseIndicator
-from bots.services import StrategyManager # Import the StrategyManager
-from bots.registry import get_strategy_class, get_indicator_class # Import the registry functions
+from rest_framework import serializers
+from .models import Bot, BotVersion, BacktestConfig, BacktestRun, LiveRun, ExecutionConfig
+from accounts.serializers import AccountSerializer
+from django.contrib.auth import get_user_model
+from bots.base import BotParameter, BaseStrategy
+from bots.services import StrategyManager
+from core.registry import strategy_registry, indicator_registry
 
 User = get_user_model()
 
@@ -54,32 +58,52 @@ class BotVersionSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = BotVersion
-        fields = ['id', 'bot', 'bot_name', 'strategy_name', 'strategy_params', 'indicator_configs', 'notes', 'created_at']
-        read_only_fields = ['id', 'created_at', 'bot_name'] # All new fields are writable for creation
+        fields = ['id', 'bot', 'bot_name', 'version_name', 'strategy_name', 'strategy_params', 'indicator_configs', 'notes', 'created_at']
+        read_only_fields = ['id', 'created_at', 'bot_name']
+
+class ExecutionConfigSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ExecutionConfig
+        fields = '__all__'
 
 class BacktestConfigSerializer(serializers.ModelSerializer):
     bot_version_info = serializers.CharField(source='bot_version.__str__', read_only=True)
     timeframe_display = serializers.CharField(source='get_timeframe_display', read_only=True)
+    execution_config = ExecutionConfigSerializer(read_only=True)
+    execution_config_id = serializers.UUIDField(write_only=True, required=False, allow_null=True)
 
     class Meta:
         model = BacktestConfig
         fields = [
-            'id', 'bot_version', 'bot_version_info', 'timeframe', 'timeframe_display', 'risk_json', 
-            'slippage_ms', 'slippage_r', 'label', 'created_at'
+            'id', 'name', 'bot_version', 'bot_version_info', 'timeframe', 'timeframe_display',
+            'risk_json', 'execution_config', 'execution_config_id', 'label', 'created_at'
         ]
-        read_only_fields = ['id', 'created_at', 'bot_version_info', 'timeframe_display']
+        read_only_fields = ['id', 'created_at', 'bot_version_info', 'timeframe_display', 'execution_config']
+
+    def create(self, validated_data):
+        execution_config_id = validated_data.pop('execution_config_id', None)
+        if execution_config_id:
+            validated_data['execution_config'] = ExecutionConfig.objects.get(id=execution_config_id)
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        execution_config_id = validated_data.pop('execution_config_id', None)
+        if execution_config_id:
+            instance.execution_config = ExecutionConfig.objects.get(id=execution_config_id)
+        return super().update(instance, validated_data)
 
 class BacktestRunSerializer(serializers.ModelSerializer):
     config_label = serializers.CharField(source='config.label', read_only=True, allow_null=True)
     bot_name = serializers.CharField(source='config.bot_version.bot.name', read_only=True)
+    original_timeframe = serializers.CharField(source='config.timeframe', read_only=True)
 
     class Meta:
         model = BacktestRun
         fields = [
-            'id', 'config', 'instrument_symbol', 'config_label', 'bot_name', 'data_window_start', 
+            'id', 'config', 'instrument_symbol', 'config_label', 'bot_name', 'original_timeframe', 'data_window_start', 
             'data_window_end', 'equity_curve', 'stats', 'simulated_trades_log', 'status', 'progress', 'created_at'
         ]
-        read_only_fields = ['id', 'instrument_symbol', 'equity_curve', 'stats', 'simulated_trades_log', 'created_at', 'config_label', 'bot_name', 'progress']
+        read_only_fields = ['id', 'instrument_symbol', 'equity_curve', 'stats', 'simulated_trades_log', 'created_at', 'config_label', 'bot_name', 'progress', 'original_timeframe']
 
 class LiveRunSerializer(serializers.ModelSerializer):
     bot_name = serializers.CharField(source='bot_version.bot.name', read_only=True)
@@ -99,6 +123,7 @@ class LaunchBacktestSerializer(serializers.Serializer):
     instrument_symbol = serializers.CharField(max_length=50)
     data_window_start = serializers.DateTimeField()
     data_window_end = serializers.DateTimeField()
+    random_seed = serializers.IntegerField(required=False, allow_null=True)
 
     def validate(self, data):
         if data['data_window_start'] >= data['data_window_end']:
@@ -114,31 +139,48 @@ class LaunchBacktestSerializer(serializers.Serializer):
 
 class BotVersionCreateSerializer(serializers.Serializer):
     bot_id = serializers.UUIDField()
+    version_name = serializers.CharField(max_length=255, required=False, allow_blank=True, allow_null=True)
     strategy_name = serializers.CharField(max_length=255)
     strategy_params = serializers.JSONField(default=dict)
     indicator_configs = serializers.JSONField(default=list)
     notes = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
     def validate(self, data):
-        # Use StrategyManager to validate parameters
+        # Allow "SECTIONED_SPEC" to bypass the standard registry check
+        if data.get('strategy_name') == "SECTIONED_SPEC":
+            return data
+
+        # Use StrategyManager and new registry for validation
         try:
-            strategy_cls = get_strategy_class(data['strategy_name'])
-            if not strategy_cls:
-                raise serializers.ValidationError(f"Strategy '{data['strategy_name']}' not found in registry.")
+            strategy_cls = strategy_registry.get_strategy(data['strategy_name'])
             
             # Validate strategy's own parameters
             StrategyManager.validate_parameters(strategy_cls.PARAMETERS, data['strategy_params'])
 
-            # Validate parameters for each required indicator
+            # Validate parameters for each required indicator using the new schema
             for ind_config in data['indicator_configs']:
                 ind_name = ind_config.get("name")
                 ind_params = ind_config.get("params", {})
-                indicator_cls = get_indicator_class(ind_name)
-                if not indicator_cls:
-                    raise serializers.ValidationError(f"Indicator '{ind_name}' not found in registry.")
-                StrategyManager.validate_parameters(indicator_cls.PARAMETERS, ind_params)
+                
+                # Adjust name to match registry key, e.g., "EMA" -> "EMAIndicator"
+                if not ind_name.endswith("Indicator"):
+                    ind_name = f"{ind_name}Indicator"
 
-        except Exception as e: # Catching generic Exception for now, refine later
+                indicator_cls = indicator_registry.get_indicator(ind_name)
+                
+                # Basic validation against the new PARAMS_SCHEMA
+                # A more robust validation library like jsonschema could be used here
+                for param_name, schema in indicator_cls.PARAMS_SCHEMA.items():
+                    if param_name not in ind_params:
+                        if "default" in schema:
+                            ind_params[param_name] = schema["default"]
+                        else:
+                            raise serializers.ValidationError(f"Missing required parameter '{param_name}' for indicator '{ind_name}'")
+                    # Add type and range checks here if needed
+            
+        except ValueError as e:
+             raise serializers.ValidationError(str(e))
+        except Exception as e:
             raise serializers.ValidationError(f"Parameter validation error: {e}")
         
         return data
@@ -146,11 +188,15 @@ class BotVersionCreateSerializer(serializers.Serializer):
 class CreateLiveRunSerializer(serializers.Serializer):
     bot_version_id = serializers.UUIDField()
     instrument_symbol = serializers.CharField(max_length=50)
+    # --- New: explicit target account for this live run ---
+    account_id = serializers.UUIDField()
 
     def validate(self, data):
         # Basic validation for instrument_symbol
         if not data.get('instrument_symbol'):
             raise serializers.ValidationError("Instrument symbol is required.")
+        if not data.get('account_id'):
+            raise serializers.ValidationError("Account id is required.")
         return data
 
 # --- Serializers for Charting Data ---

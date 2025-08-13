@@ -31,9 +31,11 @@ class Bot(models.Model):
 class BotVersion(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     bot = models.ForeignKey(Bot, on_delete=models.CASCADE, related_name="versions")
+    version_name = models.CharField(max_length=255, blank=True, null=True, help_text="A user-friendly name for this version.")
     strategy_name = models.CharField(max_length=255, default="", help_text="Name of the strategy from the registry, e.g., 'ema_crossover_v1'")
     strategy_params = JSONField(default=dict, help_text="Parameters for the chosen strategy")
     indicator_configs = JSONField(default=list, help_text="List of indicator configurations, e.g., [{'name': 'EMA', 'params': {'length': 20}}]")
+    strategy_graph = JSONField(null=True, blank=True, help_text="JSON representation of the no-code strategy graph")
     notes = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -44,7 +46,7 @@ class BotVersion(models.Model):
         ordering = ['-created_at']
 
     def __str__(self):
-        return f"Version for {self.bot.name} created at {self.created_at.strftime('%Y-%m-%d %H:%M')}"
+        return f"Version {self.version_name or self.id} for {self.bot.name}"
 
     # def save(self, *args, **kwargs):
     #     # Implement immutability logic here if needed
@@ -52,6 +54,30 @@ class BotVersion(models.Model):
     #     # if self.pk:
     #     #     raise ValidationError("BotVersion instances are immutable.")
     #     super().save(*args, **kwargs)
+
+
+class ExecutionConfig(models.Model):
+    SLIPPAGE_MODEL_CHOICES = [
+        ('NONE', 'None'),
+        ('FIXED', 'Fixed Ticks'),
+        ('PERCENTAGE', 'Percentage'),
+    ]
+    COMMISSION_UNITS_CHOICES = [
+        ('PER_TRADE', 'Per Trade'),
+        ('PER_LOT', 'Per Lot'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=255, unique=True)
+    slippage_model = models.CharField(max_length=20, choices=SLIPPAGE_MODEL_CHOICES, default='NONE')
+    slippage_value = models.FloatField(default=0, help_text="Value for slippage (e.g., ticks or percentage)")
+    commission_units = models.CharField(max_length=20, choices=COMMISSION_UNITS_CHOICES, default='PER_TRADE')
+    commission_per_unit = models.DecimalField(max_digits=12, decimal_places=6, default=0)
+    spread_pips = models.FloatField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.name
 
 
 class BacktestConfig(models.Model):
@@ -66,6 +92,7 @@ class BacktestConfig(models.Model):
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=255, blank=True, null=True, help_text="User-defined name for this backtest config")
     bot_version = models.ForeignKey(BotVersion, on_delete=models.CASCADE, related_name="backtest_configs")
     timeframe = models.CharField(
         max_length=10,
@@ -74,8 +101,7 @@ class BacktestConfig(models.Model):
         help_text="Chart timeframe for the backtest (e.g., M1, H1, D1)"
     )
     risk_json = JSONField(default=dict, help_text="Custom risk settings for this backtest")
-    slippage_ms = models.IntegerField(default=0, help_text="Slippage in milliseconds")
-    slippage_r = models.DecimalField(max_digits=10, decimal_places=5, default=0.0, help_text="Slippage in R (risk units) or percentage")
+    execution_config = models.ForeignKey(ExecutionConfig, on_delete=models.PROTECT, null=True, blank=True)
     label = models.CharField(max_length=255, blank=True, null=True, help_text="User-defined label for this config")
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -95,6 +121,8 @@ class BacktestRun(models.Model):
     # status (e.g., pending, running, completed, failed) could be useful
     status = models.CharField(max_length=50, default="pending")
     progress = models.IntegerField(default=0, help_text="Backtest progress percentage")
+    runtime_fingerprint = models.JSONField(null=True, blank=True, help_text="Versions of code and libraries used for this run.")
+    random_seed = models.PositiveIntegerField(null=True, blank=True, help_text="Seed for any random operations to ensure reproducibility.")
 
     class Meta:
         ordering = ['-created_at']
@@ -144,6 +172,8 @@ class LiveRun(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     bot_version = models.ForeignKey(BotVersion, on_delete=models.CASCADE, related_name="live_runs")
     instrument_symbol = models.CharField(max_length=50, help_text="The trading instrument symbol for this live run") # Added field
+    # --- New: Explicit account targeted by this LiveRun ---
+    account = models.ForeignKey(Account, on_delete=models.PROTECT, related_name="live_runs", null=True, blank=True)
     started_at = models.DateTimeField(auto_now_add=True)
     stopped_at = models.DateTimeField(null=True, blank=True)
     # Consider more granular status: pending, running, stopping, stopped, error

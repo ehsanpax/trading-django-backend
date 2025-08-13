@@ -7,11 +7,14 @@ class InstrumentSerializer(serializers.ModelSerializer):
         fields = ['symbol', 'exchange', 'base_timeframe', 'data_status', 'last_updated']
 
 class AnalysisJobSubmitSerializer(serializers.Serializer):
+    name = serializers.CharField(max_length=255, required=False, allow_blank=True)
     instrument_symbol = serializers.CharField(max_length=50)
     analysis_type = serializers.ChoiceField(choices=AnalysisJob.ANALYSIS_TYPE_CHOICES)
     target_timeframe = serializers.CharField(max_length=10)
     start_date = serializers.DateField()
     end_date = serializers.DateField()
+    indicator_configs = serializers.JSONField(required=False, default=list)
+    analysis_params = serializers.JSONField(required=False, default=dict)
 
     def validate_instrument_symbol(self, value):
         """
@@ -35,7 +38,7 @@ class AnalysisJobStatusSerializer(serializers.ModelSerializer):
     class Meta:
         model = AnalysisJob
         fields = [
-            'job_id', 'status', 'analysis_type', 'instrument_symbol', 
+            'job_id', 'name', 'status', 'analysis_type', 'instrument_symbol', 
             'target_timeframe', 'created_at', 'updated_at', 'error_message'
         ]
         # extra_kwargs is not needed for instrument_symbol if defined as a field above

@@ -39,7 +39,7 @@ DEBUG = env.bool("DEBUG", default=False)
 
 ALLOWED_HOSTS = env.list("ALLOWED_HOSTS", default=["*"])
 
-
+BACKEND_URL = env.str("BACKEND_URL", default="http://localhost:8000")
 # Application definition
 
 INSTALLED_APPS = [
@@ -53,6 +53,8 @@ INSTALLED_APPS = [
     # Third-party apps
     "rest_framework",
     "rest_framework.authtoken",
+    "django_celery_results",
+    "django_celery_beat",
     # Your apps
     "trading",
     "accounts",
@@ -74,7 +76,11 @@ INSTALLED_APPS = [
     "ta",  # Technical Analysis app
     "AI",  # AI Prompts app
     "charts",
-    "fundamental"
+    "fundamental",
+    "monitoring",
+    "user",
+    "core",
+    "task_logs",
 ]
 
 
@@ -208,6 +214,10 @@ LOGGING = {
             "format": "[%(asctime)s] %(levelname)s %(name)s: %(message)s",
             "datefmt": "%Y-%m-%d %H:%M:%S",
         },
+        "task_formatter": {
+            "format": "[%(asctime)s] [%(levelname)s] [%(name)s] [%(process)d] %(message)s",
+            "datefmt": "%Y-%m-%d %H:%M:%S",
+        },
     },
     "handlers": {
         "console": {
@@ -219,6 +229,11 @@ LOGGING = {
             "filename": LOG_DIR / "application.log",
             "formatter": "standard",
         },
+        "db_log": {
+            "level": "INFO",
+            "class": "task_logs.handlers.DatabaseLogHandler",
+            "formatter": "task_formatter",
+        },
     },
     "loggers": {
         "": {  # root logger
@@ -227,6 +242,11 @@ LOGGING = {
         },
         "django": {
             "handlers": ["console", "file"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "bots": {
+            "handlers": ["console", "file", "db_log"],
             "level": "INFO",
             "propagate": False,
         },
@@ -280,3 +300,6 @@ DATA_ROOT.mkdir(exist_ok=True)  # Ensure the directory exists
 
 OANDA_ACCESS_TOKEN = env("OANDA_ACCESS_TOKEN")
 OANDA_ENVIRONMENT = env("OANDA_ENVIRONMENT")
+
+
+CELERY_RESULT_BACKEND = "django-db"

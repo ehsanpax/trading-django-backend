@@ -49,6 +49,7 @@ prompt_toolkit==3.0.51
 propcache==0.3.1
 protobuf==3.20.1
 psycopg2-binary==2.9.10
+pydantic==2.8.2
 pyarrow==20.0.0
 pyasn1==0.6.1
 pyasn1_modules==0.4.1
@@ -79,3 +80,5 @@ yarl==1.19.0
 zope.interface==7.2
 whitenoise==6.2.0
 django-environ
+django-celery-results
+django-celery-beat

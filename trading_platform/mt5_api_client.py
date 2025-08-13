@@ -217,8 +217,10 @@ class MT5APIClient:
     def _post(self, endpoint: str, json_data: Dict[str, Any]) -> Dict[str, Any]:
         try:
             headers = {'Content-Type': 'application/json'}
+            url = f"{self.base_url}{endpoint}"
+            logger.info(f"MT5APIClient: Making POST request to {url}")
             response = requests.post(
-                f"{self.base_url}{endpoint}",
+                url,
                 json=json_data,
                 headers=headers,
                 timeout=10
@@ -234,7 +236,7 @@ class MT5APIClient:
                     raise BrokerAPIError(f"MT5 API Error: {response.text} (Status {response.status_code})")
 
             data = response.json()
-            logger.info(f"Response from MT5 API ({endpoint}): {data}")
+            #logger.info(f"Response from MT5 API ({endpoint}): {data}")
             return data
         except requests.exceptions.Timeout as e:
             raise BrokerConnectionError("Request to MT5 API service timed out.") from e
@@ -348,6 +350,10 @@ class MT5APIClient:
 
     def delete_instance(self) -> Dict[str, Any]:
         return self._delete(f"/mt5/instance/{self.internal_account_id}")
+
+    def close_instance(self, internal_account_id: str) -> Dict[str, Any]:
+        payload = {"internal_account_id": internal_account_id}
+        return self._post("/mt5/close", json_data=payload)
 
     async def trigger_instance_initialization(self):
         """

@@ -397,7 +397,11 @@ class AllOpenPositionsLiveView(APIView):
         db_trade_order_ids = set()
         account_id = self.request.query_params.get("account", None)
         if account_id:
-            user_accounts = user_accounts.filter(Q(id=account_id) | Q(simple_id=True))
+            try:
+                account_id = uuid.UUID(account_id, version=4)
+                user_accounts = user_accounts.filter(id=account_id)
+            except Exception:
+                user_accounts = user_accounts.filter(name__iexact=str(account_id)) 
 
         # 1. Fetch all open trades from the database for the user
         db_trades = Trade.objects.filter(account__in=user_accounts, trade_status="open")
@@ -632,37 +636,19 @@ class AllPendingOrdersView(APIView):
 
     def get(self, request):
         accounts = Account.objects.filter(user=request.user)
-        all_pending_orders = []
-        account_id = self.request.query_params.get("account", None)
+        account_id = self.request.query_params.get("account_id", None)
+
         if account_id:
-            accounts = accounts.filter(Q(id=account_id) | Q(simple_id=True))
-
-        for account in accounts:
             try:
-                pending_orders_data = get_pending_orders(account)
-                # Add account info to each order for better context on the frontend
-                for order in pending_orders_data:
-                    order["account_id"] = str(account.id)
-                    order["account_name"] = account.name
-                all_pending_orders.extend(pending_orders_data)
-            except APIException as e:
-                # Log the error and continue to the next account
-                logger.error(
-                    f"Could not fetch pending orders for account {account.id}: {e}"
-                )
-                continue
-            except NotImplementedError:
-                # Skip platforms that are not implemented
-                continue
-            except Exception as e:
-                logger.error(
-                    f"Unexpected error fetching pending orders for account {account.id}: {e}"
-                )
-                continue
-
-        return Response(
-            {"pending_orders": all_pending_orders}, status=status.HTTP_200_OK
-        )
+                account_id = uuid.UUID(account_id, version=4)
+                accounts = Account.objects.filter(id=account_id, user=request.user)
+            except Exception:
+                accounts = Account.objects.filter(name__iexact=str(account_id), user=request.user)
+            
+        pending_orders = []
+        for account in accounts:
+            pending_orders.extend(get_pending_orders(account))
+        return Response({"pending_orders": pending_orders}, status=status.HTTP_200_OK)
 
 
 class CancelPendingOrderView(APIView):
@@ -674,7 +660,7 @@ class CancelPendingOrderView(APIView):
     authentication_classes = [TokenAuthentication, JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
-    def delete(self, request, order_id: uuid.UUID):
+    def delete(self, request, order_id: str):
         result = cancel_pending_order(user=request.user, order_id=order_id)
         return Response(result, status=status.HTTP_200_OK)
 

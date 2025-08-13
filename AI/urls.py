@@ -5,14 +5,33 @@ from .views import (
     StoreSessionExecutionViewset,
     ChatSessionViewset,
     TradeJournalViewset,
+    SessionScheduleViewset,
 )
 
 
 urlpatterns = [
     path(
+        "prompts/<uuid:pk>/",
+        PromptViewSet.as_view(
+            {"get": "retrieve", "put": "partial_update", "delete": "destroy"}
+        ),
+        name="prompt-detail",
+    ),
+    path(
         "prompts/",
         PromptViewSet.as_view({"get": "list", "post": "create"}),
         name="prompt-list-create",
+    ),
+    path(
+        "session-schedules/<pk>/",
+        SessionScheduleViewset.as_view(
+            {"get": "retrieve", "put": "partial_update", "delete": "destroy"}
+        ),
+    ),
+    path(
+        "session-schedules/",
+        SessionScheduleViewset.as_view({"get": "list", "post": "create"}),
+        name="session-schedule-list-create",
     ),
     path(
         "session-executions/",

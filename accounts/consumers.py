@@ -7,6 +7,8 @@ from django.apps import apps
 from .models import Account, MT5Account
 from trading_platform.mt5_api_client import connection_manager
 from trades.tasks import trigger_trade_synchronization
+from trades.listeners import PositionUpdateListener
+from monitoring.services import monitoring_service
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +22,7 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         self.account_id = None
         self.user = None
         self.mt5_client = None
+        self.is_active = False
         self.account_info = {}
         self.open_positions = []
         self.ticket_to_uuid_map = {}
@@ -31,7 +34,7 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         and populates the ticket-to-UUID mapping.
         """
         Trade = apps.get_model('trading', 'Trade')
-        logger.info(f"Populating trade UUID map for account {self.account_id}")
+        #logger.info(f"Populating trade UUID map for account {self.account_id}")
         open_trades = await sync_to_async(list)(
             Trade.objects.filter(
                 account_id=self.account_id,
@@ -41,7 +44,7 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         self.ticket_to_uuid_map = {
             str(trade['position_id']): str(trade['id']) for trade in open_trades
         }
-        logger.info(f"UUID map populated with {len(self.ticket_to_uuid_map)} entries.")
+        #logger.info(f"UUID map populated with {len(self.ticket_to_uuid_map)} entries.")
 
     async def _populate_order_uuid_map(self):
         """
@@ -49,7 +52,7 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         and populates the order ticket-to-UUID mapping.
         """
         Order = apps.get_model('trading', 'Order')
-        logger.info(f"Populating order UUID map for account {self.account_id}")
+        #logger.info(f"Populating order UUID map for account {self.account_id}")
         pending_orders_db = await sync_to_async(list)(
             Order.objects.filter(
                 account_id=self.account_id,
@@ -84,7 +87,16 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
             return
 
         await self.accept()
+        self.is_active = True
         logger.info(f"Account WebSocket connected for account {self.account_id}")
+
+        monitoring_service.register_connection(
+            self.channel_name,
+            self.user,
+            self.account_id,
+            "account",
+            {}
+        )
 
         self.mt5_client = await connection_manager.get_client(
             base_url=settings.MT5_API_BASE_URL,
@@ -115,6 +127,8 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         """
         Handles a WebSocket disconnection.
         """
+        monitoring_service.unregister_connection(self.channel_name)
+        self.is_active = False
         if self.mt5_client:
             self.mt5_client.unregister_account_info_listener(self.send_account_update)
             self.mt5_client.unregister_open_positions_listener(self.send_positions_update)
@@ -124,6 +138,7 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         """
         Handles incoming messages from the client.
         """
+        monitoring_service.update_client_message(self.channel_name, content)
         action = content.get("action")
         if action == "unsubscribe":
             logger.info(f"Unsubscribe request received for account {self.account_id}. Closing connection.")
@@ -131,11 +146,15 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
 
     async def send_account_update(self, account_info):
         """Callback for account info updates from the MT5APIClient."""
+        if not self.is_active:
+            return
         self.account_info = account_info
         await self.send_combined_update()
 
     async def send_positions_update(self, open_positions):
         """Callback for open positions updates from the MT5APIClient."""
+        if not self.is_active:
+            return
         all_positions = open_positions
         pending_orders = [p for p in all_positions if isinstance(p, dict) and p.get('type') == 'pending_order']
         open_trades = [p for p in all_positions if isinstance(p, dict) and p.get('type') != 'pending_order']
@@ -147,7 +166,7 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         previous_order_tickets = set(self.order_ticket_to_uuid_map.keys())
 
         if current_order_tickets != previous_order_tickets:
-            logger.info("Change in pending orders detected. Refreshing order UUID map from DB.")
+            #logger.info("Change in pending orders detected. Refreshing order UUID map from DB.")
             await self._populate_order_uuid_map()
 
         await self.send_combined_update(pending_orders=pending_orders)
@@ -171,8 +190,26 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
 
         new_tickets = current_trade_tickets - previous_trade_tickets
         if new_tickets:
-            logger.info(f"Detected {len(new_tickets)} new trades. Refreshing trade UUID map from DB.")
-            await self._populate_trade_uuid_map()
+            logger.info(f"Detected {len(new_tickets)} new trades: {new_tickets}")
+            new_positions_data = [pos for pos in self.open_positions if str(pos.get('ticket')) in new_tickets]
+            
+            # Get the account instance
+            account = await sync_to_async(Account.objects.get)(id=self.account_id)
+            
+            # Process these new positions to check for filled pending orders
+            await PositionUpdateListener.process_new_positions(account, new_positions_data)
+
+        # After processing, refresh the trade UUID map to include the new trades
+        #logger.info("Refreshing trade UUID map from DB after processing new trades.")
+        await self._populate_trade_uuid_map()
+
+        # --- Update drawdown and run-up for each open trade ---
+        for pos in self.open_positions:
+            trade_id = self.ticket_to_uuid_map.get(str(pos.get('ticket')))
+            if trade_id:
+                await sync_to_async(PositionUpdateListener.on_position_update)(
+                    trade_id, pos.get('profit', 0)
+                )
 
     async def send_combined_update(self, pending_orders: list = []):
         """Combines the latest account info, positions, and pending orders and sends to the client."""
@@ -217,3 +254,4 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
             }
         }
         await self.send_json(payload)
+        monitoring_service.update_server_message(self.channel_name, payload)

@@ -1,5 +1,10 @@
 from django.contrib import admin
-from .models import Bot, BotVersion, BacktestConfig, BacktestRun, LiveRun
+from .models import Bot, BotVersion, BacktestConfig, BacktestRun, LiveRun, ExecutionConfig
+
+@admin.register(ExecutionConfig)
+class ExecutionConfigAdmin(admin.ModelAdmin):
+    list_display = ('name', 'slippage_model', 'slippage_value', 'commission_units', 'commission_per_unit', 'spread_pips')
+    search_fields = ('name',)
 
 @admin.register(Bot)
 class BotAdmin(admin.ModelAdmin):
@@ -17,7 +22,7 @@ class BotVersionAdmin(admin.ModelAdmin):
 
 @admin.register(BacktestConfig)
 class BacktestConfigAdmin(admin.ModelAdmin):
-    list_display = ('label', 'bot_version', 'slippage_ms', 'slippage_r', 'created_at')
+    list_display = ('label', 'bot_version', 'execution_config', 'created_at')
     list_filter = ('bot_version__bot__name',)
     search_fields = ('label', 'bot_version__bot__name')
     readonly_fields = ('id', 'created_at')
@@ -31,7 +36,7 @@ class BacktestRunAdmin(admin.ModelAdmin):
 
 @admin.register(LiveRun)
 class LiveRunAdmin(admin.ModelAdmin):
-    list_display = ('id', 'bot_version', 'instrument_symbol', 'status', 'started_at', 'stopped_at', 'pnl_r', 'drawdown_r')
-    list_filter = ('status', 'instrument_symbol', 'bot_version__bot__name')
-    search_fields = ('id__iexact', 'instrument_symbol', 'bot_version__bot__name', 'status')
+    list_display = ('id', 'bot_version', 'instrument_symbol', 'account', 'status', 'started_at', 'stopped_at', 'pnl_r', 'drawdown_r')
+    list_filter = ('status', 'instrument_symbol', 'bot_version__bot__name', 'account')
+    search_fields = ('id__iexact', 'instrument_symbol', 'bot_version__bot__name', 'status', 'account__name', 'account__id__iexact')
     readonly_fields = ('id', 'started_at', 'stopped_at', 'pnl_r', 'drawdown_r', 'last_error')

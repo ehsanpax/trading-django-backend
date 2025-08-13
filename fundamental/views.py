@@ -6,13 +6,17 @@ from .models import EconomicCalendar, Currency, News
 from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.authentication import TokenAuthentication
+from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.generics import ListAPIView
 from .serializers import EconomicCalendarSerializer, NewsSerializer
-from django.utils.dateparse import parse_date
+from django.utils.dateparse import parse_date, parse_datetime
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class EconomicCalendarAPIView(APIView):
-    authentication_classes = [TokenAuthentication]
+    authentication_classes = [JWTAuthentication, TokenAuthentication]
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
@@ -38,28 +42,21 @@ class EconomicCalendarAPIView(APIView):
                 currency_code = item["currency"]
                 currency_obj, _ = Currency.objects.get_or_create(currency=currency_code)
 
-                
                 EconomicCalendar.objects.update_or_create(
                     event=event,
                     event_time=event_time,
+                    currency=currency_obj,
                     defaults={
                         "impact": item.get("impact"),
                         "actual": item.get("actual"),
                         "previous": item.get("previous"),
                         "forecast": item.get("forecast"),
-                        "currency": currency_obj,
                     },
                 )
-            except KeyError as e:
-                return Response(
-                    {"detail": f"Missing field: {str(e)}"},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            except ValueError as e:
-                return Response(
-                    {"detail": f"Date parsing error: {str(e)}"},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+            except Exception as e:
+                logger.error(f"Missing key in item: {e}")
+                continue
+
 
         return Response(
             {"message": "Data processed successfully."}, status=status.HTTP_200_OK
@@ -67,23 +64,39 @@ class EconomicCalendarAPIView(APIView):
 
 
 class EconomicCalendarEventListAPIView(APIView):
-    authentication_classes = [TokenAuthentication]
+    authentication_classes = [JWTAuthentication, TokenAuthentication]
     permission_classes = [IsAuthenticated]
     serializer_class = EconomicCalendarSerializer
 
     def get_queryset(self):
-        queryset = EconomicCalendar.objects.all().order_by('-event_time')
+        queryset = EconomicCalendar.objects.all().order_by("-event_time")
 
         # query parameters
-        date_from = self.request.query_params.get('date_from')
-        date_to = self.request.query_params.get('date_to')
-        currency = self.request.query_params.get('currency')
+        date_from = self.request.query_params.get("date_from")
+        date_to = self.request.query_params.get("date_to")
+        currency = self.request.query_params.get("currency")
+        impact = self.request.query_params.get("impact")
+        event = self.request.query_params.get("event")
 
-        if date_from and date_to:
-            queryset = queryset.filter(event_time__date__gte=date_from, event_time__date__lte=date_to)
+        if date_from:
+            dt_from = parse_datetime(date_from)
+            if dt_from:
+                queryset = queryset.filter(event_time__gte=dt_from)
+        if date_to:
+            dt_to = parse_datetime(date_to)
+            if dt_to:
+                queryset = queryset.filter(event_time__lte=dt_to)
 
         if currency:
-            queryset = queryset.filter(currency__currency=currency)
+            currencies = currency.split(',')
+            queryset = queryset.filter(currency__currency__in=currencies)
+
+        if impact:
+            impacts = impact.split(',')
+            queryset = queryset.filter(impact__in=impacts)
+
+        if event:
+            queryset = queryset.filter(event__icontains=event)
 
         return queryset
 
@@ -91,9 +104,8 @@ class EconomicCalendarEventListAPIView(APIView):
         queryset = self.get_queryset()
         serializer = self.serializer_class(queryset, many=True)
         return Response(serializer.data)
-    
-    
-    
+
+
 class NewsAPIView(APIView):
     authentication_classes = [TokenAuthentication]
     permission_classes = [IsAuthenticated]

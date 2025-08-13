@@ -1,26 +1,54 @@
-from rest_framework import generics, permissions
-from .models import Account
-from .serializers import AccountSerializer
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from django.shortcuts import get_object_or_404
+from accounts.models import Account
+from .services import calculate_equity_curve
+from .equity_serializers import EquityDataPointSerializer
+from rest_framework.permissions import IsAuthenticated
+from datetime import datetime, timedelta
 
-# List all accounts for the authenticated user and create new ones.
-class AccountListCreateView(generics.ListCreateAPIView):
-    serializer_class = AccountSerializer
-    permission_classes = [permissions.IsAuthenticated]
+class EquityCurveView(APIView):
+    """
+    API view to retrieve equity curve data for a given account.
+    """
+    permission_classes = [IsAuthenticated]
 
-    def get_queryset(self):
-        return Account.objects.filter(user=self.request.user)
+    def get(self, request, account_id):
+        account = get_object_or_404(Account, id=account_id, user=request.user)
+        
+        # Recalculate the equity curve each time the endpoint is hit.
+        # For a production environment with many trades, this should be
+        # moved to a background task (e.g., Celery).
+        calculate_equity_curve(account)
 
-    def perform_create(self, serializer):
-        # ✅ Automatically assign the logged-in user
-        serializer.save(user=self.request.user)
+        start_date_str = request.query_params.get('start_date')
+        end_date_str = request.query_params.get('end_date')
+        time_period = request.query_params.get('period', 'all')
 
+        queryset = account.equity_data.all()
 
-# Retrieve, update, or delete a specific account.
-class AccountDetailView(generics.RetrieveUpdateDestroyAPIView):
-    serializer_class = AccountSerializer
-    permission_classes = [permissions.IsAuthenticated]
-    lookup_field = 'id'
+        if start_date_str and end_date_str:
+            try:
+                start_date = datetime.fromisoformat(start_date_str)
+                end_date = datetime.fromisoformat(end_date_str)
+                queryset = queryset.filter(date__range=(start_date, end_date))
+            except ValueError:
+                # Handle invalid date format
+                pass
+        elif time_period != 'all':
+            now = datetime.now()
+            if time_period == '1m':
+                start_date = now - timedelta(days=30)
+            elif time_period == '6m':
+                start_date = now - timedelta(days=180)
+            elif time_period == '1y':
+                start_date = now - timedelta(days=365)
+            else:
+                start_date = None
+            
+            if start_date:
+                queryset = queryset.filter(date__gte=start_date)
 
-    def get_queryset(self):
-        # Ensure users can only access their own accounts.
-        return Account.objects.filter(user=self.request.user)
+        serializer = EquityDataPointSerializer(queryset, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)

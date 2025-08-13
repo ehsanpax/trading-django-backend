@@ -2,7 +2,7 @@
 from rest_framework import serializers
 
 class AITradeRequestSerializer(serializers.Serializer):
-    account_id = serializers.UUIDField() # Or IntegerField if your IDs are integers
+    account_id = serializers.CharField() # Or IntegerField if your IDs are integers
     symbol = serializers.CharField()
     direction = serializers.ChoiceField(choices=['BUY', 'SELL'])
     order_type = serializers.ChoiceField(choices=['LIMIT', 'MARKET'], default='MARKET', required=False, allow_blank=True, allow_null=True) # Retaining order_type

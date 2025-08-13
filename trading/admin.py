@@ -35,10 +35,10 @@ class AccountAdmin(admin.ModelAdmin):
 
 @admin.register(InstrumentSpecification)
 class InstrumentSpecificationAdmin(admin.ModelAdmin):
-    list_display = ('symbol', 'description', 'source_platform', 'contract_size', 'tick_size', 'tick_value', 'last_updated')
+    list_display = ('symbol', 'description', 'source_platform', 'contract_size')
     list_filter = ('source_platform', 'base_currency', 'quote_currency')
     search_fields = ('symbol', 'description', 'base_currency', 'quote_currency')
-    readonly_fields = ('symbol', 'created_at', 'last_updated')
+    readonly_fields = ('symbol',)
     fieldsets = (
         (None, {
             'fields': ('symbol', 'description', 'source_platform')
@@ -50,9 +50,6 @@ class InstrumentSpecificationAdmin(admin.ModelAdmin):
             'fields': ('min_volume', 'max_volume', 'volume_step')
         }),
         ('Price Details', {
-            'fields': ('tick_size', 'tick_value', 'digits')
-        }),
-        ('Timestamps', {
-            'fields': ('created_at', 'last_updated')
+            'fields': ('digits',)
         }),
     )

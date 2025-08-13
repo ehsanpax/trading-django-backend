@@ -1,13 +1,17 @@
 import logging
 import uuid
+import sys
+import hashlib
+import pandas as pd
+import numpy as np
 from typing import Dict, Any, List, Type, Optional
 from django.utils import timezone
 from django.core.exceptions import ValidationError
 
 from .models import Bot, BotVersion, LiveRun, BacktestRun, BacktestConfig
-from .tasks import live_loop, run_backtest # Import Celery tasks
-from bots.registry import STRATEGY_REGISTRY, INDICATOR_REGISTRY, get_strategy_class, get_indicator_class
-from bots.base import BaseStrategy, BaseIndicator, BotParameter
+from .tasks import live_loop, run_backtest
+from core.registry import indicator_registry, strategy_registry
+from bots.base import BaseStrategy, BotParameter
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +24,7 @@ class StrategyManager:
     def get_available_strategies_metadata() -> List[Dict[str, Any]]:
         """Returns metadata for all registered strategies, including their parameters."""
         metadata = []
-        for name, strategy_cls in STRATEGY_REGISTRY.items():
+        for name, strategy_cls in strategy_registry.get_all_strategies().items():
             params_metadata = []
             for param in strategy_cls.PARAMETERS:
                 params_metadata.append({
@@ -46,24 +50,31 @@ class StrategyManager:
     def get_available_indicators_metadata() -> List[Dict[str, Any]]:
         """Returns metadata for all registered indicators, including their parameters."""
         metadata = []
-        for name, indicator_cls in INDICATOR_REGISTRY.items():
-            params_metadata = []
-            for param in indicator_cls.PARAMETERS:
-                params_metadata.append({
-                    "name": param.name,
-                    "parameter_type": param.parameter_type,
-                    "display_name": param.display_name,
-                    "description": param.description,
-                    "default_value": param.default_value,
-                    "min_value": param.min_value,
-                    "max_value": param.max_value,
-                    "step": param.step,
-                    "options": param.options,
+        for name, indicator_cls in indicator_registry.get_all_indicators().items():
+            params_list = []
+            for param_name, schema in indicator_cls.PARAMS_SCHEMA.items():
+                params_list.append({
+                    "name": param_name,
+                    "parameter_type": schema.get("type"),
+                    "display_name": schema.get("display_name"),
+                    "description": schema.get("description"),
+                    "default_value": schema.get("default"),
+                    "min_value": schema.get("min"),
+                    "max_value": schema.get("max"),
+                    "step": schema.get("step"),
+                    "options": schema.get("options") or schema.get("enum"),
                 })
+            # Enrich with outputs and pane type for frontend output selection and chart placement
+            outputs = getattr(indicator_cls, 'OUTPUTS', None) or ["default"]
+            pane_type = getattr(indicator_cls, 'PANE_TYPE', 'OVERLAY')
+            display_name = getattr(indicator_cls, 'DISPLAY_NAME', name.replace("Indicator", ""))
+
             metadata.append({
-                "name": indicator_cls.NAME,
-                "display_name": indicator_cls.DISPLAY_NAME,
-                "parameters": params_metadata,
+                "name": name,
+                "display_name": display_name,
+                "parameters": params_list,
+                "outputs": outputs,
+                "pane_type": pane_type,
             })
         return metadata
 
@@ -73,7 +84,6 @@ class StrategyManager:
         for param_def in param_definitions:
             param_name = param_def.name
             if param_name not in provided_params:
-                # Use default value if not provided and a default exists
                 if param_def.default_value is not None:
                     provided_params[param_name] = param_def.default_value
                 else:
@@ -81,7 +91,6 @@ class StrategyManager:
 
             value = provided_params[param_name]
 
-            # Type validation
             if param_def.parameter_type == "int":
                 if not isinstance(value, int):
                     try:
@@ -100,9 +109,7 @@ class StrategyManager:
             elif param_def.parameter_type == "enum":
                 if param_def.options and value not in param_def.options:
                     raise ValidationError(f"Parameter '{param_name}' must be one of {param_def.options}.")
-            # Add more type checks as needed (e.g., str)
 
-            # Range validation
             if param_def.min_value is not None and provided_params[param_name] < param_def.min_value:
                 raise ValidationError(f"Parameter '{param_name}' must be at least {param_def.min_value}.")
             if param_def.max_value is not None and provided_params[param_name] > param_def.max_value:
@@ -121,25 +128,31 @@ class StrategyManager:
         """
         Loads and instantiates a strategy with its parameters and required indicators.
         """
-        strategy_cls = get_strategy_class(strategy_name)
+        if strategy_name == "SECTIONED_SPEC":
+            from .sectioned_adapter import SectionedStrategy
+            logger.info("Instantiating SectionedStrategy adapter.")
+            # The spec, risk, and filters are all passed within the strategy_params bundle
+            return SectionedStrategy(
+                instrument_symbol=instrument_symbol,
+                account_id=account_id,
+                instrument_spec=instrument_spec,
+                strategy_params=strategy_params,
+                indicator_params=indicator_configs, # May be redundant if adapter handles it
+                risk_settings=risk_settings
+            )
+
+        strategy_cls = strategy_registry.get_strategy(strategy_name)
         if not strategy_cls:
             raise ValueError(f"Strategy '{strategy_name}' not found in registry.")
         
-        # Validate strategy parameters
         StrategyManager.validate_parameters(strategy_cls.PARAMETERS, strategy_params)
 
-        # Prepare indicator parameters for the strategy instance
-        # This assumes indicator_params will be a flat dict of indicator_name: {param_name: value}
-        # Or, if the strategy needs to instantiate indicators itself, it will use get_indicator_class
-        # For now, we'll pass the raw indicator_configs and let the strategy resolve them.
-        
-        # Instantiate the strategy
         strategy_instance = strategy_cls(
             instrument_symbol=instrument_symbol,
             account_id=account_id,
             instrument_spec=instrument_spec,
             strategy_params=strategy_params,
-            indicator_params=indicator_configs, # Pass the full configs for strategy to manage
+            indicator_params=indicator_configs,
             risk_settings=risk_settings
         )
         return strategy_instance
@@ -149,51 +162,36 @@ def create_bot_version(
     strategy_name: str,
     strategy_params: Dict[str, Any],
     indicator_configs: List[Dict[str, Any]],
-    notes: str = None
+    notes: str = None,
+    version_name: str = None
 ) -> BotVersion:
     """
     Creates a new BotVersion, validating strategy and indicator parameters.
     """
-    # Validate strategy and indicator parameters before saving
-    try:
-        strategy_cls = get_strategy_class(strategy_name)
-        if not strategy_cls:
-            raise ValidationError(f"Strategy '{strategy_name}' not found in registry.")
-        
-        # Validate strategy's own parameters
-        StrategyManager.validate_parameters(strategy_cls.PARAMETERS, strategy_params.copy()) # Pass a copy as validation might modify defaults
+    if strategy_name != "SECTIONED_SPEC":
+        try:
+            strategy_cls = strategy_registry.get_strategy(strategy_name)
+            if not strategy_cls:
+                raise ValidationError(f"Strategy '{strategy_name}' not found in registry.")
+            
+            StrategyManager.validate_parameters(strategy_cls.PARAMETERS, strategy_params.copy())
 
-        # Validate parameters for each required indicator
-        for ind_config in indicator_configs:
-            ind_name = ind_config.get("name")
-            ind_params = ind_config.get("params", {})
-            indicator_cls = get_indicator_class(ind_name)
-            if not indicator_cls:
-                raise ValidationError(f"Indicator '{ind_name}' not found in registry.")
-            StrategyManager.validate_parameters(indicator_cls.PARAMETERS, ind_params.copy()) # Pass a copy
-
-    except ValidationError as ve:
-        logger.error(f"Validation error creating BotVersion: {ve}")
-        raise
-    except Exception as e:
-        logger.error(f"Unexpected error during BotVersion validation: {e}", exc_info=True)
-        raise ValidationError(f"An unexpected error occurred during validation: {e}")
-
-    # Check for existing version with identical configuration (if unique_together was re-enabled)
-    # For now, with unique_together commented out, we allow duplicates.
-    # If re-enabled, this check would be important.
-    # existing_version = BotVersion.objects.filter(
-    #     bot=bot,
-    #     strategy_name=strategy_name,
-    #     strategy_params=strategy_params,
-    #     indicator_configs=indicator_configs
-    # ).first()
-    # if existing_version:
-    #     logger.info(f"BotVersion already exists for bot {bot.name} with this configuration. Returning existing.")
-    #     return existing_version
+            for ind_config in indicator_configs:
+                ind_name = ind_config.get("name")
+                ind_params = ind_config.get("params", {})
+                indicator_cls = indicator_registry.get_indicator(ind_name)
+                # Validation for new indicator format can be added here if needed
+                
+        except ValidationError as ve:
+            logger.error(f"Validation error creating BotVersion: {ve}")
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error during BotVersion validation: {e}", exc_info=True)
+            raise ValidationError(f"An unexpected error occurred during validation: {e}")
 
     bot_version = BotVersion.objects.create(
         bot=bot,
+        version_name=version_name,
         strategy_name=strategy_name,
         strategy_params=strategy_params,
         indicator_configs=indicator_configs,
@@ -206,31 +204,23 @@ def create_bot_version(
 def create_default_bot_version(bot: Bot) -> BotVersion:
     """
     Creates an initial, default BotVersion for a given Bot.
-    This version uses a default strategy (e.g., 'ema_crossover_v1') with its default parameters.
     """
     logger.info(f"Attempting to create default BotVersion for Bot ID: {bot.id}")
     
-    # For now, hardcode a default strategy and its default parameters
-    # In a real system, this might be configurable or chosen from a list of "starter" strategies.
     default_strategy_name = "ema_crossover_v1"
     
     try:
-        strategy_cls = get_strategy_class(default_strategy_name)
+        strategy_cls = strategy_registry.get_strategy(default_strategy_name)
         if not strategy_cls:
             raise ValueError(f"Default strategy '{default_strategy_name}' not found in registry.")
         
         default_strategy_params = {param.name: param.default_value for param in strategy_cls.PARAMETERS}
         
-        # For required indicators, we need to resolve their default parameters too
         default_indicator_configs = []
         for req_ind in strategy_cls.REQUIRED_INDICATORS:
             ind_name = req_ind["name"]
-            indicator_cls = get_indicator_class(ind_name)
-            if not indicator_cls:
-                logger.warning(f"Required indicator '{ind_name}' for default strategy not found. Skipping.")
-                continue
+            indicator_cls = indicator_registry.get_indicator(ind_name)
             
-            # Resolve dynamic parameters from strategy_params for required_history
             resolved_ind_params = {}
             for k, v in req_ind["params"].items():
                 if isinstance(v, str) and v in default_strategy_params:
@@ -262,42 +252,28 @@ def create_default_bot_version(bot: Bot) -> BotVersion:
 def start_bot_live_run(live_run_id: uuid.UUID) -> LiveRun:
     """
     Triggers the live_loop Celery task for an existing LiveRun record.
-    The LiveRun record should already be created with bot_version_id and instrument_symbol.
     """
     try:
-        live_run = LiveRun.objects.select_related('bot_version__bot').get(id=live_run_id)
+        live_run = LiveRun.objects.select_related('bot_version__bot', 'account').get(id=live_run_id)
         bot_version = live_run.bot_version
 
         if not bot_version.bot.is_active:
             raise ValidationError(f"Bot {bot_version.bot.name} is not active. Cannot start live run.")
-        if not bot_version.bot.account:
-            raise ValidationError(f"Bot {bot_version.bot.name} is not assigned to an account. Cannot start live run.")
+        if not live_run.account:
+            raise ValidationError(f"LiveRun {live_run.id} is not associated with an account. Cannot start live run.")
 
-        # Instantiate the strategy using the StrategyManager
-        strategy_instance = StrategyManager.instantiate_strategy(
-            strategy_name=bot_version.strategy_name,
-            instrument_symbol=live_run.instrument_symbol,
-            account_id=bot_version.bot.account.account_id, # Assuming account_id is available here
-            instrument_spec=None, # This needs to be fetched dynamically in the live_loop task or passed from a higher level
-            strategy_params=bot_version.strategy_params,
-            indicator_configs=bot_version.indicator_configs,
-            risk_settings={} # Risk settings might come from Bot or LiveRun config
-        )
-        
-        # Update status and trigger task
-        live_run.status = 'PENDING' # Task will set to RUNNING
+        live_run.status = 'PENDING'
         live_run.save(update_fields=['status'])
         logger.info(f"Created LiveRun {live_run.id} for BotVersion {bot_version.id} on {live_run.instrument_symbol}. Triggering live_loop task.")
         
-        # Pass necessary info to the Celery task
         live_loop.delay(
             live_run_id=live_run.id,
             strategy_name=bot_version.strategy_name,
             strategy_params=bot_version.strategy_params,
             indicator_configs=bot_version.indicator_configs,
             instrument_symbol=live_run.instrument_symbol,
-            account_id=bot_version.bot.account.account_id,
-            risk_settings={} # Placeholder, needs to be properly sourced
+            account_id=str(live_run.account.id),
+            risk_settings={}
         )
         return live_run
     except LiveRun.DoesNotExist:
@@ -313,12 +289,11 @@ def start_bot_live_run(live_run_id: uuid.UUID) -> LiveRun:
 def stop_bot_live_run(live_run_id: uuid.UUID) -> LiveRun:
     """
     Updates LiveRun status to 'STOPPING' or 'STOPPED'.
-    The actual stopping mechanism of the Celery task needs consideration (e.g., task checks status).
     """
     try:
         live_run = LiveRun.objects.get(id=live_run_id)
-        if live_run.status in ['RUNNING', 'PENDING', 'ERROR']: # Allow stopping if error to mark as user-stopped
-            live_run.status = 'STOPPING' # Task should observe this and shut down gracefully
+        if live_run.status in ['RUNNING', 'PENDING', 'ERROR']:
+            live_run.status = 'STOPPING'
             live_run.save(update_fields=['status'])
             logger.info(f"LiveRun {live_run.id} status set to STOPPING.")
         elif live_run.status == 'STOPPING':
@@ -334,29 +309,45 @@ def stop_bot_live_run(live_run_id: uuid.UUID) -> LiveRun:
         raise
 
 
-def launch_backtest(backtest_run_id: uuid.UUID) -> BacktestRun:
+def collect_runtime_fingerprint(strategy_name: str) -> Dict[str, Any]:
+    """
+    Gathers a fingerprint of the runtime environment for reproducibility.
+    """
+    fingerprint = {
+        "python_version": sys.version,
+        "numpy_version": np.__version__,
+        "pandas_version": pd.__version__,
+        "backtest_engine_version": "1.0.0",
+    }
+
+    try:
+        strategy_cls = strategy_registry.get_strategy(strategy_name)
+        if strategy_cls:
+            import inspect
+            strategy_file_path = inspect.getfile(strategy_cls)
+            with open(strategy_file_path, 'rb') as f:
+                strategy_hash = hashlib.sha256(f.read()).hexdigest()
+            fingerprint["strategy_code_hash"] = strategy_hash
+    except (TypeError, FileNotFoundError, ValueError) as e:
+        logger.warning(f"Could not generate hash for strategy '{strategy_name}': {e}")
+        fingerprint["strategy_code_hash"] = None
+
+    return fingerprint
+
+
+def launch_backtest(backtest_run_id: uuid.UUID, random_seed: Optional[int] = None) -> BacktestRun:
     """
     Triggers the run_backtest Celery task for an existing BacktestRun record.
-    The BacktestRun record should already be created with config, instrument_symbol, data_window_start, data_window_end.
     """
     try:
         backtest_run = BacktestRun.objects.select_related('config__bot_version__bot').get(id=backtest_run_id)
         bot_version = backtest_run.config.bot_version
 
-        # Instantiate the strategy using the StrategyManager
-        strategy_instance = StrategyManager.instantiate_strategy(
-            strategy_name=bot_version.strategy_name,
-            instrument_symbol=backtest_run.instrument_symbol,
-            account_id="BACKTEST_ACCOUNT", # Placeholder for backtesting
-            instrument_spec=None, # This needs to be fetched dynamically in the backtest task or mocked
-            strategy_params=bot_version.strategy_params,
-            indicator_configs=bot_version.indicator_configs,
-            risk_settings=backtest_run.config.risk_json # Use risk settings from BacktestConfig
-        )
+        backtest_run.runtime_fingerprint = collect_runtime_fingerprint(bot_version.strategy_name)
+        backtest_run.random_seed = random_seed
         
-        # Update status and trigger task
-        backtest_run.status = 'PENDING' # Task will set to RUNNING
-        backtest_run.save(update_fields=['status'])
+        backtest_run.status = 'PENDING'
+        backtest_run.save(update_fields=['status', 'runtime_fingerprint', 'random_seed'])
         logger.info(f"Created BacktestRun {backtest_run.id} for {backtest_run.instrument_symbol} ({backtest_run.config.timeframe}). Triggering run_backtest task.")
         
         run_backtest.apply_async(
@@ -370,8 +361,7 @@ def launch_backtest(backtest_run_id: uuid.UUID) -> BacktestRun:
                 "data_window_start": backtest_run.data_window_start.isoformat(),
                 "data_window_end": backtest_run.data_window_end.isoformat(),
                 "risk_settings": backtest_run.config.risk_json,
-                "slippage_ms": backtest_run.config.slippage_ms,
-                "slippage_r": float(backtest_run.config.slippage_r),
+                "random_seed": random_seed,
             },
             queue="backtests"
         )
@@ -385,8 +375,6 @@ def launch_backtest(backtest_run_id: uuid.UUID) -> BacktestRun:
     except Exception as e:
         logger.error(f"Error launching backtest for BacktestRun {backtest_run_id}: {e}", exc_info=True)
         raise
-
-# --- Helper/Getter services ---
 
 def get_bot_details(bot_id: uuid.UUID):
     try:

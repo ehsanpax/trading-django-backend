@@ -22,8 +22,13 @@ from .serializers import (
 )
 from .models import BacktestOhlcvData, BacktestIndicatorData
 from . import services
+from .compiler import GraphCompiler
 from accounts.models import Account
-from bots.services import StrategyManager # Import StrategyManager
+from bots.services import StrategyManager
+from core.registry import indicator_registry, operator_registry, action_registry
+from analysis.utils.data_processor import load_m1_data_from_parquet, resample_data
+import pandas as pd
+from decimal import Decimal
 
 # Add logger to views
 import logging
@@ -83,6 +88,24 @@ class IndicatorMetadataAPIView(APIView):
             return Response({"error": "Could not retrieve indicator metadata."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+class NodeMetadataAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        nodes = {
+            "indicators": StrategyManager.get_available_indicators_metadata(),
+            "operators": [
+                {"name": name, "params": op.PARAMS_SCHEMA}
+                for name, op in operator_registry.get_all_operators().items()
+            ],
+            "actions": [
+                {"name": name, "params": ac.PARAMS_SCHEMA}
+                for name, ac in action_registry.get_all_actions().items()
+            ],
+        }
+        return Response(nodes, status=status.HTTP_200_OK)
+
+
 class BotViewSet(viewsets.ModelViewSet):
     queryset = Bot.objects.all()
     serializer_class = BotSerializer
@@ -133,6 +156,7 @@ class BotVersionViewSet(viewsets.ModelViewSet):
 
                 bot_version = services.create_bot_version(
                     bot=bot,
+                    version_name=data.get('version_name'),
                     strategy_name=data['strategy_name'],
                     strategy_params=data['strategy_params'],
                     indicator_configs=data['indicator_configs'],
@@ -149,6 +173,63 @@ class BotVersionViewSet(viewsets.ModelViewSet):
                 logger.error(f"Error creating BotVersion: {e}", exc_info=True)
                 return Response({"detail": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['post'], url_path='from-graph')
+    def create_from_graph(self, request, *args, **kwargs):
+        # Simplified serializer for graph-based creation
+        bot_id = request.data.get('bot_id')
+        version_name = request.data.get('version_name')
+        strategy_graph = request.data.get('strategy_graph')
+        notes = request.data.get('notes')
+
+        if not bot_id or not strategy_graph:
+            return Response({"detail": "bot_id and strategy_graph are required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            bot = get_object_or_404(Bot, id=bot_id)
+            if not (request.user.is_staff or request.user.is_superuser or bot.created_by == request.user):
+                return Response({"detail": "You do not have permission to create a version for this bot."},
+                                status=status.HTTP_403_FORBIDDEN)
+
+            # Validate the graph with the compiler
+            compiler = GraphCompiler(strategy_graph)
+            compiler.validate()
+
+            bot_version = BotVersion.objects.create(
+                bot=bot,
+                version_name=version_name,
+                strategy_graph=strategy_graph,
+                notes=notes,
+                # Set other fields to default/empty if they don't apply
+                strategy_name="graph_based_strategy",
+                strategy_params={},
+                indicator_configs=[]
+            )
+            response_serializer = BotVersionSerializer(bot_version)
+            return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+        except Bot.DoesNotExist:
+            return Response({"detail": "Bot not found."}, status=status.HTTP_404_NOT_FOUND)
+        except ValueError as ve:
+            return Response({"detail": f"Invalid strategy graph: {ve}"}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            logger.error(f"Error creating BotVersion from graph: {e}", exc_info=True)
+            return Response({"detail": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=True, methods=['get'], url_path='strategy-graph')
+    def strategy_graph(self, request, pk=None):
+        bot_version = self.get_object()
+        graph_data = {}
+        if bot_version.strategy_graph:
+            graph_data = bot_version.strategy_graph
+        # Fallback for older versions that might use strategy_params
+        elif bot_version.strategy_params:
+            graph_data = bot_version.strategy_params
+        
+        response_data = {
+            'version_name': bot_version.version_name,
+            'strategy_graph': graph_data
+        }
+        return Response(response_data, status=status.HTTP_200_OK)
 
 
 class BacktestConfigViewSet(viewsets.ModelViewSet):
@@ -175,7 +256,7 @@ class BacktestConfigViewSet(viewsets.ModelViewSet):
         serializer.save()
 
 
-class BacktestRunViewSet(viewsets.ReadOnlyModelViewSet):
+class BacktestRunViewSet(viewsets.ModelViewSet):
     queryset = BacktestRun.objects.all()
     serializer_class = BacktestRunSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -235,7 +316,10 @@ class LaunchBacktestAPIView(APIView):
                 )
 
                 # Then, launch the backtest with the new backtest_run_id
-                services.launch_backtest(backtest_run_id=backtest_run.id)
+                services.launch_backtest(
+                    backtest_run_id=backtest_run.id,
+                    random_seed=data.get('random_seed')
+                )
                 
                 response_serializer = BacktestRunSerializer(backtest_run)
                 return Response(response_serializer.data, status=status.HTTP_202_ACCEPTED)
@@ -263,10 +347,14 @@ class StartLiveRunAPIView(APIView):
                      return Response({"detail": "You do not have permission to start a live run for this bot version."},
                                     status=status.HTTP_403_FORBIDDEN)
 
-                # First, create the LiveRun object
+                # Validate account belongs to the user
+                account = get_object_or_404(Account, id=data['account_id'], user=request.user)
+
+                # First, create the LiveRun object (now with account)
                 live_run = LiveRun.objects.create(
                     bot_version=bot_version,
                     instrument_symbol=data['instrument_symbol'],
+                    account=account,
                     status='PENDING' # Set initial status
                 )
 
@@ -315,82 +403,104 @@ class BacktestChartDataAPIView(APIView):
         logger.info(f"Fetching chart data for BacktestRun ID: {backtest_run_id}")
         backtest_run = get_object_or_404(BacktestRun, id=backtest_run_id)
 
-        # Permission check: Ensure the user can access this backtest run's data
         user = request.user
         if not (user.is_staff or user.is_superuser or backtest_run.config.bot_version.bot.created_by == user):
             raise PermissionDenied("You do not have permission to access chart data for this backtest run.")
 
         try:
-            # 1. Fetch OHLCV data
-            # Order by timestamp initially from the database
+            # Fetch OHLCV data from the database
             ohlcv_queryset = BacktestOhlcvData.objects.filter(backtest_run=backtest_run).order_by('timestamp')
-
-            # Process OHLCV data for Lightweight Charts (LWC)
-            # LWC requires: [{ time: seconds, open, high, low, close }]
-            # And strict ascending order by 'time' with no duplicates.
-
-            # Using a dictionary to handle potential duplicates after flooring to seconds
-            # We'll keep the 'last' encountered bar for a given second if duplicates exist after conversion.
-            ohlcv_data_lwc_map = {}
-            for o in ohlcv_queryset:
-                # Convert timestamp to Unix seconds (integer).
-                # Use int() to ensure it's a whole number of seconds, as required by LWC.
-                time_in_seconds = int(o.timestamp.timestamp())
-
-                # Store the bar. If a duplicate time_in_seconds occurs, this will overwrite
-                # the previous one, effectively keeping the last bar for that second.
-                ohlcv_data_lwc_map[time_in_seconds] = {
-                    "time": time_in_seconds,
-                    "open": float(o.open), # Ensure numeric types (float or int)
+            ohlcv_data_lwc = [
+                {
+                    "time": int(o.timestamp.timestamp()),
+                    "open": float(o.open),
                     "high": float(o.high),
                     "low": float(o.low),
                     "close": float(o.close),
-                    # "volume": float(o.volume) if hasattr(o, 'volume') else 0.0, # Include if volume is in your model
                 }
+                for o in ohlcv_queryset
+            ]
 
-            # Convert map values to a list and sort explicitly by time.
-            # This ensures strict ascending order and that no duplicates remain,
-            # as map keys are unique.
-            ohlcv_data_lwc = sorted(ohlcv_data_lwc_map.values(), key=lambda k: k['time'])
-
-            # Optional: Add a backend validation check to log any remaining issues
-            for i in range(1, len(ohlcv_data_lwc)):
-                if ohlcv_data_lwc[i]['time'] <= ohlcv_data_lwc[i-1]['time']:
-                    logger.error(
-                        f"Backend OHLCV data sorting issue: Index {i}, Time {ohlcv_data_lwc[i]['time']}, "
-                        f"Prev Time {ohlcv_data_lwc[i-1]['time']}. This should not happen after map & sort."
-                    )
-
-            logger.info(f"Prepared {len(ohlcv_data_lwc)} OHLCV bars for frontend.")
-
-
-            # 2. Fetch Indicator data and group by indicator_name
+            # Fetch Indicator data from the database
             indicator_queryset = BacktestIndicatorData.objects.filter(backtest_run=backtest_run).order_by('indicator_name', 'timestamp')
 
-            indicator_data_grouped = {}
+            # Group indicator series by (base indicator + params), aggregate outputs under each group
+            indicators_registry_map = indicator_registry.get_all_indicators()
+            registered_names_by_len = sorted(indicators_registry_map.keys(), key=len, reverse=True)
+
+            grouped_indicators: dict[str, dict] = {}
+
             for record in indicator_queryset:
-                # Lightweight Charts also expects seconds for time series
-                point = {"time": int(record.timestamp.timestamp()), "value": float(record.value)}
-                if record.indicator_name not in indicator_data_grouped:
-                    indicator_data_grouped[record.indicator_name] = [point]
+                full_name = record.indicator_name  # e.g. "dmi_plus_di_length_14" or "stochastic_rsi_stoch_rsi_k_length_14"
+
+                # 1) Detect base indicator name using the longest registered prefix
+                base_name = None
+                remainder = None
+                for reg_name in registered_names_by_len:
+                    prefix = f"{reg_name}_"
+                    if full_name.startswith(prefix):
+                        base_name = reg_name
+                        remainder = full_name[len(prefix):]
+                        break
+                if base_name is None:
+                    # Fallback: take the first token as base
+                    parts = full_name.split('_')
+                    base_name = parts[0]
+                    remainder = full_name[len(base_name) + 1:] if len(parts) > 1 else ''
+
+                # 2) Resolve indicator class and metadata
+                try:
+                    indicator_cls = indicator_registry.get_indicator(base_name)
+                    pane_type = getattr(indicator_cls, 'PANE_TYPE', 'OVERLAY')
+                    possible_outputs = getattr(indicator_cls, 'OUTPUTS', []) or []
+                except Exception:
+                    indicator_cls = None
+                    pane_type = 'OVERLAY'
+                    possible_outputs = []
+
+                # 3) Detect output name from remainder using OUTPUTS list (handles underscores in output names)
+                output_name = None
+                params_part = ''
+                if remainder:
+                    for out in sorted(possible_outputs, key=len, reverse=True):
+                        if remainder == out or remainder.startswith(out + '_'):
+                            output_name = out
+                            params_part = remainder[len(out):]
+                            if params_part.startswith('_'):
+                                params_part = params_part[1:]
+                            break
+                    if output_name is None:
+                        # Fallback to the first token
+                        tok = remainder.split('_')[0]
+                        output_name = tok
+                        params_part = remainder[len(tok):]
+                        if params_part.startswith('_'):
+                            params_part = params_part[1:]
                 else:
-                    indicator_data_grouped[record.indicator_name].append(point)
+                    # No remainder: treat as single-output where output equals base
+                    output_name = base_name
+                    params_part = ''
 
-            # Ensure each indicator series is also sorted by time and de-duplicated (optional but good practice)
-            for key in indicator_data_grouped:
-                # Use a dict for de-duplication within each indicator series, keeping the last value for a given second
-                series_map = {p['time']: p for p in indicator_data_grouped[key]}
-                indicator_data_grouped[key] = sorted(series_map.values(), key=lambda k: k['time'])
+                # 4) Build a stable group key: base + params (exclude output)
+                group_key = f"{base_name}_{params_part}" if params_part else base_name
 
+                # 5) Add data point
+                point = {"time": int(record.timestamp.timestamp()), "value": float(record.value)}
+                grp = grouped_indicators.setdefault(group_key, {"pane_type": pane_type, "outputs": {}})
+                grp["outputs"].setdefault(output_name, []).append(point)
 
-            # 3. Fetch and serialize Trade Markers from simulated_trades_log
+            # 6) Sort each output series by time
+            for grp in grouped_indicators.values():
+                for out_name, series_points in grp["outputs"].items():
+                    series_points.sort(key=lambda k: k['time'])
+
+            indicator_data_grouped = grouped_indicators
+
+            # Fetch and serialize Trade Markers from the backtest run's JSON log
             raw_trades_log = backtest_run.simulated_trades_log or []
-
-            # Pre-process markers to ensure timestamps are in seconds and numeric values are floats
             processed_trade_markers = []
             for t in raw_trades_log:
                 try:
-                    # Convert ISO format string to datetime object, handle 'Z' for UTC, then to Unix timestamp in seconds
                     entry_dt = datetime.fromisoformat(t['entry_timestamp'].replace('Z', '+00:00'))
                     entry_time_s = int(entry_dt.timestamp())
 
@@ -404,38 +514,26 @@ class BacktestChartDataAPIView(APIView):
                         "entry_price": float(t['entry_price']),
                         "direction": t['direction'],
                         "exit_timestamp": exit_time_s,
-                        "exit_price": float(t['exit_price']) if t.get('exit_price') is not None else None,
-                        "pnl": float(t['pnl']) if t.get('pnl') is not None else None,
-                        # Add other fields if needed by BacktestTradeMarkerSerializer
+                        "exit_price": float(t.get('exit_price')),
+                        "pnl": float(t.get('pnl')),
                     })
                 except (ValueError, KeyError, TypeError) as e:
                     logger.error(f"Error processing trade marker: {t} - {e}", exc_info=True)
-                    continue # Skip malformed markers
+                    continue
 
             trade_markers_serialized = BacktestTradeMarkerSerializer(processed_trade_markers, many=True).data
 
-            # Prepare data for the main chart_data response
+            # Prepare the final response data
             chart_data = {
-                "ohlcv_data": ohlcv_data_lwc, # Using LWC-compatible data
+                "ohlcv_data": ohlcv_data_lwc,
                 "indicator_data": indicator_data_grouped,
                 "trade_markers": trade_markers_serialized,
-                "backtest_run_id": str(backtest_run.id), # Convert UUID to string for JSON serialization
+                "backtest_run_id": str(backtest_run.id),
                 "instrument_symbol": backtest_run.instrument_symbol,
+                "original_timeframe": backtest_run.config.timeframe,
                 "data_window_start": backtest_run.data_window_start.isoformat(),
                 "data_window_end": backtest_run.data_window_end.isoformat()
             }
-
-            # --- DEBUG EXPORT ---
-            # Use the string representation of the UUID for the filename
-            debug_file_path = Path(settings.BASE_DIR) / 'analysis_data' / f'backtest_chart_data_{str(backtest_run.id)}.json'
-            try:
-                debug_file_path.parent.mkdir(parents=True, exist_ok=True) # Ensure directory exists
-                with open(debug_file_path, 'w') as f:
-                    json.dump(chart_data, f, indent=4)
-                logger.info(f"Debug: Exported chart data to {debug_file_path}")
-            except Exception as e:
-                logger.error(f"Debug: Failed to export chart data to file {debug_file_path}: {e}", exc_info=True)
-            # --- END DEBUG EXPORT ---
 
             return Response(chart_data, status=status.HTTP_200_OK)
 
