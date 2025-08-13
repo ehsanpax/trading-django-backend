@@ -62,9 +62,9 @@ def live_loop(self, live_run_id, strategy_name, strategy_params, indicator_confi
 
     logger.info(f"live_loop task started for LiveRun ID: {live_run_id}")
     try:
-        live_run = LiveRun.objects.select_related('bot_version__bot__account').get(id=live_run_id)
+        live_run = LiveRun.objects.select_related('bot_version__bot', 'account').get(id=live_run_id)
         
-        if live_run.status != 'RUNNING' and live_run.status != 'PENDING':
+        if live_run.status not in ('RUNNING', 'PENDING'):
             logger.warning(f"LiveRun {live_run_id} is not in a runnable state (status: {live_run.status}). Exiting task.")
             return
 
@@ -75,7 +75,7 @@ def live_loop(self, live_run_id, strategy_name, strategy_params, indicator_confi
 
         bot_version = live_run.bot_version
         bot = bot_version.bot
-        account = bot.account # This is the Django Account model instance
+        account = live_run.account
 
         if not instrument_symbol:
             live_run.status = 'ERROR'
@@ -87,10 +87,10 @@ def live_loop(self, live_run_id, strategy_name, strategy_params, indicator_confi
 
         if not account:
             live_run.status = 'ERROR'
-            live_run.last_error = "Bot is not associated with an account."
+            live_run.last_error = "LiveRun is not associated with an account."
             live_run.stopped_at = timezone.now()
             live_run.save(update_fields=['status', 'last_error', 'stopped_at'])
-            logger.error(f"LiveRun {live_run.id}: Bot {bot.name} has no account assigned. Stopping.")
+            logger.error(f"LiveRun {live_run.id}: No account assigned. Stopping.")
             return
 
         instrument_spec = None
@@ -104,7 +104,7 @@ def live_loop(self, live_run_id, strategy_name, strategy_params, indicator_confi
         strategy_instance = StrategyManager.instantiate_strategy(
             strategy_name=strategy_name,
             instrument_symbol=instrument_symbol,
-            account_id=account_id, # This is the external account ID string
+            account_id=str(account.id), # Use explicit account ID
             instrument_spec=instrument_spec,
             strategy_params=strategy_params,
             indicator_configs=indicator_configs,
@@ -113,6 +113,10 @@ def live_loop(self, live_run_id, strategy_name, strategy_params, indicator_confi
         logger.info(f"LiveRun {live_run_id}: Loaded strategy {strategy_name} for {instrument_symbol}")
         
         logger.info(f"live_loop for LiveRun ID: {live_run_id} on {instrument_symbol} completed one placeholder cycle.")
+        # Temporary: Stop the run to avoid lingering RUNNING state until real loop is added
+        live_run.status = 'STOPPED'
+        live_run.stopped_at = timezone.now()
+        live_run.save(update_fields=['status', 'stopped_at'])
 
     except LiveRun.DoesNotExist:
         logger.error(f"LiveRun with ID {live_run_id} does not exist.")
@@ -255,6 +259,17 @@ def run_backtest(self, backtest_run_id, strategy_name, strategy_params, indicato
         
         # --- Initialize the new Backtest Engine (NOW that we have data) ---
         logger.info(f"BacktestRun {backtest_run_id}: Initializing the new BacktestEngine.")
+        # --- Risk Settings Hierarchy ---
+        # 1. Start with default risk settings from the strategy graph.
+        base_risk_settings = strategy_params.get('sectioned_spec', {}).get('risk', {})
+        
+        # 2. Get custom risk settings from the backtest config.
+        custom_risk_settings = config.risk_json or {}
+        
+        # 3. Merge them, with custom settings overriding the base settings.
+        final_risk_settings = {**base_risk_settings, **custom_risk_settings}
+        logger.info(f"Final combined risk settings for engine: {final_risk_settings}")
+
         engine = BacktestEngine(
             strategy=None, # Will be set after adapter is created
             data=ohlcv_df_backtest_period, # Use the trimmed DataFrame
@@ -262,7 +277,7 @@ def run_backtest(self, backtest_run_id, strategy_name, strategy_params, indicato
             tick_size=Decimal(str(instrument_spec_instance.tick_size)),
             tick_value=Decimal(str(instrument_spec_instance.tick_value)),
             initial_equity=initial_equity,
-            risk_settings=risk_settings,
+            risk_settings=final_risk_settings, # Use the final merged settings
             filter_settings=strategy_params.get("filters", {}) # Assuming filters are passed in strategy_params
         )
 
@@ -305,15 +320,24 @@ def run_backtest(self, backtest_run_id, strategy_name, strategy_params, indicato
         
         # --- Save Indicator Data ---
         indicator_data_to_save = []
+        seen_pairs = set()  # (timestamp, indicator_name)
         
         # Case 1: Modern SectionedStrategy with pre-computed column names
         if hasattr(legacy_strategy_instance, 'indicator_column_names'):
             logger.info("Processing indicators for a SectionedStrategy.")
             df_with_indicators = ohlcv_df_backtest_period
+            # Ensure no duplicate timestamps in index to avoid unique constraint violations
+            if df_with_indicators.index.has_duplicates:
+                logger.warning("Duplicate timestamps detected in indicator DataFrame; de-duplicating by keeping last occurrence.")
+                df_with_indicators = df_with_indicators[~df_with_indicators.index.duplicated(keep='last')]
             for col_name in legacy_strategy_instance.indicator_column_names:
                 if col_name in df_with_indicators.columns:
                     valid_series = df_with_indicators[col_name].dropna()
                     for timestamp, value in valid_series.items():
+                        key = (timestamp, col_name)
+                        if key in seen_pairs:
+                            continue
+                        seen_pairs.add(key)
                         indicator_data_to_save.append(
                             BacktestIndicatorData(
                                 backtest_run=backtest_run,
@@ -330,10 +354,17 @@ def run_backtest(self, backtest_run_id, strategy_name, strategy_params, indicato
             logger.info("Processing indicators for a legacy strategy.")
             indicator_columns = legacy_strategy_instance.get_indicator_column_names()
             df_with_indicators = getattr(legacy_strategy_instance, 'df', ohlcv_df_backtest_period)
+            if df_with_indicators.index.has_duplicates:
+                logger.warning("Duplicate timestamps detected in indicator DataFrame; de-duplicating by keeping last occurrence.")
+                df_with_indicators = df_with_indicators[~df_with_indicators.index.duplicated(keep='last')]
             for col_name in indicator_columns:
                 if col_name in df_with_indicators.columns:
                     valid_series = df_with_indicators[col_name].dropna()
                     for timestamp, value in valid_series.items():
+                        key = (timestamp, col_name)
+                        if key in seen_pairs:
+                            continue
+                        seen_pairs.add(key)
                         indicator_data_to_save.append(
                             BacktestIndicatorData(
                                 backtest_run=backtest_run, timestamp=timestamp,

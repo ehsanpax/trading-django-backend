@@ -64,11 +64,17 @@ class StrategyManager:
                     "step": schema.get("step"),
                     "options": schema.get("options") or schema.get("enum"),
                 })
-            
+            # Enrich with outputs and pane type for frontend output selection and chart placement
+            outputs = getattr(indicator_cls, 'OUTPUTS', None) or ["default"]
+            pane_type = getattr(indicator_cls, 'PANE_TYPE', 'OVERLAY')
+            display_name = getattr(indicator_cls, 'DISPLAY_NAME', name.replace("Indicator", ""))
+
             metadata.append({
                 "name": name,
-                "display_name": getattr(indicator_cls, 'DISPLAY_NAME', name.replace("Indicator", "")),
+                "display_name": display_name,
                 "parameters": params_list,
+                "outputs": outputs,
+                "pane_type": pane_type,
             })
         return metadata
 
@@ -248,13 +254,13 @@ def start_bot_live_run(live_run_id: uuid.UUID) -> LiveRun:
     Triggers the live_loop Celery task for an existing LiveRun record.
     """
     try:
-        live_run = LiveRun.objects.select_related('bot_version__bot').get(id=live_run_id)
+        live_run = LiveRun.objects.select_related('bot_version__bot', 'account').get(id=live_run_id)
         bot_version = live_run.bot_version
 
         if not bot_version.bot.is_active:
             raise ValidationError(f"Bot {bot_version.bot.name} is not active. Cannot start live run.")
-        if not bot_version.bot.account:
-            raise ValidationError(f"Bot {bot_version.bot.name} is not assigned to an account. Cannot start live run.")
+        if not live_run.account:
+            raise ValidationError(f"LiveRun {live_run.id} is not associated with an account. Cannot start live run.")
 
         live_run.status = 'PENDING'
         live_run.save(update_fields=['status'])
@@ -266,7 +272,7 @@ def start_bot_live_run(live_run_id: uuid.UUID) -> LiveRun:
             strategy_params=bot_version.strategy_params,
             indicator_configs=bot_version.indicator_configs,
             instrument_symbol=live_run.instrument_symbol,
-            account_id=bot_version.bot.account.account_id,
+            account_id=str(live_run.account.id),
             risk_settings={}
         )
         return live_run

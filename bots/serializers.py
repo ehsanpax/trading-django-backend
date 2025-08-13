@@ -188,11 +188,15 @@ class BotVersionCreateSerializer(serializers.Serializer):
 class CreateLiveRunSerializer(serializers.Serializer):
     bot_version_id = serializers.UUIDField()
     instrument_symbol = serializers.CharField(max_length=50)
+    # --- New: explicit target account for this live run ---
+    account_id = serializers.UUIDField()
 
     def validate(self, data):
         # Basic validation for instrument_symbol
         if not data.get('instrument_symbol'):
             raise serializers.ValidationError("Instrument symbol is required.")
+        if not data.get('account_id'):
+            raise serializers.ValidationError("Account id is required.")
         return data
 
 # --- Serializers for Charting Data ---

@@ -172,6 +172,8 @@ class LiveRun(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     bot_version = models.ForeignKey(BotVersion, on_delete=models.CASCADE, related_name="live_runs")
     instrument_symbol = models.CharField(max_length=50, help_text="The trading instrument symbol for this live run") # Added field
+    # --- New: Explicit account targeted by this LiveRun ---
+    account = models.ForeignKey(Account, on_delete=models.PROTECT, related_name="live_runs", null=True, blank=True)
     started_at = models.DateTimeField(auto_now_add=True)
     stopped_at = models.DateTimeField(null=True, blank=True)
     # Consider more granular status: pending, running, stopping, stopped, error

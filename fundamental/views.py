@@ -6,16 +6,17 @@ from .models import EconomicCalendar, Currency
 from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.authentication import TokenAuthentication
+from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.generics import ListAPIView
 from .serializers import EconomicCalendarSerializer
-from django.utils.dateparse import parse_date
+from django.utils.dateparse import parse_datetime
 import logging
 
 logger = logging.getLogger(__name__)
 
 
 class EconomicCalendarAPIView(APIView):
-    authentication_classes = [TokenAuthentication]
+    authentication_classes = [JWTAuthentication, TokenAuthentication]
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
@@ -63,7 +64,7 @@ class EconomicCalendarAPIView(APIView):
 
 
 class EconomicCalendarEventListAPIView(APIView):
-    authentication_classes = [TokenAuthentication]
+    authentication_classes = [JWTAuthentication, TokenAuthentication]
     permission_classes = [IsAuthenticated]
     serializer_class = EconomicCalendarSerializer
 
@@ -74,14 +75,28 @@ class EconomicCalendarEventListAPIView(APIView):
         date_from = self.request.query_params.get("date_from")
         date_to = self.request.query_params.get("date_to")
         currency = self.request.query_params.get("currency")
+        impact = self.request.query_params.get("impact")
+        event = self.request.query_params.get("event")
 
         if date_from:
-            queryset = queryset.filter(event_time__gte=date_from)
+            dt_from = parse_datetime(date_from)
+            if dt_from:
+                queryset = queryset.filter(event_time__gte=dt_from)
         if date_to:
-            queryset = queryset.filter(event_time__lte=date_to)
+            dt_to = parse_datetime(date_to)
+            if dt_to:
+                queryset = queryset.filter(event_time__lte=dt_to)
 
         if currency:
-            queryset = queryset.filter(currency__currency=currency)
+            currencies = currency.split(',')
+            queryset = queryset.filter(currency__currency__in=currencies)
+
+        if impact:
+            impacts = impact.split(',')
+            queryset = queryset.filter(impact__in=impacts)
+
+        if event:
+            queryset = queryset.filter(event__icontains=event)
 
         return queryset
 

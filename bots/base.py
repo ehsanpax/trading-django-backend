@@ -85,6 +85,23 @@ class BaseStrategy:
             try:
                 indicator_cls = indicator_registry.get_indicator(indicator_name)
                 indicator_instance = indicator_cls()
+
+                # Merge PARAMS_SCHEMA defaults so omitted params (e.g., source) get sensible defaults
+                default_params: Dict[str, Any] = {}
+                try:
+                    schema = getattr(indicator_cls, 'PARAMS_SCHEMA', {}) or {}
+                    for p_name, p_schema in schema.items():
+                        if p_schema is None:
+                            continue
+                        default_val = p_schema.get('default')
+                        if default_val is not None:
+                            default_params[p_name] = default_val
+                except Exception:
+                    # If schema probing fails, proceed with provided params only
+                    pass
+                # Provided params override defaults
+                resolved_params = {**default_params, **resolved_params}
+
                 indicator_outputs = indicator_instance.compute(df_copy, resolved_params)
                 for output_name, series in indicator_outputs.items():
                     # Create a unique column name to avoid collisions

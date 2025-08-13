@@ -256,7 +256,7 @@ class BacktestConfigViewSet(viewsets.ModelViewSet):
         serializer.save()
 
 
-class BacktestRunViewSet(viewsets.ReadOnlyModelViewSet):
+class BacktestRunViewSet(viewsets.ModelViewSet):
     queryset = BacktestRun.objects.all()
     serializer_class = BacktestRunSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -347,10 +347,14 @@ class StartLiveRunAPIView(APIView):
                      return Response({"detail": "You do not have permission to start a live run for this bot version."},
                                     status=status.HTTP_403_FORBIDDEN)
 
-                # First, create the LiveRun object
+                # Validate account belongs to the user
+                account = get_object_or_404(Account, id=data['account_id'], user=request.user)
+
+                # First, create the LiveRun object (now with account)
                 live_run = LiveRun.objects.create(
                     bot_version=bot_version,
                     instrument_symbol=data['instrument_symbol'],
+                    account=account,
                     status='PENDING' # Set initial status
                 )
 
@@ -419,27 +423,78 @@ class BacktestChartDataAPIView(APIView):
 
             # Fetch Indicator data from the database
             indicator_queryset = BacktestIndicatorData.objects.filter(backtest_run=backtest_run).order_by('indicator_name', 'timestamp')
-            indicator_data_grouped = {}
-            temp_indicator_groups = {}
+
+            # Group indicator series by (base indicator + params), aggregate outputs under each group
+            indicators_registry_map = indicator_registry.get_all_indicators()
+            registered_names_by_len = sorted(indicators_registry_map.keys(), key=len, reverse=True)
+
+            grouped_indicators: dict[str, dict] = {}
+
             for record in indicator_queryset:
-                if record.indicator_name not in temp_indicator_groups:
-                    temp_indicator_groups[record.indicator_name] = []
-                point = {"time": int(record.timestamp.timestamp()), "value": float(record.value)}
-                temp_indicator_groups[record.indicator_name].append(point)
+                full_name = record.indicator_name  # e.g. "dmi_plus_di_length_14" or "stochastic_rsi_stoch_rsi_k_length_14"
 
-            for name, points in temp_indicator_groups.items():
-                # Extract the base indicator name (e.g., 'ema' from 'ema_close_length_9')
-                base_indicator_name = name.split('_')[0]
+                # 1) Detect base indicator name using the longest registered prefix
+                base_name = None
+                remainder = None
+                for reg_name in registered_names_by_len:
+                    prefix = f"{reg_name}_"
+                    if full_name.startswith(prefix):
+                        base_name = reg_name
+                        remainder = full_name[len(prefix):]
+                        break
+                if base_name is None:
+                    # Fallback: take the first token as base
+                    parts = full_name.split('_')
+                    base_name = parts[0]
+                    remainder = full_name[len(base_name) + 1:] if len(parts) > 1 else ''
+
+                # 2) Resolve indicator class and metadata
                 try:
-                    indicator_cls = indicator_registry.get_indicator(base_indicator_name)
-                    pane_type = getattr(indicator_cls, 'PANE_TYPE', 'OVERLAY') # Default to OVERLAY
-                except (KeyError, AttributeError):
-                    pane_type = 'OVERLAY' # Default if indicator not found or attr missing
+                    indicator_cls = indicator_registry.get_indicator(base_name)
+                    pane_type = getattr(indicator_cls, 'PANE_TYPE', 'OVERLAY')
+                    possible_outputs = getattr(indicator_cls, 'OUTPUTS', []) or []
+                except Exception:
+                    indicator_cls = None
+                    pane_type = 'OVERLAY'
+                    possible_outputs = []
 
-                indicator_data_grouped[name] = {
-                    "data": sorted(points, key=lambda k: k['time']),
-                    "pane_type": pane_type
-                }
+                # 3) Detect output name from remainder using OUTPUTS list (handles underscores in output names)
+                output_name = None
+                params_part = ''
+                if remainder:
+                    for out in sorted(possible_outputs, key=len, reverse=True):
+                        if remainder == out or remainder.startswith(out + '_'):
+                            output_name = out
+                            params_part = remainder[len(out):]
+                            if params_part.startswith('_'):
+                                params_part = params_part[1:]
+                            break
+                    if output_name is None:
+                        # Fallback to the first token
+                        tok = remainder.split('_')[0]
+                        output_name = tok
+                        params_part = remainder[len(tok):]
+                        if params_part.startswith('_'):
+                            params_part = params_part[1:]
+                else:
+                    # No remainder: treat as single-output where output equals base
+                    output_name = base_name
+                    params_part = ''
+
+                # 4) Build a stable group key: base + params (exclude output)
+                group_key = f"{base_name}_{params_part}" if params_part else base_name
+
+                # 5) Add data point
+                point = {"time": int(record.timestamp.timestamp()), "value": float(record.value)}
+                grp = grouped_indicators.setdefault(group_key, {"pane_type": pane_type, "outputs": {}})
+                grp["outputs"].setdefault(output_name, []).append(point)
+
+            # 6) Sort each output series by time
+            for grp in grouped_indicators.values():
+                for out_name, series_points in grp["outputs"].items():
+                    series_points.sort(key=lambda k: k['time'])
+
+            indicator_data_grouped = grouped_indicators
 
             # Fetch and serialize Trade Markers from the backtest run's JSON log
             raw_trades_log = backtest_run.simulated_trades_log or []

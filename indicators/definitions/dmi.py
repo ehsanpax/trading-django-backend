@@ -45,14 +45,25 @@ class DMIIndicator:
             return {}
 
         try:
-            dmi = ta.dmi(high=ohlcv['high'], low=ohlcv['low'], close=ohlcv['close'], length=length)
-            if dmi is None or dmi.empty:
-                raise ValueError("pandas_ta.dmi returned None or empty DataFrame")
+            dmi_df = None
+            # Prefer pandas_ta.dmi if available
+            if hasattr(ta, 'dmi'):
+                try:
+                    dmi_df = ta.dmi(high=ohlcv['high'], low=ohlcv['low'], close=ohlcv['close'], length=length)
+                except Exception:
+                    dmi_df = None
+            # Fallback to pandas_ta.adx (commonly available across versions)
+            if dmi_df is None or getattr(dmi_df, 'empty', True):
+                if hasattr(ta, 'adx'):
+                    dmi_df = ta.adx(high=ohlcv['high'], low=ohlcv['low'], close=ohlcv['close'], length=length)
+
+            if dmi_df is None or dmi_df.empty:
+                raise ValueError("pandas_ta.dmi/adx returned None or empty DataFrame")
             
             output = {
-                "plus_di": dmi[f'DMP_{length}'],
-                "minus_di": dmi[f'DMN_{length}'],
-                "adx": dmi[f'ADX_{length}']
+                "plus_di": dmi_df[f'DMP_{length}'],
+                "minus_di": dmi_df[f'DMN_{length}'],
+                "adx": dmi_df[f'ADX_{length}']
             }
         except Exception as e:
             logger.error(f"Error calculating DMI({length}): {e}", exc_info=True)

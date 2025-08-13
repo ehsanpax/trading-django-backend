@@ -36,7 +36,7 @@ class BacktestRunAdmin(admin.ModelAdmin):
 
 @admin.register(LiveRun)
 class LiveRunAdmin(admin.ModelAdmin):
-    list_display = ('id', 'bot_version', 'instrument_symbol', 'status', 'started_at', 'stopped_at', 'pnl_r', 'drawdown_r')
-    list_filter = ('status', 'instrument_symbol', 'bot_version__bot__name')
-    search_fields = ('id__iexact', 'instrument_symbol', 'bot_version__bot__name', 'status')
+    list_display = ('id', 'bot_version', 'instrument_symbol', 'account', 'status', 'started_at', 'stopped_at', 'pnl_r', 'drawdown_r')
+    list_filter = ('status', 'instrument_symbol', 'bot_version__bot__name', 'account')
+    search_fields = ('id__iexact', 'instrument_symbol', 'bot_version__bot__name', 'status', 'account__name', 'account__id__iexact')
     readonly_fields = ('id', 'started_at', 'stopped_at', 'pnl_r', 'drawdown_r', 'last_error')
