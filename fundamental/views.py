@@ -2,14 +2,14 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from datetime import datetime
-from .models import EconomicCalendar, Currency
+from .models import EconomicCalendar, Currency, News
 from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.authentication import TokenAuthentication
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.generics import ListAPIView
-from .serializers import EconomicCalendarSerializer
-from django.utils.dateparse import parse_datetime
+from .serializers import EconomicCalendarSerializer, NewsSerializer
+from django.utils.dateparse import parse_date, parse_datetime
 import logging
 
 logger = logging.getLogger(__name__)
@@ -104,3 +104,80 @@ class EconomicCalendarEventListAPIView(APIView):
         queryset = self.get_queryset()
         serializer = self.serializer_class(queryset, many=True)
         return Response(serializer.data)
+
+
+class NewsAPIView(APIView):
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        news_data = request.data.get("news", [])
+        if not isinstance(news_data, list):
+            return Response(
+                {"detail": "Invalid data format. Expected a list of news."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        for item in news_data:
+            try:
+                # parse time string to aware datetime
+                time_str = item.get("Time")
+                if not time_str:
+                    continue
+
+                try:
+                   
+                    time_naive = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
+                    event_time = timezone.make_aware(time_naive, timezone.get_current_timezone())
+                except ValueError:
+                  
+                    event_time = None
+
+     
+                defaults = {
+                    "headline": item.get("Headline"),
+                    "time": event_time,
+                    "source": item.get("Source"),
+                    "content": item.get("Content"),
+                }
+                url = item.get("URL")
+                if not url:
+                    continue
+
+                News.objects.update_or_create(
+                    url=url,
+                    defaults=defaults
+                )
+
+            except Exception as e:
+                return Response(
+                    {"detail": f"Error processing item: {str(e)}"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        return Response(
+            {"message": "News data processed successfully."},
+            status=status.HTTP_200_OK
+        )    
+        
+        
+
+class NewsListAPIView(ListAPIView):
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [IsAuthenticated]
+    serializer_class = NewsSerializer
+
+    def get_queryset(self):
+        queryset = News.objects.all().order_by('-time')
+
+        date_from = self.request.query_params.get('date_from')
+        date_to = self.request.query_params.get('date_to')
+        source = self.request.query_params.get('source')
+
+        if date_from and date_to:
+            queryset = queryset.filter(time__date__gte=date_from, time__date__lte=date_to)
+
+        if source:
+            queryset = queryset.filter(source__iexact=source)
+
+        return queryset        
