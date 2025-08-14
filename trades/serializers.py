@@ -6,19 +6,12 @@ from decimal import Decimal
 class TradeSerializer(serializers.ModelSerializer):
     current_pl = serializers.DecimalField(max_digits=15, decimal_places=2, read_only=True, required=False)
     actual_profit_loss = serializers.DecimalField(max_digits=15, decimal_places=2, read_only=True, required=False, source='profit')
-    # Ensure other fields from the MT5 live data that might not be on the Trade model are also available
-    # if they are part of the merged dictionary passed to the serializer.
-    # For example, if 'comment' or 'magic' from MT5 live data is needed and not on Trade model:
     comment = serializers.CharField(read_only=True, required=False, allow_blank=True)
     magic = serializers.IntegerField(read_only=True, required=False)
-    # The 'source' field added in views.py to distinguish data origin
     source = serializers.CharField(read_only=True, required=False)
-
 
     class Meta:
         model = Trade
-        # Explicitly list fields to ensure dynamically added ones like 'current_pl' are included
-        # along with all model fields.
         fields = [
             # Fields from Trade model
             'id', 'order_id', 'deal_id', 'position_id', 'swap', 'commission', 
@@ -27,6 +20,8 @@ class TradeSerializer(serializers.ModelSerializer):
             'projected_profit', 'projected_loss', 'actual_profit_loss',
             'reason', 'rr_ratio', 'trade_status', 'closed_at', 'created_at',
             'trader', 'indicators',
+            # New: closure tagging fields
+            'close_reason', 'close_subreason',
             # Dynamically added fields / fields from live platform data
             'current_pl', 'comment', 'magic', 'source'
         ]
@@ -91,6 +86,11 @@ class ExecuteTradeInputSerializer(serializers.Serializer):
     projected_profit     = serializers.DecimalField(max_digits=15, decimal_places=2)
     projected_loss       = serializers.DecimalField(max_digits=15, decimal_places=2)
     rr_ratio             = serializers.DecimalField(max_digits=5, decimal_places=2)
+    source               = serializers.ChoiceField(
+        choices=["MANUAL", "AI", "BOT", "BACKTEST"], 
+        default="MANUAL", 
+        required=False
+    )
 
     def validate(self, data):
         # 1. If partial-profit is true, ensure targets exist

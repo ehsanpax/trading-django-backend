@@ -13,6 +13,64 @@ from asgiref.sync import sync_to_async
 
 logger = logging.getLogger(__name__)
 
+# --- Shared asyncio loop for all bot feeds in this process ---
+class _AsyncLoopThread:
+    def __init__(self):
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._thread: Optional[threading.Thread] = None
+        self._ready = threading.Event()
+
+    def start(self):
+        if self._thread and self._thread.is_alive():
+            return
+        self._ready.clear()
+        self._thread = threading.Thread(target=self._run, name="Bots-AsyncLoop", daemon=True)
+        self._thread.start()
+        self._ready.wait(timeout=10)
+        if not self._loop:
+            raise RuntimeError("Failed to start shared asyncio loop for bots")
+
+    def _run(self):
+        loop = asyncio.new_event_loop()
+        self._loop = loop
+        try:
+            asyncio.set_event_loop(loop)
+        except Exception:
+            # Not strictly required to set, but harmless if it fails
+            pass
+        self._ready.set()
+        try:
+            loop.run_forever()
+        finally:
+            try:
+                pending = [t for t in asyncio.all_tasks(loop=loop) if not t.done()]
+                for t in pending:
+                    t.cancel()
+                if pending:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            except Exception:
+                pass
+            try:
+                loop.close()
+            except Exception:
+                pass
+
+    @property
+    def loop(self) -> asyncio.AbstractEventLoop:
+        if not self._loop:
+            raise RuntimeError("Shared asyncio loop not started")
+        return self._loop
+
+    def submit(self, coro: asyncio.coroutines) -> asyncio.Future:
+        return asyncio.run_coroutine_threadsafe(coro, self.loop)
+
+    def call_soon_threadsafe(self, cb, *args):
+        self.loop.call_soon_threadsafe(cb, *args)
+
+
+_async_loop = _AsyncLoopThread()
+
 
 @dataclass
 class CandleEvent:
@@ -127,34 +185,55 @@ class PollingFeed(MarketDataFeed):
 
 
 class MT5WebsocketFeed(MarketDataFeed):
-    """Websocket-backed feed using MT5 connection manager."""
+    """Websocket-backed feed using a shared asyncio loop (one per process)."""
     def __init__(self, account_id: str, symbol: str, timeframe: str):
         self.account_id = account_id
         self.symbol = symbol
         self.timeframe = timeframe
         self._q: Queue = Queue(maxsize=1000)
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._thread: Optional[threading.Thread] = None
-        self._stop_evt: Optional[asyncio.Event] = None
         self._client = None
         self._ready = threading.Event()
         self._creds: Optional[Dict[str, Any]] = None
+        self._stop_evt: Optional[asyncio.Event] = None  # created on the shared loop
 
     def start(self):
-        if self._thread and self._thread.is_alive():
+        # Ensure shared loop is running
+        _async_loop.start()
+        # Resolve creds synchronously
+        try:
+            acc = Account.objects.filter(id=self.account_id).first()
+            if not acc:
+                logger.error("Account not found for MT5WebsocketFeed")
+                return
+            mt5_acc = MT5Account.objects.filter(account=acc).first()
+            if not mt5_acc:
+                logger.error("MT5 account not found for MT5WebsocketFeed")
+                return
+            self._creds = {
+                'base_url': settings.MT5_API_BASE_URL,
+                'account_id': mt5_acc.account_number,
+                'password': mt5_acc.encrypted_password,
+                'broker_server': mt5_acc.broker_server,
+                'internal_account_id': str(acc.id),
+            }
+        except Exception as e:
+            logger.error(f"Failed to resolve MT5 creds: {e}", exc_info=True)
             return
-        self._thread = threading.Thread(target=self._run_loop, name=f"MT5Feed-{self.symbol}-{self.timeframe}", daemon=True)
-        self._thread.start()
-        # Wait for client ready or timeout
+        # Schedule async startup on the shared loop
+        fut = _async_loop.submit(self._async_run())
+        # Optionally wait briefly for readiness
         self._ready.wait(timeout=10)
+        # Swallow immediate future exceptions to surface quickly
+        try:
+            exc = fut.exception(timeout=0)
+            if exc:
+                logger.error(f"MT5WebsocketFeed failed to start: {exc}")
+        except Exception:
+            pass
 
     def stop(self):
-        if self._loop and self._stop_evt and not self._stop_evt.is_set():
-            def _stop():
-                self._stop_evt.set()
-            self._loop.call_soon_threadsafe(_stop)
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=3)
+        if self._stop_evt is not None:
+            _async_loop.call_soon_threadsafe(self._stop_evt.set)
 
     def warmup_candles(self, count: int) -> List[Dict[str, Any]]:
         # If client is ready, use it; else, fall back to PriceService
@@ -179,46 +258,9 @@ class MT5WebsocketFeed(MarketDataFeed):
         except Empty:
             return None
 
-    # Internal
-    def _run_loop(self):
-        # Resolve account and MT5 creds synchronously in this thread (safe for ORM)
-        try:
-            acc = Account.objects.filter(id=self.account_id).first()
-            if not acc:
-                logger.error("Account not found for MT5WebsocketFeed")
-                return
-            mt5_acc = MT5Account.objects.filter(account=acc).first()
-            if not mt5_acc:
-                logger.error("MT5 account not found for MT5WebsocketFeed")
-                return
-            self._creds = {
-                'base_url': settings.MT5_API_BASE_URL,
-                'account_id': mt5_acc.account_number,
-                'password': mt5_acc.encrypted_password,
-                'broker_server': mt5_acc.broker_server,
-                'internal_account_id': str(acc.id),
-            }
-        except Exception as e:
-            logger.error(f"Failed to resolve MT5 creds: {e}", exc_info=True)
-            return
-
-        # Now spin up the event loop
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
-        self._stop_evt = asyncio.Event()
-        try:
-            self._loop.run_until_complete(self._async_run())
-        except Exception as e:
-            logger.error(f"MT5WebsocketFeed loop error: {e}", exc_info=True)
-        finally:
-            try:
-                self._loop.stop()
-                self._loop.close()
-            except Exception:
-                pass
-
     async def _async_run(self):
-        # Use pre-fetched creds; no ORM access here
+        # Create a stop event bound to the shared loop
+        self._stop_evt = asyncio.Event()
         if not self._creds:
             logger.error("MT5 creds not available in _async_run")
             return
@@ -244,7 +286,6 @@ class MT5WebsocketFeed(MarketDataFeed):
                 pass
 
         def _on_candle(candle_data):
-            # Ensure timeframe is included
             data = dict(candle_data)
             data['timeframe'] = self.timeframe
             evt = {'type': 'candle', 'data': data}
@@ -264,8 +305,9 @@ class MT5WebsocketFeed(MarketDataFeed):
 
         self._ready.set()
 
-        # Keep running until stop
+        # Wait until stop signaled
         await self._stop_evt.wait()
+
         # Cleanup
         try:
             await client.unsubscribe_candles(self.symbol, self.timeframe)

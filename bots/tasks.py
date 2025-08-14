@@ -6,10 +6,12 @@ import gc # Import garbage collection module
 from celery import shared_task
 from django.utils import timezone
 from django.db import transaction
-#from asgiref.sync import async_to_sync
-#from channels.layers import get_channel_layer
+# from asgiref.sync import sync_to_async
 import time
 import numpy as np
+import threading
+import os
+from django.db import close_old_connections
 
 from .models import LiveRun, BacktestRun, BotVersion, BacktestConfig, BacktestOhlcvData, BacktestIndicatorData
 from accounts.models import Account
@@ -26,8 +28,14 @@ from datetime import timedelta
 from .engine import BacktestEngine
 from .adapters import LegacyStrategyAdapter
 
-# It's good practice to get a logger instance per module
+# New for live runner
+from bots.feeds import make_feed, MarketDataFeed
+from bots.execution import ExecutionAdapter
+# Ensure reconcilers are registered with Celery when bots.tasks is imported
+from .reconciler import reconcile_live_runs  # noqa: F401
+
 logger = logging.getLogger(__name__)
+
 
 def _bulk_insert_in_batches(model, objects_to_create, batch_size=500, logger=logger):
     """
@@ -55,83 +63,287 @@ def _bulk_insert_in_batches(model, objects_to_create, batch_size=500, logger=log
 @shared_task(bind=True, max_retries=3, default_retry_delay=60) # bind=True gives access to self
 def live_loop(self, live_run_id, strategy_name, strategy_params, indicator_configs, instrument_symbol, account_id, risk_settings):
     """
-    Celery task for the live trading loop of a bot.
+    Celery task for the live trading loop of a bot. Phase 1 MVP implementation.
+    - Uses bots.feeds to stream candles.
+    - Uses StrategyManager to instantiate the strategy.
+    - On candle close, executes actions via ExecutionAdapter (central TradeService).
     """
-    # Import StrategyManager locally to break circular dependency
-    from bots.services import StrategyManager
-
     logger.info(f"live_loop task started for LiveRun ID: {live_run_id}")
+    feed = None
+    stop_event = threading.Event()
+    poll_thread = None
+    heartbeat_interval = 5  # seconds
+    last_heartbeat_at = 0
+
+    def _poll_stop_flag():
+        # Ensure this thread has a clean DB connection and is allowed to access ORM
+        try:
+            close_old_connections()
+        except Exception:
+            pass
+        os.environ.setdefault("DJANGO_ALLOW_ASYNC_UNSAFE", "true")
+        try:
+            while not stop_event.is_set():
+                status = LiveRun.objects.filter(id=live_run_id).values_list('status', flat=True).first()
+                if status == 'STOPPING':
+                    try:
+                        if feed:
+                            feed.stop()
+                    except Exception:
+                        pass
+                    stop_event.set()
+                    break
+                time.sleep(2)
+        except Exception as e:
+            logger.warning(f"Stop poller error: {e}")
+        finally:
+            try:
+                close_old_connections()
+            except Exception:
+                pass
+
+    def _mark_stopped():
+        try:
+            LiveRun.objects.filter(id=live_run_id).update(status='STOPPED', stopped_at=timezone.now())
+        except Exception as e:
+            logger.error(f"Failed to mark LiveRun STOPPED: {e}")
+
+    def _mark_error(msg: str):
+        try:
+            LiveRun.objects.filter(id=live_run_id).update(status='ERROR', last_error=msg[:1024], stopped_at=timezone.now())
+        except Exception as e:
+            logger.error(f"Failed to mark LiveRun ERROR: {e}")
+
     try:
-        live_run = LiveRun.objects.select_related('bot_version__bot', 'account').get(id=live_run_id)
-        
+        # Eagerly load all needed relations to avoid lazy ORM later
+        live_run = LiveRun.objects.select_related('bot_version__bot__created_by', 'account').get(id=live_run_id)
         if live_run.status not in ('RUNNING', 'PENDING'):
-            logger.warning(f"LiveRun {live_run_id} is not in a runnable state (status: {live_run.status}). Exiting task.")
+            logger.warning(f"LiveRun {live_run_id} is not runnable (status: {live_run.status}). Exiting.")
             return
-
         if live_run.status == 'PENDING':
+            # Set RUNNING before any async/websocket begins
+            LiveRun.objects.filter(id=live_run_id).update(status='RUNNING', started_at=timezone.now(), task_id=self.request.id, last_heartbeat=timezone.now())
             live_run.status = 'RUNNING'
-            live_run.started_at = timezone.now()
-            live_run.save(update_fields=['status', 'started_at'])
+        else:
+            # Update task_id if resuming
+            LiveRun.objects.filter(id=live_run_id).update(task_id=self.request.id, last_heartbeat=timezone.now())
 
-        bot_version = live_run.bot_version
-        bot = bot_version.bot
         account = live_run.account
-
-        if not instrument_symbol:
-            live_run.status = 'ERROR'
-            live_run.last_error = "LiveRun is missing an instrument_symbol."
-            live_run.stopped_at = timezone.now()
-            live_run.save(update_fields=['status', 'last_error', 'stopped_at'])
-            logger.error(f"LiveRun {live_run.id}: Missing instrument_symbol. Stopping.")
-            return
-
         if not account:
-            live_run.status = 'ERROR'
-            live_run.last_error = "LiveRun is not associated with an account."
-            live_run.stopped_at = timezone.now()
-            live_run.save(update_fields=['status', 'last_error', 'stopped_at'])
-            logger.error(f"LiveRun {live_run.id}: No account assigned. Stopping.")
-            return
+            raise ValueError("LiveRun has no account")
+        if not instrument_symbol:
+            raise ValueError("LiveRun missing instrument_symbol")
 
-        instrument_spec = None
+        # Optional instrument spec (do before feed)
         try:
             instrument_spec = InstrumentSpecification.objects.get(symbol=instrument_symbol)
-            logger.info(f"LiveRun {live_run_id}: Found InstrumentSpecification for {instrument_symbol}")
         except InstrumentSpecification.DoesNotExist:
-            logger.warning(f"LiveRun {live_run_id}: InstrumentSpecification not found for {instrument_symbol}. Using defaults.")
+            instrument_spec = None
 
-        # Instantiate the strategy using StrategyManager
+        # Instantiate strategy (do before feed)
+        from bots.services import StrategyManager
         strategy_instance = StrategyManager.instantiate_strategy(
             strategy_name=strategy_name,
             instrument_symbol=instrument_symbol,
-            account_id=str(account.id), # Use explicit account ID
+            account_id=str(account.id),
             instrument_spec=instrument_spec,
             strategy_params=strategy_params,
             indicator_configs=indicator_configs,
-            risk_settings=risk_settings
+            risk_settings=risk_settings or {}
         )
-        logger.info(f"LiveRun {live_run_id}: Loaded strategy {strategy_name} for {instrument_symbol}")
-        
-        logger.info(f"live_loop for LiveRun ID: {live_run_id} on {instrument_symbol} completed one placeholder cycle.")
-        # Temporary: Stop the run to avoid lingering RUNNING state until real loop is added
-        live_run.status = 'STOPPED'
-        live_run.stopped_at = timezone.now()
-        live_run.save(update_fields=['status', 'stopped_at'])
+
+        # Prepare adapter and cached user before feed to avoid lazy ORM
+        adapter_user = live_run.bot_version.bot.created_by
+        adapter = ExecutionAdapter(
+            user=adapter_user,
+            default_symbol=instrument_symbol,
+            default_rr=float(strategy_params.get('risk', {}).get('default_rr', 2.0) if isinstance(strategy_params.get('risk', {}), dict) else 2.0),
+            run_metadata={
+                'live_run_id': str(live_run.id),
+                'bot_version_id': str(live_run.bot_version_id),
+                'source': 'BOT',
+            },
+            max_open_positions=(
+                int(strategy_params.get('risk', {}).get('max_open_positions'))
+                if isinstance(strategy_params.get('risk', {}), dict) and strategy_params.get('risk', {}).get('max_open_positions') is not None
+                else None
+            ),
+        )
+
+        # DataFrame & config
+        df_cols = ["open", "high", "low", "close", "volume", "tick"]
+        df = pd.DataFrame(columns=df_cols)
+        timeframe = getattr(live_run, 'timeframe', 'M1') if hasattr(live_run, 'timeframe') else 'M1'
+        decision_mode = getattr(live_run, 'decision_mode', 'CANDLE')
+
+        # Start stop poller thread
+        poll_thread = threading.Thread(target=_poll_stop_flag, name=f"LiveRunStopPoll-{live_run_id}", daemon=True)
+        poll_thread.start()
+
+        # Start feed (after all ORM has been done)
+        feed = make_feed(account, instrument_symbol, timeframe)
+        feed.start()
+
+        last_bar_time = None
+
+        # Warmup
+        try:
+            warm = feed.warmup_candles(count=200)
+            for c in warm:
+                ts = int(c.get('time'))
+                df.loc[pd.to_datetime(ts, unit='s')] = {
+                    'open': float(c.get('open')),
+                    'high': float(c.get('high')),
+                    'low': float(c.get('low')),
+                    'close': float(c.get('close')),
+                    'volume': float(c.get('volume', 0)),
+                    'tick': float(c.get('close')),
+                }
+            logger.info(f"Warmup bars loaded: {len(df)} for {instrument_symbol} {timeframe}")
+            last_bar_time = int(warm[-1]['time']) if warm else None
+            # Compute indicators after warmup so required columns exist
+            if not df.empty:
+                try:
+                    df = strategy_instance._calculate_indicators(df)
+                    # Log last values of key indicator columns
+                    try:
+                        last_idx = df.index[-1]
+                        cols_to_log = ['close', 'tick']
+                        for col in getattr(strategy_instance, 'indicator_column_names', [])[:8]:
+                            if col in df.columns:
+                                cols_to_log.append(col)
+                        snapshot = {c: float(df[c].iloc[-1]) for c in cols_to_log if c in df.columns and not pd.isna(df[c].iloc[-1])}
+                        logger.info(f"After warmup indicators computed. Last[{last_idx}]: {snapshot}")
+                    except Exception:
+                        pass
+                except Exception as e_calc:
+                    logger.warning(f"Indicator calc on warmup failed: {e_calc}")
+        except Exception as e:
+            logger.info(f"Warmup failed or skipped: {e}")
+
+        # Precompute min bars needed
+        try:
+            min_bars_needed = int(getattr(strategy_instance, 'get_min_bars_needed', lambda: 50)())
+        except Exception:
+            min_bars_needed = 50
+        logger.info(f"Strategy min bars needed: {min_bars_needed}")
+
+        # Main loop (no ORM inside loop)
+        while not stop_event.is_set():
+            # Heartbeat periodically
+            try:
+                now_monotonic = time.time()
+                if now_monotonic - last_heartbeat_at >= heartbeat_interval:
+                    LiveRun.objects.filter(id=live_run_id).update(last_heartbeat=timezone.now())
+                    last_heartbeat_at = now_monotonic
+            except Exception:
+                pass
+
+            evt = feed.get_event(timeout=1.0)
+            if not evt:
+                continue
+            etype = evt.get('type')
+            data = evt.get('data') or {}
+            if etype == 'candle':
+                ts = int(data.get('time'))
+                if last_bar_time is not None and ts <= last_bar_time:
+                    # duplicate or older
+                    continue
+                last_bar_time = ts
+                idx = pd.to_datetime(ts, unit='s')
+                df.loc[idx] = {
+                    'open': float(data.get('open')),
+                    'high': float(data.get('high')),
+                    'low': float(data.get('low')),
+                    'close': float(data.get('close')),
+                    'volume': float(data.get('volume', 0)),
+                    'tick': float(data.get('close')),
+                }
+                # Recalculate indicators for the new bar
+                try:
+                    df = strategy_instance._calculate_indicators(df)
+                except Exception as e_calc:
+                    logger.error(f"Indicator calc failed on new candle: {e_calc}", exc_info=True)
+                    continue
+
+                # Log snapshot for this bar
+                try:
+                    cols_to_log = ['close', 'tick']
+                    for col in getattr(strategy_instance, 'indicator_column_names', [])[:8]:
+                        if col in df.columns:
+                            cols_to_log.append(col)
+                    snapshot = {c: float(df[c].iloc[-1]) for c in cols_to_log if c in df.columns and not pd.isna(df[c].iloc[-1])}
+                    logger.info(f"New candle {instrument_symbol} {timeframe} @ {idx}. Snapshot: {snapshot}")
+                except Exception:
+                    pass
+
+                if len(df) < min_bars_needed:
+                    logger.info(f"Skipping decision: have {len(df)} bars, need {min_bars_needed}")
+                    continue
+
+                if decision_mode == 'CANDLE':
+                    try:
+                        logger.info(f"Running strategy at bar {idx}, df_len={len(df)}")
+                        actions = strategy_instance.run_tick(df, float(account.equity or account.balance or 0.0))
+                        logger.info(f"Strategy produced {len(actions or [])} actions: {actions}")
+                        results = adapter.execute_actions(account, actions)
+                        if results:
+                            try:
+                                LiveRun.objects.filter(id=live_run_id).update(last_action_at=timezone.now())
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        logger.error(f"CANDLE decision exec failed: {e}", exc_info=True)
+            elif etype == 'tick' and decision_mode == 'TICK':
+                # Update last row tick if exists; else ignore
+                try:
+                    if not df.empty:
+                        df.iloc[-1, df.columns.get_loc('tick')] = float(data.get('bid') or data.get('ask') or data.get('last'))
+                        # If the strategy requires price(source=tick), update that indicator column too
+                        try:
+                            for ind in getattr(strategy_instance, 'REQUIRED_INDICATORS', []) or []:
+                                if (ind.get('name') or '').lower() == 'price':
+                                    params = {k.lower(): v for k, v in (ind.get('params') or {}).items()}
+                                    if str(params.get('source', 'close')).lower() == 'tick':
+                                        param_str = "_".join([f"{k}_{v}" for k, v in sorted(params.items())])
+                                        price_col = f"price_default_{param_str}".lower()
+                                        if price_col in df.columns:
+                                            df.iloc[-1, df.columns.get_loc(price_col)] = df.iloc[-1, df.columns.get_loc('tick')]
+                        except Exception:
+                            pass
+                        actions = strategy_instance.run_tick(df, float(account.equity or account.balance or 0.0))
+                        if actions:
+                            logger.info(f"Tick produced {len(actions)} actions: {actions}")
+                        results = adapter.execute_actions(account, actions)
+                        if results:
+                            try:
+                                LiveRun.objects.filter(id=live_run_id).update(last_action_at=timezone.now())
+                            except Exception:
+                                pass
+                except Exception as e:
+                    logger.error(f"TICK decision exec failed: {e}", exc_info=True)
+
+        # Mark stopped via separate thread-safe ORM call
+        _mark_stopped()
 
     except LiveRun.DoesNotExist:
         logger.error(f"LiveRun with ID {live_run_id} does not exist.")
     except Exception as e:
         logger.error(f"Error in live_loop for LiveRun ID {live_run_id}: {e}", exc_info=True)
+        _mark_error(str(e))
+    finally:
         try:
-            live_run_on_error = LiveRun.objects.get(id=live_run_id)
-            live_run_on_error.status = 'ERROR'
-            live_run_on_error.last_error = str(e)[:1024]
-            live_run_on_error.stopped_at = timezone.now()
-            live_run_on_error.save(update_fields=['status', 'last_error', 'stopped_at'])
-        except LiveRun.DoesNotExist:
+            if feed:
+                feed.stop()
+        except Exception:
             pass
-        except Exception as e_save:
-            logger.error(f"Could not update LiveRun status on error: {e_save}")
+        # Ensure poller ends
+        try:
+            if poll_thread and poll_thread.is_alive():
+                stop_event.set()
+                poll_thread.join(timeout=2)
+        except Exception:
+            pass
 
 
 @shared_task(bind=True, max_retries=3)

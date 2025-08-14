@@ -33,11 +33,10 @@ app.conf.beat_schedule = {
             minute=0, hour="*/1"
         ),  # Run every hour at the beginning of the hour
     },
-    # Example of an existing task (if any, adjust as needed or remove if not present)
-    # 'run-daily-at-midnight': {
-    #     'task': 'indicators.tasks.run_daily_at_midnight',
-    #     'schedule': crontab(hour=0, minute=0),
-    # },
+    "reconcile-live-runs": {
+        "task": "bots.reconciler.reconcile_live_runs",
+        "schedule": 30.0,  # every 30 seconds
+    },
 }
 
 

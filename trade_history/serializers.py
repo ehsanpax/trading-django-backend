@@ -73,7 +73,9 @@ class TradeWithHistorySerializer(serializers.ModelSerializer):
             'stop_loss',
             # 'profit_target', # This is the overall TP, individual TPs are in ProfitTarget model
             'actual_profit_loss',
-            'reason', # Original trade reason
+            'source', 
+            'reason', 
+            'close_reason',
             'rr_ratio',
             'trade_status',
             'closed_at',

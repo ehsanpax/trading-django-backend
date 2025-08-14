@@ -13,7 +13,6 @@ router.register(r'backtest-runs', views.BacktestRunViewSet, basename='backtestru
 router.register(r'live-runs', views.LiveRunViewSet, basename='liverun')
 
 urlpatterns = [
-    path('', include(router.urls)),
     path('strategies/metadata/', views.StrategyMetadataAPIView.as_view(), name='strategy-metadata'),
     path('indicators/metadata/', views.IndicatorMetadataAPIView.as_view(), name='indicator-metadata'),
     path('nodes/metadata/', views.NodeMetadataAPIView.as_view(), name='node-metadata'),
@@ -21,4 +20,5 @@ urlpatterns = [
     path('backtest-runs/<uuid:backtest_run_id>/chart-data/', views.BacktestChartDataAPIView.as_view(), name='backtest-chart-data'),
     path('live-runs/start/', views.StartLiveRunAPIView.as_view(), name='start-liverun'),
     path('live-runs/<uuid:live_run_id>/stop/', views.StopLiveRunAPIView.as_view(), name='stop-liverun'),
+    path('', include(router.urls)),
 ]

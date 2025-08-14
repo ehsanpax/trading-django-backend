@@ -18,11 +18,20 @@ admin.site.register(CTraderAccount)
 
 @admin.register(Trade)
 class TradeAdmin(admin.ModelAdmin):
-    list_display = ('id', 'order_id', 'account', 'instrument', 'direction', 'lot_size', 'created_at', 'closed_at', 'actual_profit_loss')
-    list_filter = ('direction', 'instrument', 'account', 'created_at', 'closed_at')
-    search_fields = ('id__uuid__iexact', 'order_id__iexact', 'instrument__iexact', 'account__id__uuid__iexact', 'account__name__icontains') # Corrected account search
+    list_display = (
+        'id', 'order_id', 'account', 'instrument', 'direction', 'lot_size',
+        'trade_status', 'close_reason', 'close_subreason',
+        'actual_profit_loss', 'created_at', 'closed_at'
+    )
+    list_filter = (
+        'direction', 'instrument', 'account', 'trade_status', 'close_reason',
+        'created_at', 'closed_at'
+    )
+    search_fields = (
+        'id__uuid__iexact', 'order_id__iexact', 'instrument__iexact',
+        'account__id__uuid__iexact', 'account__name__icontains'
+    ) # Corrected account search
     readonly_fields = ('id', 'order_id', 'created_at') # 'updated_at' does not exist on Trade model
-    # Add other fields as necessary
     autocomplete_fields = ['account']
 
 @admin.register(Account) # This Account is from accounts.models due to import in trading/models.py

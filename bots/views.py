@@ -338,42 +338,37 @@ class StartLiveRunAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, *args, **kwargs):
-        serializer = CreateLiveRunSerializer(data=request.data) # Use CreateLiveRunSerializer
+        serializer = CreateLiveRunSerializer(data=request.data)
         if serializer.is_valid():
             data = serializer.validated_data
             try:
                 bot_version = get_object_or_404(BotVersion, id=data['bot_version_id'])
                 if not (request.user.is_staff or request.user.is_superuser or bot_version.bot.created_by == request.user):
-                     return Response({"detail": "You do not have permission to start a live run for this bot version."},
-                                    status=status.HTTP_403_FORBIDDEN)
+                    return Response({"detail": "You do not have permission to start a live run for this bot version."}, status=status.HTTP_403_FORBIDDEN)
 
-                # Validate account belongs to the user
                 account = get_object_or_404(Account, id=data['account_id'], user=request.user)
 
-                # First, create the LiveRun object (now with account)
                 live_run = LiveRun.objects.create(
                     bot_version=bot_version,
                     instrument_symbol=data['instrument_symbol'],
                     account=account,
-                    status='PENDING' # Set initial status
+                    timeframe=data.get('timeframe') or 'M1',
+                    decision_mode=data.get('decision_mode') or 'CANDLE',
+                    status='PENDING'
                 )
 
-                # Then, trigger the service function with the created LiveRun's ID
                 services.start_bot_live_run(live_run_id=live_run.id)
-                
-                # Re-fetch the run to get its updated status (e.g., PENDING)
                 live_run.refresh_from_db()
                 response_serializer = LiveRunSerializer(live_run)
                 return Response(response_serializer.data, status=status.HTTP_202_ACCEPTED)
             except BotVersion.DoesNotExist as e:
-                 return Response({"detail": str(e)}, status=status.HTTP_404_NOT_FOUND)
+                return Response({"detail": str(e)}, status=status.HTTP_404_NOT_FOUND)
             except DjangoValidationError as ve:
                 logger.error(f"Validation error starting live run: {ve.message_dict if hasattr(ve, 'message_dict') else str(ve)}", exc_info=True)
                 return Response({"detail": ve.message_dict if hasattr(ve, 'message_dict') else str(ve)}, status=status.HTTP_400_BAD_REQUEST)
             except Exception as e:
                 logger.error(f"Error starting live run: {e}", exc_info=True)
-                return Response({"detail": "An error occurred while starting the live run."},
-                                status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                return Response({"detail": "An error occurred while starting the live run."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 class StopLiveRunAPIView(APIView):

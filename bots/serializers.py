@@ -112,8 +112,8 @@ class LiveRunSerializer(serializers.ModelSerializer):
     class Meta:
         model = LiveRun
         fields = [
-            'id', 'bot_version', 'instrument_symbol', 'bot_name', 'bot_version_created_at', 'started_at', 
-            'stopped_at', 'status', 'pnl_r', 'drawdown_r', 'last_error'
+            'id', 'bot_version', 'instrument_symbol', 'timeframe', 'decision_mode',
+            'bot_name', 'bot_version_created_at', 'started_at', 'stopped_at', 'status', 'pnl_r', 'drawdown_r', 'last_error'
         ]
         read_only_fields = ['id', 'instrument_symbol', 'started_at', 'stopped_at', 'pnl_r', 'drawdown_r', 'last_error', 'bot_name', 'bot_version_created_at']
 
@@ -188,8 +188,9 @@ class BotVersionCreateSerializer(serializers.Serializer):
 class CreateLiveRunSerializer(serializers.Serializer):
     bot_version_id = serializers.UUIDField()
     instrument_symbol = serializers.CharField(max_length=50)
-    # --- New: explicit target account for this live run ---
     account_id = serializers.UUIDField()
+    timeframe = serializers.ChoiceField(choices=[('M1','1 Minute'),('M5','5 Minutes'),('M15','15 Minutes'),('M30','30 Minutes'),('H1','1 Hour'),('H4','4 Hours'),('D1','1 Day')], default='M1')
+    decision_mode = serializers.ChoiceField(choices=[('CANDLE','On Candle Close'),('TICK','On Each Tick')], default='CANDLE')
 
     def validate(self, data):
         # Basic validation for instrument_symbol

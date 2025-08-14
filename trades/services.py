@@ -29,8 +29,59 @@ from datetime import (
     timezone as dt_timezone,
 )  # Import datetime's timezone as dt_timezone
 from django.db.models import Q
+# New: symbol info helper for inference
+from trades.helpers import fetch_symbol_info_for_platform
+
+# Phase 0 addition: use minimal connector factory for TradeService
+from connectors.factory import get_connector as get_platform_connector
+from utils.concurrency import RedisLock, is_in_cooldown, mark_cooldown
 
 logger = logging.getLogger(__name__)
+
+# -----------------------------------------------
+# Close-reason helpers (mapping + inference)
+# -----------------------------------------------
+
+def _map_broker_deal_reason_to_close(reason_code: int):
+    """Map platform-specific deal reason codes to app close_reason/subreason.
+    MT5 ENUM_DEAL_REASON typical values: 0=CLIENT,1=EXPERT,2=MOBILE,3=WEB,4=SL,5=TP,6=SO(StopOut).
+    """
+    try:
+        rc = int(reason_code) if reason_code is not None else None
+    except Exception:
+        rc = None
+    if rc == 4:
+        return ("SL_HIT", None)
+    if rc == 5:
+        return ("TP_HIT", None)
+    if rc == 6:
+        return ("STOP_OUT", None)
+    return (None, None)
+
+
+def _infer_close_reason(trade: Trade, close_price: Decimal) -> str | None:
+    """Infer TP_HIT or SL_HIT by comparing close_price to configured TP/SL within a small tolerance."""
+    if close_price is None:
+        return None
+    try:
+        sym = fetch_symbol_info_for_platform(trade.account, trade.instrument)
+        pip = Decimal(str(sym.get("pip_size", 0)))
+        if pip <= 0:
+            return None
+    except Exception:
+        return None
+    tol = pip * Decimal("2")  # 2 pips tolerance
+    try:
+        tp = Decimal(str(trade.profit_target)) if trade.profit_target is not None else None
+        sl = Decimal(str(trade.stop_loss)) if trade.stop_loss is not None else None
+    except Exception:
+        tp = trade.profit_target
+        sl = trade.stop_loss
+    if tp is not None and abs(close_price - tp) <= tol:
+        return "TP_HIT"
+    if sl is not None and abs(close_price - sl) <= tol:
+        return "SL_HIT"
+    return None
 
 
 def get_pending_orders(account: Account) -> list:
@@ -85,7 +136,8 @@ def get_cached(symbol, tf, ind):
 def partially_close_trade(user, trade_id: UUID, volume_to_close: Decimal) -> dict:
     """
     Partially closes an open trade, performs platform-specific actions,
-    and updates the database.
+    and updates the database. Tags the closing Order with STRATEGY_EXIT by default
+    unless broker mapping sets a more specific reason.
     """
     trade = get_object_or_404(Trade, id=trade_id)
 
@@ -149,7 +201,7 @@ def partially_close_trade(user, trade_id: UUID, volume_to_close: Decimal) -> dic
                 f"Partially closed on platform, but DB sync failed: {e}. Please check trade status."
             )
 
-        # Find the latest order related to this trade to get P/L of the closed portion
+        # Find the latest order related to this trade to tag P/L of the closed portion
         # This assumes synchronize_trade_with_platform created an Order for the partial close deal.
         # We sort by filled_at or created_at to get the most recent one.
         closed_portion_order = (
@@ -158,18 +210,25 @@ def partially_close_trade(user, trade_id: UUID, volume_to_close: Decimal) -> dic
             .first()
         )
 
-        profit_on_closed_portion = Decimal("0.00")
-        if (
-            closed_portion_order and closed_portion_order.volume == volume_to_close
-        ):  # A basic check
-            profit_on_closed_portion = (
-                (closed_portion_order.profit or 0)
-                + (closed_portion_order.commission or 0)
-                + (closed_portion_order.swap or 0)
+        # Default tagging for strategy-driven partial close
+        if closed_portion_order and not closed_portion_order.close_reason:
+            closed_portion_order.close_reason = "STRATEGY_EXIT"
+            closed_portion_order.close_subreason = (
+                "EXIT_LONG" if (trade.direction or "").upper() == "BUY" else "EXIT_SHORT"
             )
+            closed_portion_order.save(update_fields=["close_reason", "close_subreason"])
 
         # Refresh trade instance from DB after sync
         trade.refresh_from_db()
+
+        profit_on_closed_portion = Decimal("0.00")
+        if closed_portion_order and closed_portion_order.volume == volume_to_close:
+            for v in [closed_portion_order.profit, closed_portion_order.commission, closed_portion_order.swap]:
+                if v is not None:
+                    try:
+                        profit_on_closed_portion += Decimal(str(v))
+                    except Exception:
+                        pass
 
         return {
             "message": "Trade partially closed successfully.",
@@ -190,6 +249,10 @@ class TradeService:
     def __init__(self, user, validated_data):
         self.user = user
         self.data = validated_data
+        # Normalize optional metadata
+        self.data.setdefault("live_run_id", None)
+        self.data.setdefault("bot_version_id", None)
+        self.data.setdefault("correlation_id", None)
 
     def _get_account(self) -> Account:
         acct = get_object_or_404(Account, id=self.data["account_id"])
@@ -241,21 +304,8 @@ class TradeService:
         return account, final_lot, sl_price, tp_price
 
     def _get_connector(self, account: Account):
-        if account.platform == "MT5":
-            mt5_acc = get_object_or_404(MT5Account, account=account)
-            return MT5APIClient(
-                base_url=settings.MT5_API_BASE_URL,
-                account_id=mt5_acc.account_number,
-                password=mt5_acc.encrypted_password,
-                broker_server=mt5_acc.broker_server,
-                internal_account_id=str(account.id),
-            )
-
-        if account.platform == "cTrader":
-            ct_acc = get_object_or_404(CTraderAccount, account=account)
-            return CTraderClient(ct_acc)
-
-        raise RuntimeError(f"Unsupported platform: {account.platform}")
+        """Phase 0: delegate connector resolution to factory to prepare for multi-platform support."""
+        return get_platform_connector(account)
 
     def execute_on_broker(
         self, account: Account, final_lot, sl_price, tp_price
@@ -264,13 +314,72 @@ class TradeService:
         Actually place the order on MT5 or cTrader, then for MT5-filled trades
         immediately fetch the live position details.
         """
-        conn = self._get_connector(account)
+        # Phase 1: Idempotency pre-check to avoid duplicate broker submits on bursts
+        try:
+            live_run_id = self.data.get("live_run_id")
+            corr_id = self.data.get("correlation_id")
+            symbol = self.data.get("symbol")
+            side = self.data.get("direction")
+            # Phase 2/3: Names for lock/cooldown keys
+            lock_key = (
+                f"lock:open:{live_run_id}:{symbol}:{side}" if live_run_id and symbol and side else None
+            )
+            cooldown_key = (
+                f"cooldown:open:{live_run_id}:{symbol}:{side}" if live_run_id and symbol and side else None
+            )
 
+            if live_run_id and corr_id:
+                existing = (
+                    Trade.objects.filter(
+                        live_run_id=live_run_id,
+                        correlation_id=corr_id,
+                        trade_status="open",
+                    )
+                    .order_by("-created_at")
+                    .first()
+                )
+                if existing:
+                    logger.info(
+                        f"Idempotency hit: existing open trade found for (live_run={live_run_id}, correlation_id={corr_id}). Skipping broker call."
+                    )
+                    return {
+                        "idempotent": True,
+                        "status": "filled",
+                        "order_id": existing.order_id,
+                        "position_info": {},
+                    }
+        except Exception as _idem_e:
+            logger.warning(f"Idempotency pre-check failed, proceeding with broker call: {_idem_e}")
+
+        # Phase 2: Per-run/symbol/side lock with safe no-op fallback when Redis is unavailable
+        if lock_key:
+            with RedisLock(lock_key, ttl_ms=getattr(settings, "EXEC_LOCK_TTL_MS", 5000)) as lk:
+                if not lk.acquired:
+                    logger.info(f"Execution lock miss for {lock_key}; skipping broker submit.")
+                    return {"error": "LOCK_NOT_ACQUIRED", "status": "skipped"}
+                # Phase 3: Cooldown window check
+                if cooldown_key and is_in_cooldown(cooldown_key):
+                    logger.info(f"Cooldown active for {cooldown_key}; skipping broker submit.")
+                    return {"error": "COOLDOWN_ACTIVE", "status": "skipped"}
+                # Proceed under lock
+                resp = self._execute_broker_call(account, final_lot, sl_price, tp_price)
+                # If success/filled, mark cooldown
+                try:
+                    if cooldown_key and resp and resp.get("status") in {"filled", "pending"}:
+                        cd = int(getattr(settings, "MIN_ENTRY_COOLDOWN_SEC", 0) or 0)
+                        if cd > 0:
+                            mark_cooldown(cooldown_key, cd)
+                except Exception as _cd_e:
+                    logger.warning(f"Failed to mark cooldown for {cooldown_key}: {_cd_e}")
+                return resp
+        # No lock key context -> legacy path
+        return self._execute_broker_call(account, final_lot, sl_price, tp_price)
+
+    def _execute_broker_call(self, account: Account, final_lot, sl_price, tp_price) -> dict:
+        conn = self._get_connector(account)
         if account.platform == "MT5":
             limit_price_float = (
-                float(self.data["limit_price"])
-                if self.data.get("limit_price") is not None
-                else None
+                float(self.data["limit_price"]) if self.data.get("limit_price") is not None else None
             )
             resp = conn.place_trade(
                 symbol=self.data["symbol"],
@@ -293,7 +402,7 @@ class TradeService:
                     resp["position_info"] = pos_details
                 else:
                     resp["position_info"] = {}
-
+            return resp
         else:  # cTrader
             resp = conn.place_order(
                 symbol=self.data["symbol"],
@@ -305,14 +414,77 @@ class TradeService:
                 stop_loss=sl_price,
                 take_profit=tp_price,
             )
-            # cTraderClient should already include resp["position_info"] when filled
-
-        return resp
+            return resp
 
     def persist(self, account: Account, resp: dict, final_lot, sl_price, tp_price):
         """
         Save the Order and, if filled, the Trade and any ProfitTarget legs.
         """
+        # Phase 1: If broker step was skipped due to idempotency, return existing records
+        if resp.get("idempotent"):
+            try:
+                live_run_id = self.data.get("live_run_id")
+                corr_id = self.data.get("correlation_id")
+                existing_trade = (
+                    Trade.objects.filter(
+                        live_run_id=live_run_id,
+                        correlation_id=corr_id,
+                    )
+                    .order_by("-created_at")
+                    .first()
+                )
+                if existing_trade:
+                    existing_order = (
+                        Order.objects.filter(trade=existing_trade)
+                        .order_by("-created_at")
+                        .first()
+                    )
+                    if existing_order:
+                        logger.info(
+                            f"Idempotent persist: returning existing order/trade (order={existing_order.broker_order_id}, trade={existing_trade.id})."
+                        )
+                        return existing_order, existing_trade
+                    else:
+                        # Fallback: attempt direct lookup by broker_order_id
+                        by_broker = (
+                            Order.objects.filter(broker_order_id=existing_trade.order_id)
+                            .order_by("-created_at")
+                            .first()
+                        )
+                        if by_broker:
+                            return by_broker, existing_trade
+                        logger.warning(
+                            f"Idempotent persist: existing trade found but no order linked. Proceeding to create a new Order shell to maintain response shape."
+                        )
+                        # Create a minimal shadow order to preserve invariants
+                        shadow = Order.objects.create(
+                            account=account,
+                            instrument=existing_trade.instrument,
+                            direction=existing_trade.direction,
+                            order_type=self.data.get("order_type", "MARKET"),
+                            volume=Decimal(final_lot),
+                            price=(Decimal(self.data["limit_price"]) if self.data.get("limit_price") is not None else None),
+                            stop_loss=Decimal(sl_price),
+                            take_profit=Decimal(tp_price),
+                            time_in_force=self.data.get("time_in_force", "GTC"),
+                            broker_order_id=existing_trade.order_id,
+                            status=Order.Status.FILLED,
+                            risk_percent=Decimal(self.data["risk_percent"]),
+                            projected_profit=Decimal(self.data.get("projected_profit", 0) or 0),
+                            projected_loss=Decimal(self.data.get("projected_loss", 0) or 0),
+                            rr_ratio=Decimal(self.data.get("rr_ratio", 0) or 0),
+                            trade=existing_trade,
+                        )
+                        return shadow, existing_trade
+            except Exception as _idem_persist_e:
+                logger.error(f"Idempotent persist handling failed, falling back to normal persist: {_idem_persist_e}")
+                # continue to normal flow
+
+        # Gracefully handle skip/error from execution gate (lock/cooldown)
+        if resp.get("status") == "skipped" or resp.get("error") in {"LOCK_NOT_ACQUIRED", "COOLDOWN_ACTIVE"}:
+            logger.info(f"Persist skipped due to execution gate: {resp}")
+            return None, None
+
         snapshot = {
             "RSI_M1": get_cached(self.data["symbol"], "M1", "RSI"),
             "ATR_M1": get_cached(self.data["symbol"], "M1", "ATR"),
@@ -326,9 +498,7 @@ class TradeService:
             order_type=self.data["order_type"],
             volume=Decimal(final_lot),
             price=(
-                Decimal(self.data["limit_price"])
-                if self.data.get("limit_price") is not None
-                else None
+                Decimal(self.data["limit_price"]) if self.data.get("limit_price") is not None else None
             ),
             stop_loss=Decimal(sl_price),
             take_profit=Decimal(tp_price),
@@ -336,9 +506,9 @@ class TradeService:
             broker_order_id=resp["order_id"],
             status=resp.get("status", "pending"),
             risk_percent=Decimal(self.data["risk_percent"]),
-            projected_profit=Decimal(self.data["projected_profit"]),
-            projected_loss=Decimal(self.data["projected_loss"]),
-            rr_ratio=Decimal(self.data["rr_ratio"]),
+            projected_profit=Decimal(self.data.get("projected_profit", 0) or 0),
+            projected_loss=Decimal(self.data.get("projected_loss", 0) or 0),
+            rr_ratio=Decimal(self.data.get("rr_ratio", 0) or 0),
         )
 
         trade = None
@@ -406,11 +576,16 @@ class TradeService:
                 deal_id=resp.get("deal_id"),
                 position_id=db_trade_position_id,
                 risk_percent=Decimal(self.data["risk_percent"]),
-                projected_profit=Decimal(self.data["projected_profit"]),
-                projected_loss=Decimal(self.data["projected_loss"]),
-                rr_ratio=Decimal(self.data["rr_ratio"]),
+                projected_profit=Decimal(self.data.get("projected_profit", 0) or 0),
+                projected_loss=Decimal(self.data.get("projected_loss", 0) or 0),
+                rr_ratio=Decimal(self.data.get("rr_ratio", 0) or 0),
                 reason=self.data.get("reason", ""),
                 indicators=snapshot,
+                # New lineage fields
+                source=self.data.get("source", "MANUAL"),
+                live_run_id=self.data.get("live_run_id"),
+                bot_version_id=self.data.get("bot_version_id"),
+                correlation_id=self.data.get("correlation_id"),
             )
             order.trade = trade
             order.save(update_fields=["trade"])
@@ -442,6 +617,15 @@ class TradeService:
         """
         Prepare the final JSON shape for the view.
         """
+        if not order:
+            # Skipped or gated action
+            out = {
+                "message": "Order skipped by execution gate",
+                "order_status": "skipped",
+            }
+            if trade:
+                out.update({"trade_id": str(trade.id)})
+            return out
         out = {
             "message": "Order accepted",
             "order_id": order.broker_order_id,
@@ -457,9 +641,10 @@ class TradeService:
         return out
 
 
-def close_trade_globally(user, trade_id: UUID) -> dict:
+def close_trade_globally(user, trade_id: UUID, client_close_reason: str | None = None, client_close_subreason: str | None = None) -> dict:
     """
     Closes a trade, performs platform-specific actions, and updates the database.
+    If client_close_reason is provided (e.g., MANUAL_CLOSE), prefer it when tagging.
     """
     trade = get_object_or_404(Trade, id=trade_id)
 
@@ -511,25 +696,67 @@ def close_trade_globally(user, trade_id: UUID) -> dict:
 
         # After successful closure, synchronize with the platform to get the final P/L
         try:
-            synchronize_trade_with_platform(
+            sync_result = synchronize_trade_with_platform(
                 trade_id=trade.id, existing_connector=client
             )
+            if sync_result.get("error"):
+                logger.error(f"Error during post-close synchronization: {sync_result['error']}")
+            else:
+                logger.info(f"Post-close synchronization for trade {trade.id} successful.")
         except (BrokerAPIError, BrokerConnectionError, TradeSyncError) as e:
-            # Log this critical error, but proceed to close the trade in our DB.
-            # The trade is closed on the platform, so our DB should reflect that.
-            # The P/L might be stale, but a subsequent sync can fix it.
             logger.critical(f"Trade {trade.id} closed on MT5, but DB sync failed: {e}")
-            # We can still proceed to mark as closed, but profit will be stale.
-            pass  # Continue to the standard closing logic below
+            pass
 
     elif trade.account.platform == "cTrader":
-        # Consistent with original view, cTrader close is not implemented.
         raise BrokerAPIError("cTrader close not implemented yet.")
     else:
         raise APIException("Unsupported trading platform.")
 
     # Refresh the instance from the DB to get the latest state after sync
     trade.refresh_from_db()
+
+    # Tag final close if not set by sync
+    last_close_order = (
+        Order.objects.filter(trade=trade, status=Order.Status.FILLED)
+        .order_by("-filled_at", "-created_at")
+        .first()
+    )
+
+    preferred_reason = (client_close_reason or "").strip().upper() if client_close_reason else None
+    preferred_sub = (client_close_subreason or None)
+
+    if last_close_order and (preferred_reason or not last_close_order.close_reason):
+        if preferred_reason:
+            last_close_order.close_reason = preferred_reason
+            last_close_order.close_subreason = preferred_sub
+        elif not last_close_order.close_reason:
+            last_close_order.close_reason = "STRATEGY_EXIT"
+            last_close_order.close_subreason = (
+                "EXIT_LONG" if (trade.direction or "").upper() == "BUY" else "EXIT_SHORT"
+            )
+        last_close_order.save(update_fields=["close_reason", "close_subreason"])
+
+    if trade.trade_status == "closed" and (preferred_reason or not trade.close_reason):
+        if preferred_reason:
+            trade.close_reason = preferred_reason
+            trade.close_subreason = preferred_sub
+        else:
+            if last_close_order and last_close_order.close_reason:
+                trade.close_reason = last_close_order.close_reason
+                trade.close_subreason = last_close_order.close_subreason
+            else:
+                # Best-effort inference using last price
+                last_price = last_close_order.filled_price if last_close_order else None
+                try:
+                    last_price_dec = Decimal(str(last_price)) if last_price is not None else None
+                except Exception:
+                    last_price_dec = None
+                inferred = _infer_close_reason(trade, last_price_dec) if last_price_dec is not None else None
+                trade.close_reason = inferred or "STRATEGY_EXIT"
+                trade.close_subreason = (
+                    "EXIT_LONG" if (trade.direction or "").upper() == "BUY" else "EXIT_SHORT"
+                )
+        trade.save(update_fields=["close_reason", "close_subreason"])
 
     return {
         "message": "Trade closed successfully",
@@ -538,6 +765,117 @@ def close_trade_globally(user, trade_id: UUID) -> dict:
             trade.actual_profit_loss if trade.actual_profit_loss is not None else 0
         ),
     }
+
+
+def partially_close_trade(user, trade_id: UUID, volume_to_close: Decimal) -> dict:
+    """
+    Partially closes an open trade, performs platform-specific actions,
+    and updates the database.
+    """
+    trade = get_object_or_404(Trade, id=trade_id)
+
+    if trade.account.user != user:
+        raise PermissionDenied("Unauthorized to partially close this trade.")
+
+    if trade.trade_status != "open":
+        raise ValidationError("Trade is not open, cannot partially close.")
+
+    if not (Decimal("0.01") <= volume_to_close < trade.remaining_size):
+        raise ValidationError(
+            f"Volume to close ({volume_to_close}) must be between 0.01 and "
+            f"less than remaining size ({trade.remaining_size}). "
+            f"For full closure, use the close trade endpoint."
+        )
+
+    connector = None  # Initialize connector
+
+    if trade.account.platform == "MT5":
+        try:
+            mt5_account = trade.account.mt5_account
+        except MT5Account.DoesNotExist:
+            raise TradeValidationError(
+                "No linked MT5 account found for this trade's account."
+            )
+
+        client = MT5APIClient(
+            base_url=settings.MT5_API_BASE_URL,
+            account_id=mt5_account.account_number,
+            password=mt5_account.encrypted_password,
+            broker_server=mt5_account.broker_server,
+            internal_account_id=str(trade.account.id),
+        )
+
+        if not trade.position_id:
+            raise TradeValidationError(
+                f"Cannot partially close trade {trade.id}: Missing MT5 position ticket (position_id)."
+            )
+
+        client.close_trade(
+            ticket=trade.position_id,
+            volume=float(volume_to_close),
+            symbol=trade.instrument,
+        )
+
+        # Successfully issued partial close command to broker
+        # Now, synchronize to get the deal and update trade state
+        try:
+            synchronize_trade_with_platform(
+                trade_id=trade.id, existing_connector=connector
+            )
+        except (BrokerAPIError, BrokerConnectionError, TradeSyncError) as e:
+            # This is problematic: broker action succeeded, but DB sync failed.
+            # Log this error thoroughly. The trade state in DB might be stale.
+            # For now, we'll raise an exception, but a more robust solution might involve
+            # retrying sync or flagging the trade for manual review.
+            logger.critical(
+                f"Trade {trade.id} partially closed on MT5, but DB sync failed: {e}"
+            )
+            raise TradeSyncError(
+                f"Partially closed on platform, but DB sync failed: {e}. Please check trade status."
+            )
+
+        # Find the latest order related to this trade to tag P/L of the closed portion
+        # This assumes synchronize_trade_with_platform created an Order for the partial close deal.
+        # We sort by filled_at or created_at to get the most recent one.
+        closed_portion_order = (
+            Order.objects.filter(trade=trade, status=Order.Status.FILLED)
+            .order_by("-filled_at", "-created_at")
+            .first()
+        )
+
+        # Default tagging for strategy-driven partial close
+        if closed_portion_order and not closed_portion_order.close_reason:
+            closed_portion_order.close_reason = "STRATEGY_EXIT"
+            closed_portion_order.close_subreason = (
+                "EXIT_LONG" if (trade.direction or "").upper() == "BUY" else "EXIT_SHORT"
+            )
+            closed_portion_order.save(update_fields=["close_reason", "close_subreason"])
+
+        # Refresh trade instance from DB after sync
+        trade.refresh_from_db()
+
+        profit_on_closed_portion = Decimal("0.00")
+        if closed_portion_order and closed_portion_order.volume == volume_to_close:
+            for v in [closed_portion_order.profit, closed_portion_order.commission, closed_portion_order.swap]:
+                if v is not None:
+                    try:
+                        profit_on_closed_portion += Decimal(str(v))
+                    except Exception:
+                        pass
+
+        return {
+            "message": "Trade partially closed successfully.",
+            "trade_id": str(trade.id),
+            "closed_volume": float(volume_to_close),
+            "remaining_volume": float(trade.remaining_size),
+            "profit_on_closed_portion": float(profit_on_closed_portion),
+            "current_trade_actual_profit_loss": float(trade.actual_profit_loss or 0),
+        }
+
+    elif trade.account.platform == "cTrader":
+        raise APIException("cTrader partial close not implemented yet.")
+    else:
+        raise APIException(f"Unsupported trading platform: {trade.account.platform}")
 
 
 def synchronize_trade_with_platform(
@@ -614,8 +952,7 @@ def synchronize_trade_with_platform(
     if sync_data.get("error_message"):
         raise BrokerAPIError(f"Platform error: {sync_data.get('error_message')}")
 
-    # Process sync_data - platform-agnostic part
-    # 1. Update/Create Order records from sync_data["deals"]
+    # 1. Update/Create Order records from sync_data["deals"] with closure tagging
     existing_broker_deal_ids = set(
         trade_instance.order_history.values_list("broker_deal_id", flat=True).exclude(
             broker_deal_id__isnull=True
@@ -625,74 +962,82 @@ def synchronize_trade_with_platform(
     for deal_info in sync_data.get("deals", []):
         broker_deal_id = deal_info.get("ticket")
         if broker_deal_id and broker_deal_id not in existing_broker_deal_ids:
-            Order.objects.create(
+            close_reason, close_subreason = _map_broker_deal_reason_to_close(deal_info.get("reason"))
+            created_order = Order.objects.create(
                 account=trade_instance.account,
                 instrument=deal_info.get("symbol"),
-                direction=(
-                    Order.Direction.BUY
-                    if deal_info.get("type") == 0
-                    else Order.Direction.SELL
-                ),  # MT5: 0 for Buy, 1 for Sell
-                order_type=Order.OrderType.MARKET,  # Deals are executions
-                volume=deal_info.get(
-                    "volume"
-                ),  # Already Decimal from fetch_trade_sync_data
-                price=deal_info.get("price"),  # Already Decimal
+                direction=(Order.Direction.BUY if deal_info.get("type") == 0 else Order.Direction.SELL),
+                order_type=Order.OrderType.MARKET,
+                volume=deal_info.get("volume"),
+                price=deal_info.get("price"),
                 status=Order.Status.FILLED,
                 broker_order_id=deal_info.get("order"),
                 broker_deal_id=broker_deal_id,
                 filled_price=deal_info.get("price"),
                 filled_volume=deal_info.get("volume"),
-                filled_at=(
-                    datetime.fromtimestamp(deal_info.get("time"), tz=dt_timezone.utc)
-                    if deal_info.get("time")
-                    else None
-                ),
-                profit=deal_info.get(
-                    "profit"
-                ),  # Already Decimal from fetch_trade_sync_data
-                commission=deal_info.get("commission"),  # Already Decimal
-                swap=deal_info.get("swap"),  # Already Decimal
-                broker_deal_reason_code=deal_info.get("reason"),  # Integer reason code
+                filled_at=(datetime.fromtimestamp(deal_info.get("time"), tz=dt_timezone.utc) if deal_info.get("time") else None),
+                profit=deal_info.get("profit"),
+                commission=deal_info.get("commission"),
+                swap=deal_info.get("swap"),
+                broker_deal_reason_code=deal_info.get("reason"),
                 trade=trade_instance,
-                # Note: SL/TP from original order might not be in deal_info.
-                # If needed, would require more complex logic to trace back to original order.
+                close_reason=close_reason,
+                close_subreason=close_subreason,
             )
-            existing_broker_deal_ids.add(
-                broker_deal_id
-            )  # Add to set to prevent re-creation in same run
+            existing_broker_deal_ids.add(broker_deal_id)
 
     # 2. Update Trade.remaining_size
-    trade_instance.remaining_size = sync_data.get(
-        "platform_remaining_size", trade_instance.remaining_size
-    )
+    trade_instance.remaining_size = sync_data.get("platform_remaining_size", trade_instance.remaining_size)
 
-    # 3. Update Trade status if closed
+    # 3. Update Trade status if closed and set close_reason
     if sync_data.get("is_closed_on_platform") and trade_instance.trade_status == "open":
         trade_instance.trade_status = "closed"
+        trade_instance.close_price = sync_data.get("last_deal_price")
 
         latest_deal_ts = sync_data.get("latest_deal_timestamp")
         if latest_deal_ts:
-            trade_instance.closed_at = datetime.fromtimestamp(
-                latest_deal_ts, tz=dt_timezone.utc
-            )
+            trade_instance.closed_at = datetime.fromtimestamp(latest_deal_ts, tz=dt_timezone.utc)
         else:
-            # If no deals, but platform says closed, use current time. Unlikely scenario.
             trade_instance.closed_at = django_timezone.now()
 
-        # Calculate P/L
-        final_profit = sync_data.get("final_profit", Decimal("0"))
-        final_commission = sync_data.get("final_commission", Decimal("0"))
-        final_swap = sync_data.get("final_swap", Decimal("0"))
-
-        # Ensure they are Decimals if not None
-        final_profit = final_profit if final_profit is not None else Decimal("0")
-        final_commission = (
-            final_commission if final_commission is not None else Decimal("0")
-        )
-        final_swap = final_swap if final_swap is not None else Decimal("0")
+        # Normalize to Decimal to avoid float + Decimal TypeError
+        final_profit_raw = sync_data.get("final_profit")
+        final_commission_raw = sync_data.get("final_commission")
+        final_swap_raw = sync_data.get("final_swap")
+        try:
+            final_profit = Decimal(str(final_profit_raw)) if final_profit_raw is not None else Decimal("0")
+        except Exception:
+            final_profit = Decimal("0")
+        try:
+            final_commission = Decimal(str(final_commission_raw)) if final_commission_raw is not None else Decimal("0")
+        except Exception:
+            final_commission = Decimal("0")
+        try:
+            final_swap = Decimal(str(final_swap_raw)) if final_swap_raw is not None else Decimal("0")
+        except Exception:
+            final_swap = Decimal("0")
 
         trade_instance.actual_profit_loss = final_profit + final_commission + final_swap
+
+        # Set trade close_reason from the last filled order, else infer
+        if not trade_instance.close_reason:
+            last_close_order = (
+                trade_instance.order_history.filter(status=Order.Status.FILLED)
+                .order_by("-filled_at", "-created_at")
+                .first()
+            )
+            if last_close_order and last_close_order.close_reason:
+                trade_instance.close_reason = last_close_order.close_reason
+                trade_instance.close_subreason = last_close_order.close_subreason
+            else:
+                try:
+                    close_price = last_close_order.filled_price if last_close_order else None
+                    close_price_dec = Decimal(str(close_price)) if close_price is not None else None
+                except Exception:
+                    close_price_dec = None
+                inferred = _infer_close_reason(trade_instance, close_price_dec) if close_price_dec is not None else None
+                trade_instance.close_reason = inferred
+                trade_instance.close_subreason = None
 
     try:
         trade_instance.save()
@@ -703,10 +1048,7 @@ def synchronize_trade_with_platform(
             "remaining_size": str(trade_instance.remaining_size),
         }
     except Exception as e:
-        # Log error e
-        raise TradeSyncError(
-            f"Failed to save synchronized trade {trade_instance.id}: {str(e)}"
-        )
+        raise TradeSyncError(f"Failed to save synchronized trade {trade_instance.id}: {str(e)}")
 
 
 # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++

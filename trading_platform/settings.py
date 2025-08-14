@@ -303,3 +303,9 @@ OANDA_ENVIRONMENT = env("OANDA_ENVIRONMENT")
 
 
 CELERY_RESULT_BACKEND = "django-db"
+
+# Concurrency controls (locks/cooldowns)
+# If REDIS_URL not provided, the utils will fallback to CELERY_BROKER_URL or no-op.
+REDIS_URL = env.str("REDIS_URL", default=os.getenv("REDIS_URL", ""))
+EXEC_LOCK_TTL_MS = env.int("EXEC_LOCK_TTL_MS", default=5000)  # 5s default
+MIN_ENTRY_COOLDOWN_SEC = env.int("MIN_ENTRY_COOLDOWN_SEC", default=0)  # per-run default; strategy may override

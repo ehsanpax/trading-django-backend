@@ -44,6 +44,7 @@ from .services import (  # Grouped imports for services
     get_pending_orders,
     cancel_pending_order,
 )
+from .tasks import synchronize_account_trades
 from .serializers import (
     OrderSerializer,
     ExecuteTradeInputSerializer,
@@ -169,7 +170,9 @@ class CloseTradeView(APIView):
         except ValueError:
             raise ValidationError("Invalid trade ID format.")
 
-        result = close_trade_globally(request.user, valid_trade_id)
+        client_reason = (request.data or {}).get("close_reason")
+        client_subreason = (request.data or {}).get("close_subreason")
+        result = close_trade_globally(request.user, valid_trade_id, client_close_reason=client_reason, client_close_subreason=client_subreason)
         return Response(result, status=status.HTTP_200_OK)
 
 
@@ -280,6 +283,18 @@ class OpenPositionsLiveView(APIView):
             )
 
         elif account.platform == "cTrader":
+            # Initialize with DB trades
+            db_trades = Trade.objects.filter(account=account, trade_status="open")
+            serialized_db_trades = TradeSerializer(db_trades, many=True).data
+            final_open_positions = []
+            db_trade_order_ids = set()
+            for trade_data in serialized_db_trades:
+                trade_data["source"] = "database"
+                trade_data.pop("reason", None)
+                if trade_data.get("order_id") is not None:
+                    db_trade_order_ids.add(trade_data["order_id"])
+                final_open_positions.append(trade_data)
+
             try:
                 ctrader_account = CTraderAccount.objects.get(account=account)
             except CTraderAccount.DoesNotExist:
@@ -372,9 +387,11 @@ class OpenPositionsLiveView(APIView):
                     }
                     final_open_positions.append(pos_data)
         else:
-            # Unsupported platform, just return DB trades
+            # Unsupported platform, just return DB trades from our database
+            db_trades = Trade.objects.filter(account=account, trade_status="open")
+            serializer = TradeSerializer(db_trades, many=True)
             return Response(
-                {"open_positions": final_open_positions}, status=status.HTTP_200_OK
+                {"open_positions": serializer.data}, status=status.HTTP_200_OK
             )
 
         return Response(
@@ -704,6 +721,23 @@ class PartialCloseTradeView(APIView):
 
 
 # ----- Watchlist Views -----
+class SynchronizeAccountTradesView(APIView):
+    """
+    Triggers the synchronization of trades for a specific account.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, account_id):
+        try:
+            account = Account.objects.get(id=account_id, user=request.user)
+        except Account.DoesNotExist:
+            return Response({"error": "Account not found or you do not have permission to access it."}, status=status.HTTP_404_NOT_FOUND)
+
+        synchronize_account_trades.delay(account_id=account.id)
+        
+        return Response({"message": f"Synchronization task for account {account.id} has been queued."}, status=status.HTTP_202_ACCEPTED)
+
+
 class WatchlistViewSet(viewsets.ModelViewSet):
     """
     API endpoint that allows watchlists to be viewed or edited.

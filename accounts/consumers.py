@@ -27,6 +27,8 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         self.open_positions = []
         self.ticket_to_uuid_map = {}
         self.order_ticket_to_uuid_map = {}
+        # Guard against duplicate enqueue for the same closed ticket in quick succession
+        self._enqueued_closed_tickets = set()
 
     async def _populate_trade_uuid_map(self):
         """
@@ -179,9 +181,13 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         if closed_tickets:
             logger.info(f"Detected {len(closed_tickets)} closed trades: {closed_tickets}")
             for ticket in closed_tickets:
+                # Prevent duplicate enqueues for the same ticket
+                if ticket in self._enqueued_closed_tickets:
+                    continue
                 trade_id = self.ticket_to_uuid_map.get(ticket)
                 if trade_id:
                     logger.info(f"Enqueuing synchronization task for closed trade. Ticket: {ticket}, Trade ID: {trade_id}")
+                    self._enqueued_closed_tickets.add(ticket)
                     trigger_trade_synchronization.apply_async(kwargs={'trade_id': trade_id})
                     if ticket in self.ticket_to_uuid_map:
                         del self.ticket_to_uuid_map[ticket]
@@ -207,7 +213,7 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         for pos in self.open_positions:
             trade_id = self.ticket_to_uuid_map.get(str(pos.get('ticket')))
             if trade_id:
-                await sync_to_async(PositionUpdateListener.on_position_update)(
+                await PositionUpdateListener.on_position_update(
                     trade_id, pos.get('profit', 0)
                 )
 

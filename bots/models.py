@@ -174,6 +174,28 @@ class LiveRun(models.Model):
     instrument_symbol = models.CharField(max_length=50, help_text="The trading instrument symbol for this live run") # Added field
     # --- New: Explicit account targeted by this LiveRun ---
     account = models.ForeignKey(Account, on_delete=models.PROTECT, related_name="live_runs", null=True, blank=True)
+    # Add timeframe selection for live run (aligns with migration 0008)
+    timeframe = models.CharField(
+        max_length=10,
+        choices=[
+            ('M1', '1 Minute'),
+            ('M5', '5 Minutes'),
+            ('M15', '15 Minutes'),
+            ('M30', '30 Minutes'),
+            ('H1', '1 Hour'),
+            ('H4', '4 Hours'),
+            ('D1', '1 Day'),
+        ],
+        default='M1',
+        help_text="Chart timeframe for the live run (e.g., M1, H1, D1)"
+    )
+    # New: decision mode for strategy evaluation
+    decision_mode = models.CharField(
+        max_length=10,
+        choices=[('CANDLE', 'On Candle Close'), ('TICK', 'On Each Tick')],
+        default='CANDLE',
+        help_text="Whether to evaluate strategy on candle close or each tick."
+    )
     started_at = models.DateTimeField(auto_now_add=True)
     stopped_at = models.DateTimeField(null=True, blank=True)
     # Consider more granular status: pending, running, stopping, stopped, error
@@ -189,6 +211,11 @@ class LiveRun(models.Model):
     drawdown_r = models.DecimalField(max_digits=10, decimal_places=5, null=True, blank=True, help_text="Max drawdown in R units or percentage")
     # Add a field for last_error_message or similar for debugging
     last_error = models.TextField(blank=True, null=True)
+
+    # Observability/state management
+    task_id = models.CharField(max_length=64, null=True, blank=True, help_text="Celery task id executing this LiveRun")
+    last_heartbeat = models.DateTimeField(null=True, blank=True, help_text="Last heartbeat timestamp from live_loop")
+    last_action_at = models.DateTimeField(null=True, blank=True, help_text="Last time an action was executed")
 
     class Meta:
         ordering = ['-started_at']

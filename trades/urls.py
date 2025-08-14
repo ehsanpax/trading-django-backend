@@ -16,6 +16,7 @@ from .views import (
     PartialCloseTradeView,
     WatchlistViewSet,  # Added WatchlistViewSet
     CancelPendingOrderView,
+    SynchronizeAccountTradesView,
 )
 
 # Create a router and register our viewsets with it.
@@ -72,5 +73,10 @@ urlpatterns = [
         "<str:trade_id_str>/partial-close/",
         PartialCloseTradeView.as_view(),
         name="partial-close-trade",
+    ),
+    path(
+        "accounts/<uuid:account_id>/sync/",
+        SynchronizeAccountTradesView.as_view(),
+        name="synchronize-account-trades",
     ),
 ]

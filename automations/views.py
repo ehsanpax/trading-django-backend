@@ -37,7 +37,7 @@ class ExecuteAITradeView(APIView):
         serializer = AITradeRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         payload = serializer.validated_data
-
+        account_id = payload.get("account_id")
         print("Validated Payload ExecuteAITradeView:", payload)
         account = None
         if account_id:

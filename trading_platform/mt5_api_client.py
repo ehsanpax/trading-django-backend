@@ -33,6 +33,7 @@ class MT5APIClient:
         self.candle_listeners: Dict[str, List[Callable]] = {} # Key: "symbol_timeframe"
         self.account_info_listeners: List[Callable] = []
         self.open_positions_listeners: List[Callable] = []
+        self.closed_position_listeners: List[Callable] = []
 
     def _get_auth_payload(self) -> Dict[str, Any]:
         return {
@@ -72,7 +73,13 @@ class MT5APIClient:
                                 if not self.initial_data_received.is_set():
                                     self.initial_data_received.set()
                                 for listener in self.account_info_listeners:
-                                    await listener(self.last_account_info)
+                                    try:
+                                        if asyncio.iscoroutinefunction(listener):
+                                            await listener(self.last_account_info)
+                                        else:
+                                            listener(self.last_account_info)
+                                    except Exception as cb_e:
+                                        logger.warning(f"account_info listener error: {cb_e}")
                             elif message_type == "open_positions":
                                 positions_list = data.get("data", {}).get("open_positions", [])
                                 if not isinstance(positions_list, list):
@@ -81,7 +88,23 @@ class MT5APIClient:
                                 final_positions = [item for item in positions_list if isinstance(item, dict)]
                                 self.last_open_positions = final_positions
                                 for listener in self.open_positions_listeners:
-                                    await listener(self.last_open_positions)
+                                    try:
+                                        if asyncio.iscoroutinefunction(listener):
+                                            await listener(self.last_open_positions)
+                                        else:
+                                            listener(self.last_open_positions)
+                                    except Exception as cb_e:
+                                        logger.warning(f"open_positions listener error: {cb_e}")
+                            elif message_type == "closed_position":
+                                closed_deal_data = data.get("data", {})
+                                for listener in self.closed_position_listeners:
+                                    try:
+                                        if asyncio.iscoroutinefunction(listener):
+                                            await listener(closed_deal_data)
+                                        else:
+                                            listener(closed_deal_data)
+                                    except Exception as cb_e:
+                                        logger.warning(f"closed_position listener error: {cb_e}")
                             elif message_type == "live_price":
                                 price_data = data.get("data", {})
                                 symbol = price_data.get("symbol")
@@ -89,7 +112,13 @@ class MT5APIClient:
                                     self.last_prices[symbol] = price_data
                                     if symbol in self.price_listeners:
                                         for listener in self.price_listeners[symbol]:
-                                            await listener(price_data)
+                                            try:
+                                                if asyncio.iscoroutinefunction(listener):
+                                                    await listener(price_data)
+                                                else:
+                                                    listener(price_data)
+                                            except Exception as cb_e:
+                                                logger.warning(f"price listener error: {cb_e}")
                             elif message_type == "candle_update":
                                 symbol = data.get("symbol")
                                 timeframe = data.get("timeframe")
@@ -98,7 +127,13 @@ class MT5APIClient:
                                     listener_key = f"{symbol}_{timeframe}"
                                     if listener_key in self.candle_listeners:
                                         for listener in self.candle_listeners[listener_key]:
-                                            await listener(candle_data)
+                                            try:
+                                                if asyncio.iscoroutinefunction(listener):
+                                                    await listener(candle_data)
+                                                else:
+                                                    listener(candle_data)
+                                            except Exception as cb_e:
+                                                logger.warning(f"candle listener error: {cb_e}")
                         except websockets.exceptions.ConnectionClosed as e:
                             #logger.warning(f"WebSocket connection closed for account {self.internal_account_id}. Code: {e.code}, Reason: {e.reason}")
                             break
@@ -185,6 +220,13 @@ class MT5APIClient:
         if callback in self.open_positions_listeners:
             self.open_positions_listeners.remove(callback)
 
+    def register_closed_position_listener(self, callback: Callable):
+        self.closed_position_listeners.append(callback)
+
+    def unregister_closed_position_listener(self, callback: Callable):
+        if callback in self.closed_position_listeners:
+            self.closed_position_listeners.remove(callback)
+
     def get_account_info(self) -> Dict[str, Any]:
         # Returns the last known info, does not poll
         return self.last_account_info
@@ -197,19 +239,19 @@ class MT5APIClient:
         """
         Gets the live price for a symbol.
         First, checks the WebSocket cache. If not found, falls back to a direct HTTP request.
+        Avoids calling asyncio.run from a running event loop.
         """
         # Check cache first
         if symbol in self.last_prices:
             return self.last_prices[symbol]
 
-        # If not in cache, fall back to HTTP request
+        # If not in cache, fall back to HTTP request only
         logger.warning(f"Cache miss for {symbol}. Falling back to HTTP request for live price.")
         payload = self._get_auth_payload()
         payload["symbol"] = symbol
-        
-        # Ensure this symbol is subscribed to for future requests
-        asyncio.run(self.subscribe_price(symbol))
-        
+
+        # Note: Do not attempt to subscribe here from sync context; a separate
+        # async feed (connection_manager) should handle subscriptions.
         return self._post("/mt5/price", json_data=payload)
 
     # --- HTTP Methods for one-off actions ---
@@ -277,6 +319,10 @@ class MT5APIClient:
         Fetches all open positions and pending orders via REST API.
         """
         return self._post("/mt5/positions/open", self._get_auth_payload())
+
+    def get_account_info_rest(self) -> Dict[str, Any]:
+        """Fetch account info via REST for sync contexts."""
+        return self._post("/mt5/account_info", self._get_auth_payload())
 
     def place_trade(self, symbol: str, lot_size: float, direction: str, stop_loss: float, take_profit: float, order_type: str = "MARKET", limit_price: Optional[float] = None) -> Dict[str, Any]:
         payload = self._get_auth_payload()
