@@ -1,0 +1,11 @@
+{
+	"folders": [
+		{
+			"path": ".."
+		},
+		{
+			"path": "../../mt5-fastapi-integrated"
+		}
+	],
+	"settings": {}
+}

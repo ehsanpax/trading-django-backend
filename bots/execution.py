@@ -232,6 +232,7 @@ class ExecutionAdapter:
                     live_run_id = (self.run_metadata or {}).get("live_run_id")
                     if self.max_open_positions is not None and live_run_id:
                         current_open = Trade.objects.filter(live_run_id=live_run_id, trade_status="open").count()
+                        logger.info(f"Checking max_open_positions for live_run {live_run_id}: current={current_open}, max={self.max_open_positions}")
                         if current_open >= self.max_open_positions:
                             logger.info(f"Max open positions reached for live_run {live_run_id} (current={current_open}, max={self.max_open_positions}). Skipping OPEN_TRADE action: {act}")
                             continue

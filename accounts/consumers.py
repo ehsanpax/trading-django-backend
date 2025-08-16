@@ -9,6 +9,9 @@ from trading_platform.mt5_api_client import connection_manager
 from trades.tasks import trigger_trade_synchronization
 from trades.listeners import PositionUpdateListener
 from monitoring.services import monitoring_service
+from channels.layers import get_channel_layer
+import asyncio
+from accounts.services import get_account_details as get_account_details_service
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +32,7 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         self.order_ticket_to_uuid_map = {}
         # Guard against duplicate enqueue for the same closed ticket in quick succession
         self._enqueued_closed_tickets = set()
+        self._account_group = None
 
     async def _populate_trade_uuid_map(self):
         """
@@ -108,22 +112,54 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
             internal_account_id=str(account.id)
         )
 
-        # Trigger the MT5 instance initialization
-        await self.mt5_client.trigger_instance_initialization()
+        # Wait briefly for initial data from MT5 WS (account_info), but don't hard fail
+        try:
+            await asyncio.wait_for(self.mt5_client.initial_data_received.wait(), timeout=5)
+            logger.info(f"MT5 client initial data received for account {self.account_id}")
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout waiting for MT5 initial data for account {self.account_id}; proceeding with cache if any")
 
         # Register listeners
         self.mt5_client.register_account_info_listener(self.send_account_update)
         self.mt5_client.register_open_positions_listener(self.send_positions_update)
 
-        # Send initial state from cache immediately
-        logger.info(f"Populating initial UUID maps and sending cached data for account {self.account_id}")
+        # Send initial state immediately using MT5 client cache or REST fallback
+        logger.info(f"Populating initial UUID maps and sending initial data for account {self.account_id}")
         await self._populate_trade_uuid_map()
         await self._populate_order_uuid_map()
-        self.account_info = self.mt5_client.get_account_info()
-        all_positions = self.mt5_client.get_open_positions().get("open_positions", [])
+
+        initial_info = self.mt5_client.get_account_info() or {}
+        initial_positions = self.mt5_client.get_open_positions().get("open_positions", [])
+
+        if not initial_info or (initial_info.get("balance") is None and initial_info.get("equity") is None):
+            # Fallback to REST to avoid waiting for the next RabbitMQ snapshot
+            try:
+                rest_data = await sync_to_async(get_account_details_service)(self.account_id, self.user)
+                if isinstance(rest_data, dict) and "error" not in rest_data:
+                    initial_info = {
+                        "balance": rest_data.get("balance"),
+                        "equity": rest_data.get("equity"),
+                        "margin": rest_data.get("margin"),
+                    }
+                    initial_positions = rest_data.get("open_positions", [])
+                    logger.info(f"Initial account data populated via REST fallback for account {self.account_id}")
+                else:
+                    logger.debug(f"REST fallback returned error or invalid data for account {self.account_id}: {rest_data}")
+            except Exception as e:
+                logger.debug(f"REST fallback failed for account {self.account_id}: {e}")
+
+        self.account_info = initial_info
+        all_positions = initial_positions
         pending_orders = [p for p in all_positions if isinstance(p, dict) and p.get('type') == 'pending_order']
         self.open_positions = [p for p in all_positions if isinstance(p, dict) and p.get('type') != 'pending_order']
         await self.send_combined_update(pending_orders=pending_orders)
+
+        # Subscribe to backend fanout group for this account
+        self._account_group = f"account_{self.account_id}"
+        channel_layer = get_channel_layer()
+        if channel_layer:
+            await channel_layer.group_add(self._account_group, self.channel_name)
+            logger.info(f"Joined account group: {self._account_group}")
 
     async def disconnect(self, close_code):
         """
@@ -135,6 +171,13 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
             self.mt5_client.unregister_account_info_listener(self.send_account_update)
             self.mt5_client.unregister_open_positions_listener(self.send_positions_update)
         logger.info(f"Account WebSocket disconnected for account {self.account_id}")
+
+        try:
+            channel_layer = get_channel_layer()
+            if channel_layer and self._account_group:
+                await channel_layer.group_discard(self._account_group, self.channel_name)
+        except Exception:
+            pass
 
     async def receive_json(self, content):
         """
@@ -150,6 +193,7 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         """Callback for account info updates from the MT5APIClient."""
         if not self.is_active:
             return
+        #logger.info(f"AccountConsumer.send_account_update account={self.account_id}")
         self.account_info = account_info
         await self.send_combined_update()
 
@@ -157,6 +201,7 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         """Callback for open positions updates from the MT5APIClient."""
         if not self.is_active:
             return
+        #logger.info(f"AccountConsumer.send_positions_update account={self.account_id} count={len(open_positions) if isinstance(open_positions, list) else 'n/a'}")
         all_positions = open_positions
         pending_orders = [p for p in all_positions if isinstance(p, dict) and p.get('type') == 'pending_order']
         open_trades = [p for p in all_positions if isinstance(p, dict) and p.get('type') != 'pending_order']
@@ -259,5 +304,19 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
                 "pending_orders": processed_pending_orders
             }
         }
+        logger.info(f"Sending account_update to client account={self.account_id} positions={len(processed_positions)} pending={len(processed_pending_orders)}")
         await self.send_json(payload)
         monitoring_service.update_server_message(self.channel_name, payload)
+
+    # Handlers for Channels group messages
+    async def account_info_update(self, event):
+        # event: {"type": "account_info_update", "account_info": {...}}
+        logger.info(f"Channels account_info_update received for account={self.account_id}")
+        info = event.get("account_info", {})
+        await self.send_account_update(info)
+
+    async def open_positions_update(self, event):
+        # event: {"type": "open_positions_update", "open_positions": [...]} 
+        #logger.info(f"Channels open_positions_update received for account={self.account_id}")
+        positions = event.get("open_positions", [])
+        await self.send_positions_update(positions)

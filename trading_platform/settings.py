@@ -81,6 +81,7 @@ INSTALLED_APPS = [
     "user",
     "core",
     "task_logs",
+    "messaging",  # New app for RabbitMQ consumer/producer
 ]
 
 

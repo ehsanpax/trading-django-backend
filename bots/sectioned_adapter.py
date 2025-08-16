@@ -211,7 +211,7 @@ class SectionedStrategy(BaseStrategy):
             else:
                 qty = risk_params.get("fixed_lot_size", 1.0) # Fallback to fixed size
 
-            return make_open_trade(side=direction, qty=qty, sl=sl, tp=tp, tag=f"Entry {direction}")
+            return make_open_trade(side=direction, qty=qty, sl=sl, tp=tp, tag=f"Entry {direction}", risk_percent=risk_pct)
 
         # --- Evaluate Entry Conditions ---
         if self.spec.entry_long:

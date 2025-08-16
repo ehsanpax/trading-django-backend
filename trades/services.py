@@ -587,6 +587,14 @@ class TradeService:
                 bot_version_id=self.data.get("bot_version_id"),
                 correlation_id=self.data.get("correlation_id"),
             )
+            # Assign ForeignKeys using the _id convention, which is standard.
+            # However, if there's an issue, we can be more explicit.
+            if trade and self.data.get("live_run_id"):
+                trade.live_run_id = self.data.get("live_run_id")
+            if trade and self.data.get("bot_version_id"):
+                trade.bot_version_id = self.data.get("bot_version_id")
+            if trade:
+                trade.save()
             order.trade = trade
             order.save(update_fields=["trade"])
 

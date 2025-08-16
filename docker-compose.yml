@@ -5,6 +5,19 @@ services:
   redis:
     image: "redis:alpine"
 
+  # Added RabbitMQ broker for MT5↔Backend messaging
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    hostname: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    ports:
+      - "5672:5672"    # AMQP
+      - "15672:15672"  # Management UI
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+
   django:
     build:
       context: .
@@ -17,6 +30,7 @@ services:
       - "8000:8000"
     depends_on:
       - redis
+      # - rabbitmq  # Uncomment if Django depends on RabbitMQ during startup
     command: python manage.py run_system
 
   celery_worker:
@@ -29,6 +43,7 @@ services:
       - .:/app
     depends_on:
       - redis
+      # - rabbitmq  # Uncomment if workers consume RabbitMQ directly later
     command: celery -A trading_platform.celery_app worker -l info -P gevent --concurrency=10 -Q celery,live_bots
 
   celery_backtest_worker:
@@ -41,6 +56,7 @@ services:
       - .:/app
     depends_on:
       - redis
+      # - rabbitmq
     command: celery -A trading_platform.celery_app worker -l info -Q backtests -P threads -c 3 --logfile=celery_backtest.log
 
   celery_beat:
@@ -53,7 +69,22 @@ services:
       - .:/app
     depends_on:
       - redis
+      # - rabbitmq
     command: celery -A trading_platform.celery_app beat -l info --pidfile=/tmp/celerybeat.pid
+
+  mt5_events_consumer:
+    build:
+      context: .
+      dockerfile: Dockerfile.Django
+    env_file:
+      - .env
+    depends_on:
+      - rabbitmq
+      - redis
+    volumes:
+      - .:/app
+    command: python manage.py run_mt5_events_consumer
 
 volumes:
   postgres_data:
+  rabbitmq_data:

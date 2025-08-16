@@ -4,12 +4,27 @@ from dataclasses import dataclass
 from typing import Optional, Dict, Any, List
 from queue import Queue, Empty
 import logging
+import os
+import json
 
 from django.conf import settings
 from accounts.models import Account, MT5Account
 from trading_platform.mt5_api_client import connection_manager
 from price.services import PriceService
-from asgiref.sync import sync_to_async
+# Add MT5 headless HTTP helpers for orchestrating subscriptions from bots
+from trading_platform.mt5_api_client import (
+    mt5_ensure_ready,
+    mt5_subscribe_price,
+    mt5_unsubscribe_price,
+    mt5_subscribe_candles,
+    mt5_unsubscribe_candles,
+)
+
+# Optional: aio-pika for AMQP consumer feed
+try:
+    import aio_pika
+except Exception:  # pragma: no cover
+    aio_pika = None
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +77,7 @@ class _AsyncLoopThread:
             raise RuntimeError("Shared asyncio loop not started")
         return self._loop
 
-    def submit(self, coro: asyncio.coroutines) -> asyncio.Future:
+    def submit(self, coro) -> asyncio.Future:
         return asyncio.run_coroutine_threadsafe(coro, self.loop)
 
     def call_soon_threadsafe(self, cb, *args):
@@ -318,13 +333,264 @@ class MT5WebsocketFeed(MarketDataFeed):
             pass
 
 
+class AMQPFeed(MarketDataFeed):
+    """AMQP-backed feed consuming events from RabbitMQ (platform-agnostic)."""
+    def __init__(self, account_id: str, symbol: str, timeframe: str):
+        self.account_id = account_id  # internal_account_id (UUID)
+        self.symbol = symbol
+        self.timeframe = timeframe
+        self._q: Queue = Queue(maxsize=1000)
+        self._ready = threading.Event()
+        self._stop_evt: Optional[asyncio.Event] = None
+        self._conn = None
+        self._channel = None
+        self._queue = None
+        self._consumer_tag = None
+        self._target_symbol_upper = (self.symbol or '').upper()
+        self._exchange_name = os.getenv('AMQP_EVENTS_EXCHANGE', getattr(settings, 'AMQP_EVENTS_EXCHANGE', 'mt5.events'))
+        self._amqp_url = os.getenv('AMQP_URL', getattr(settings, 'AMQP_URL', 'amqp://guest:guest@rabbitmq:5672/%2F'))
+        self._exchange = None
+        # Optional fallback binding using broker_login when available
+        self._broker_login_bind: Optional[str] = None
+        # MT5 headless subscription args/state (so bots drive polling independent of UI)
+        self._mt5_args: Optional[Dict[str, Any]] = None
+        self._mt5_subscribed_price = False
+        self._mt5_subscribed_candles = False
+
+    def start(self):
+        if aio_pika is None:
+            logger.warning("aio-pika not installed; falling back to PollingFeed")
+            # Fallback: switch to PollingFeed behavior transparently by proxying
+            self._fallback = PollingFeed(self.account_id, self.symbol, self.timeframe)
+            self._fallback.start()
+            # Mark ready to avoid blocking callers
+            self._ready.set()
+            return
+        # Try to resolve broker_login once (fallback binding during transition) and MT5 creds
+        try:
+            acc = Account.objects.filter(id=self.account_id).first()
+            if acc and hasattr(acc, 'mt5_account') and acc.mt5_account and acc.mt5_account.account_number:
+                self._broker_login_bind = str(acc.mt5_account.account_number)
+            # Prepare MT5 headless args if platform is MT5
+            if acc and (acc.platform or '').upper() == 'MT5' and acc.mt5_account:
+                self._mt5_args = {
+                    'base_url': settings.MT5_API_BASE_URL,
+                    'account_id': acc.mt5_account.account_number,
+                    'password': acc.mt5_account.encrypted_password,
+                    'broker_server': acc.mt5_account.broker_server,
+                    'internal_account_id': str(acc.id),
+                }
+        except Exception:
+            self._broker_login_bind = None
+            self._mt5_args = None
+        # Ensure shared loop is running
+        _async_loop.start()
+        # Kick off headless subscription (so polling continues without UI)
+        if self._mt5_args:
+            _async_loop.submit(self._async_headless_subscribe())
+        # Start AMQP consumption
+        fut = _async_loop.submit(self._async_run())
+        # wait briefly for readiness
+        self._ready.wait(timeout=10)
+        try:
+            exc = fut.exception(timeout=0)
+            if exc:
+                logger.error(f"AMQPFeed failed to start: {exc}")
+        except Exception:
+            pass
+
+    def stop(self):
+        try:
+            if hasattr(self, '_fallback') and self._fallback:
+                self._fallback.stop()
+                return
+        except Exception:
+            pass
+        if self._stop_evt is not None:
+            _async_loop.call_soon_threadsafe(self._stop_evt.set)
+        # Drop headless subscription refs
+        if self._mt5_args and (self._mt5_subscribed_price or self._mt5_subscribed_candles):
+            _async_loop.submit(self._async_headless_unsubscribe())
+
+    def warmup_candles(self, count: int) -> List[Dict[str, Any]]:
+        # Use existing REST for warmup
+        res = PriceService().get_mt5_historical_data(
+            account_id=self.account_id,
+            symbol=self.symbol,
+            timeframe=self.timeframe,
+            count=count,
+        )
+        if isinstance(res, dict) and res.get('error'):
+            raise RuntimeError(res['error'])
+        return res['candles'] if isinstance(res, dict) else res
+
+    def get_event(self, timeout: Optional[float] = None) -> Optional[Dict[str, Any]]:
+        try:
+            return self._fallback.get_event(timeout) if hasattr(self, '_fallback') else self._q.get(timeout=timeout)
+        except Empty:
+            return None
+
+    async def _async_headless_subscribe(self):
+        """Ensure MT5 poller and create headless subscriptions for symbol/timeframe."""
+        try:
+            await mt5_ensure_ready(**self._mt5_args)
+            await mt5_subscribe_price(**self._mt5_args, symbol=self.symbol)
+            self._mt5_subscribed_price = True
+            if self.timeframe:
+                await mt5_subscribe_candles(**self._mt5_args, symbol=self.symbol, timeframe=self.timeframe)
+                self._mt5_subscribed_candles = True
+            logger.info(
+                "AMQPFeed headless subscribed: account=%s symbol=%s timeframe=%s",
+                self.account_id,
+                self.symbol,
+                self.timeframe,
+            )
+        except Exception as e:
+            logger.warning(f"AMQPFeed headless subscribe failed: {e}")
+
+    async def _async_headless_unsubscribe(self):
+        try:
+            if self._mt5_subscribed_price:
+                try:
+                    await mt5_unsubscribe_price(**self._mt5_args, symbol=self.symbol)
+                except Exception:
+                    pass
+            if self._mt5_subscribed_candles and self.timeframe:
+                try:
+                    await mt5_unsubscribe_candles(**self._mt5_args, symbol=self.symbol, timeframe=self.timeframe)
+                except Exception:
+                    pass
+            self._mt5_subscribed_price = False
+            self._mt5_subscribed_candles = False
+            logger.info(
+                "AMQPFeed headless unsubscribed: account=%s symbol=%s timeframe=%s",
+                self.account_id,
+                self.symbol,
+                self.timeframe,
+            )
+        except Exception:
+            pass
+
+    async def _async_run(self):
+        self._stop_evt = asyncio.Event()
+        try:
+            self._conn = await aio_pika.connect_robust(self._amqp_url)
+            self._channel = await self._conn.channel()
+            await self._channel.set_qos(prefetch_count=200)
+            # Keep a reference to exchange for cleanup
+            self._exchange = await self._channel.declare_exchange(self._exchange_name, aio_pika.ExchangeType.TOPIC, durable=True)
+            # Exclusive, auto-delete queue with short expiry
+            args = {
+                'x-expires': 300000,  # 5 minutes
+            }
+            self._queue = await self._channel.declare_queue(name='', exclusive=True, auto_delete=True, durable=False, arguments=args)
+            # Bind to account UUID topics
+            rk_tick = f"account.{self.account_id}.price.tick"
+            rk_candle = f"account.{self.account_id}.candle.update"
+            await self._queue.bind(self._exchange, routing_key=rk_tick)
+            await self._queue.bind(self._exchange, routing_key=rk_candle)
+            # Optional: also bind to broker_login topics during transition
+            bound_keys = [rk_tick, rk_candle]
+            if self._broker_login_bind:
+                rk_tick_login = f"account.{self._broker_login_bind}.price.tick"
+                rk_candle_login = f"account.{self._broker_login_bind}.candle.update"
+                try:
+                    await self._queue.bind(self._exchange, routing_key=rk_tick_login)
+                    await self._queue.bind(self._exchange, routing_key=rk_candle_login)
+                    bound_keys += [rk_tick_login, rk_candle_login]
+                except Exception as e:
+                    logger.debug(f"AMQPFeed broker_login bind skipped: {e}")
+            # Startup log for observability
+            try:
+                logger.info(
+                    "AMQPFeed ready: exchange=%s queue=%s bindings=%s symbol=%s timeframe=%s",
+                    self._exchange_name,
+                    getattr(self._queue, 'name', '<unknown>'),
+                    ",".join(bound_keys),
+                    self._target_symbol_upper,
+                    self.timeframe,
+                )
+            except Exception:
+                pass
+
+            async def _on_message(message):
+                async with message.process(ignore_processed=True):
+                    try:
+                        evt = json.loads(message.body.decode('utf-8'))
+                        etype = evt.get('type')
+                        payload = evt.get('payload') or {}
+                        if etype == 'candle.update':
+                            sym = (payload.get('symbol') or '').upper()
+                            tf = str(payload.get('timeframe') or '')
+                            if sym == self._target_symbol_upper and tf == self.timeframe:
+                                candle = payload.get('candle') or {}
+                                data = {**candle, 'timeframe': tf}
+                                try:
+                                    self._q.put_nowait({'type': 'candle', 'data': data})
+                                except Exception:
+                                    pass
+                        elif etype == 'price.tick':
+                            sym = (payload.get('symbol') or '').upper()
+                            if sym == self._target_symbol_upper:
+                                tick = {
+                                    'time': payload.get('time') or payload.get('occurred_at'),
+                                    'bid': payload.get('bid'),
+                                    'ask': payload.get('ask'),
+                                    'last': payload.get('last'),
+                                    'symbol': payload.get('symbol'),
+                                }
+                                try:
+                                    self._q.put_nowait({'type': 'tick', 'data': tick})
+                                except Exception:
+                                    pass
+                        # Other event types ignored by bot feed
+                    except Exception as e:
+                        logger.debug(f"AMQPFeed message parse error: {e}")
+                        return
+
+            await self._queue.consume(_on_message, no_ack=False)
+            self._ready.set()
+            # Wait for stop
+            await self._stop_evt.wait()
+        except Exception as e:
+            logger.error(f"AMQPFeed connection error: {e}")
+        finally:
+            try:
+                if self._queue and self._exchange:
+                    try:
+                        await self._queue.unbind(self._exchange, routing_key=f"account.{self.account_id}.price.tick")
+                        await self._queue.unbind(self._exchange, routing_key=f"account.{self.account_id}.candle.update")
+                        if self._broker_login_bind:
+                            await self._queue.unbind(self._exchange, routing_key=f"account.{self._broker_login_bind}.price.tick")
+                            await self._queue.unbind(self._exchange, routing_key=f"account.{self._broker_login_bind}.candle.update")
+                    except Exception:
+                        pass
+                if self._channel and not getattr(self._channel, 'is_closed', False):
+                    await self._channel.close()
+            except Exception:
+                pass
+            try:
+                if self._conn and not getattr(self._conn, 'is_closed', False):
+                    await self._conn.close()
+            except Exception:
+                pass
+
+
 def make_feed(account: Account, symbol: str, timeframe: str) -> MarketDataFeed:
+    mode = os.getenv('BOTS_FEED_MODE', 'AMQP').upper()
     platform = (account.platform or '').upper()
-    if platform == 'MT5':
+    # Prefer AMQP for platform-agnostic consumption
+    if mode == 'AMQP':
+        try:
+            return AMQPFeed(str(account.id), symbol, timeframe)
+        except Exception:
+            logger.warning("Falling back to PollingFeed (AMQPFeed init failed)")
+            return PollingFeed(str(account.id), symbol, timeframe)
+    if mode == 'WS' and platform == 'MT5':
         try:
             return MT5WebsocketFeed(str(account.id), symbol, timeframe)
         except Exception:
-            logger.warning("Falling back to PollingFeed for MT5")
+            logger.warning("Falling back to PollingFeed for MT5 WS mode")
             return PollingFeed(str(account.id), symbol, timeframe)
-    # TODO: add cTrader feed when available
+    # Default fallback
     return PollingFeed(str(account.id), symbol, timeframe)

@@ -154,20 +154,46 @@ def live_loop(self, live_run_id, strategy_name, strategy_params, indicator_confi
 
         # Prepare adapter and cached user before feed to avoid lazy ORM
         adapter_user = live_run.bot_version.bot.created_by
+        
+        # Enhanced logic to extract max_open_positions from potentially nested structures
+        max_open_positions = None
+        
+        # 1. Check modern sectioned_spec path
+        try:
+            sectioned_spec = strategy_params.get('sectioned_spec', {})
+            if isinstance(sectioned_spec, dict):
+                risk_params = sectioned_spec.get('risk', {})
+                if isinstance(risk_params, dict) and risk_params.get('max_open_positions') is not None:
+                    max_open_positions = risk_params.get('max_open_positions')
+        except Exception:
+            pass # Ignore errors from trying to parse structure
+
+        # 2. Fallback to top-level 'risk' dictionary
+        if max_open_positions is None:
+            risk_params_toplevel = strategy_params.get('risk', {})
+            if isinstance(risk_params_toplevel, dict) and risk_params_toplevel.get('max_open_positions') is not None:
+                max_open_positions = risk_params_toplevel.get('max_open_positions')
+
+        # 3. Fallback to absolute top-level
+        if max_open_positions is None and strategy_params.get('max_open_positions') is not None:
+            max_open_positions = strategy_params.get('max_open_positions')
+
+        logger.info(f"Live run {live_run.id}: Loaded strategy_params: {strategy_params}")
+        logger.info(f"Live run {live_run.id}: Extracted max_open_positions: {max_open_positions}")
+
+        # Determine default_rr from the most likely risk dictionary
+        risk_dict_for_rr = strategy_params.get('sectioned_spec', {}).get('risk', {}) or strategy_params.get('risk', {})
+
         adapter = ExecutionAdapter(
             user=adapter_user,
             default_symbol=instrument_symbol,
-            default_rr=float(strategy_params.get('risk', {}).get('default_rr', 2.0) if isinstance(strategy_params.get('risk', {}), dict) else 2.0),
+            default_rr=float(risk_dict_for_rr.get('default_rr', 2.0) if isinstance(risk_dict_for_rr, dict) else 2.0),
             run_metadata={
                 'live_run_id': str(live_run.id),
                 'bot_version_id': str(live_run.bot_version_id),
                 'source': 'BOT',
             },
-            max_open_positions=(
-                int(strategy_params.get('risk', {}).get('max_open_positions'))
-                if isinstance(strategy_params.get('risk', {}), dict) and strategy_params.get('risk', {}).get('max_open_positions') is not None
-                else None
-            ),
+            max_open_positions=max_open_positions,
         )
 
         # DataFrame & config
