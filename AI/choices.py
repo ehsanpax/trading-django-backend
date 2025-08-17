@@ -30,3 +30,8 @@ class SessionScheduleTaskStatusChoices(TextChoices):
     PENDING = "PENDING"
     SUCCESS = "SUCCESS"
     FAILURE = "FAILURE"
+
+
+class ChatSessionTypeChoices(TextChoices):
+    CHAT = "CHAT"
+    BOT_BUILDER = "BOT_BUILDER"
