@@ -20,5 +20,6 @@ urlpatterns = [
     path('backtest-runs/<uuid:backtest_run_id>/chart-data/', views.BacktestChartDataAPIView.as_view(), name='backtest-chart-data'),
     path('live-runs/start/', views.StartLiveRunAPIView.as_view(), name='start-liverun'),
     path('live-runs/<uuid:live_run_id>/stop/', views.StopLiveRunAPIView.as_view(), name='stop-liverun'),
+    path('strategy-config/generate', views.StrategyConfigGenerateAPIView.as_view(), name='strategy-config-generate'),
     path('', include(router.urls)),
 ]

@@ -1,3 +1,4 @@
+import os
 import redis
 import json
 from django.conf import settings
@@ -5,9 +6,26 @@ from datetime import datetime
 
 class MonitoringService:
     def __init__(self):
-        self.redis_client = redis.Redis(host=settings.CHANNEL_LAYERS['default']['CONFIG']['hosts'][0][0],
-                                        port=settings.CHANNEL_LAYERS['default']['CONFIG']['hosts'][0][1],
-                                        db=0, decode_responses=True)
+        # Initialize Redis client compatible with Channels config (URL string or (host, port) tuple)
+        try:
+            hosts = settings.CHANNEL_LAYERS["default"]["CONFIG"].get("hosts", [])
+            host_conf = hosts[0] if hosts else None
+            if isinstance(host_conf, (list, tuple)):
+                # When Channels is configured with (host, port) tuple
+                self.redis_client = redis.Redis(
+                    host=host_conf[0], port=host_conf[1], db=0, decode_responses=True
+                )
+            elif isinstance(host_conf, str) and host_conf:
+                # When Channels is configured with a URL (e.g., redis://redis:6379/1)
+                self.redis_client = redis.Redis.from_url(host_conf, decode_responses=True)
+            else:
+                # Fallback to env or sensible default
+                url = os.getenv("CHANNEL_REDIS_URL", "redis://localhost:6379/1")
+                self.redis_client = redis.Redis.from_url(url, decode_responses=True)
+        except Exception:
+            # Last-resort fallback
+            url = os.getenv("CHANNEL_REDIS_URL", "redis://localhost:6379/1")
+            self.redis_client = redis.Redis.from_url(url, decode_responses=True)
         self.prefix = "ws_connection:"
 
     def register_connection(self, channel_name, user, account_id, connection_type, connection_details):

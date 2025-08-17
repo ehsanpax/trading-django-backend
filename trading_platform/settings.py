@@ -122,12 +122,23 @@ TEMPLATES = [
 WSGI_APPLICATION = "trading_platform.wsgi.application"
 ASGI_APPLICATION = "trading_platform.routing.application"
 
-# Channels
+# Channels (tuned for backpressure mitigation)
 CHANNEL_LAYERS = {
     "default": {
         "BACKEND": "channels_redis.core.RedisChannelLayer",
         "CONFIG": {
-            "hosts": [("redis", 6379)],
+            # Use a dedicated Redis DB for Channels to avoid contention with Celery
+            "hosts": [env.str("CHANNEL_REDIS_URL", default="redis://redis:6379/1")],
+            # Global default capacity per channel
+            "capacity": env.int("CHANNEL_CAPACITY", default=2000),
+            # Pattern-specific capacities (hot groups)
+            "channel_capacity": {
+                "prices_*": env.int("CHANNEL_CAPACITY_PRICES", default=2000),
+                "candles_*": env.int("CHANNEL_CAPACITY_CANDLES", default=5000),
+            },
+            # Expiry for individual channels and groups
+            "expiry": env.int("CHANNEL_EXPIRY_SEC", default=10),
+            "group_expiry": env.int("CHANNEL_GROUP_EXPIRY_SEC", default=120),
         },
     },
 }
@@ -310,3 +321,19 @@ CELERY_RESULT_BACKEND = "django-db"
 REDIS_URL = env.str("REDIS_URL", default=os.getenv("REDIS_URL", ""))
 EXEC_LOCK_TTL_MS = env.int("EXEC_LOCK_TTL_MS", default=5000)  # 5s default
 MIN_ENTRY_COOLDOWN_SEC = env.int("MIN_ENTRY_COOLDOWN_SEC", default=0)  # per-run default; strategy may override
+
+# --- AI Strategy Generation Service settings ---
+AI_STRATEGY_API_URL = env.str("https://endlessly-central-gelding.ngrok-free.app/webhook/6b891469-8e13-40be-80ed-767932094cff", default="")
+AI_STRATEGY_API_KEY = env.str("AI_STRATEGY_API_KEY", default="")
+AI_STRATEGY_TIMEOUT_SEC = env.int("AI_STRATEGY_TIMEOUT_SEC", default=15)
+AI_STRATEGY_MAX_PROMPT_CHARS = env.int("AI_STRATEGY_MAX_PROMPT_CHARS", default=4000)
+AI_STRATEGY_CACHE_TTL_SEC = env.int("AI_STRATEGY_CACHE_TTL_SEC", default=600)
+AI_STRATEGY_RETRY_MAX_ATTEMPTS = env.int("AI_STRATEGY_RETRY_MAX_ATTEMPTS", default=2)
+AI_STRATEGY_CIRCUIT_FAIL_MAX = env.int("AI_STRATEGY_CIRCUIT_FAIL_MAX", default=5)
+AI_STRATEGY_CIRCUIT_RESET_SEC = env.int("AI_STRATEGY_CIRCUIT_RESET_SEC", default=60)
+
+# DRF throttle rate for the strategy generation endpoint (ScopedRateThrottle scope: 'strategy_gen')
+REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"] = {
+    **REST_FRAMEWORK.get("DEFAULT_THROTTLE_RATES", {}),
+    "strategy_gen": env.str("THROTTLE_RATE_STRATEGY_GEN", default="20/min"),
+}

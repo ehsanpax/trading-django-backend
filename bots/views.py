@@ -10,7 +10,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.shortcuts import get_object_or_404
 from django.core.exceptions import ValidationError as DjangoValidationError
-
+from rest_framework.authtoken.models import Token
 from .models import Bot, BotVersion, BacktestConfig, BacktestRun, LiveRun
 from .serializers import (
     BotSerializer, BotVersionSerializer, BacktestConfigSerializer,
@@ -35,6 +35,9 @@ import logging
 logger = logging.getLogger(__name__)
 from rest_framework.exceptions import PermissionDenied
 import json # Added for debug export
+from rest_framework.throttling import ScopedRateThrottle
+from bots.ai_strategy import generate_strategy_config, ProviderError, ValidationError as ProviderValidationError
+import uuid
 
 def validate_ohlcv_bars(bars, logger=None, label="OHLCV"):
     prev_time = None
@@ -535,3 +538,72 @@ class BacktestChartDataAPIView(APIView):
         except Exception as e:
             logger.error(f"Error fetching chart data for BacktestRun {backtest_run_id}: {e}", exc_info=True)
             return Response({"error": f"Could not retrieve chart data: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+class StrategyConfigGenerateAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'strategy_gen'
+
+    def post(self, request, *args, **kwargs):
+        from .serializers import StrategyConfigGenerateRequestSerializer, StrategyConfigGenerateResponseSerializer
+
+        serializer = StrategyConfigGenerateRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        # Optional ownership/permission check: ensure user can access the bot version if it exists in DB
+        bot_version_id = data.get('bot_version')
+        try:
+            # If it looks like a UUID, enforce ownership
+            uuid.UUID(str(bot_version_id))
+            try:
+                bv = BotVersion.objects.select_related('bot').get(id=bot_version_id)
+                user = request.user
+                if not (user.is_staff or user.is_superuser or bv.bot.created_by == user):
+                    return Response({"detail": "You do not have permission for this bot version."}, status=status.HTTP_403_FORBIDDEN)
+            except BotVersion.DoesNotExist:
+                # Allow non-existent if external versions are used; comment out to enforce existence
+                pass
+        except Exception:
+            # Non-UUID identifiers allowed
+            pass
+
+        idem_key = request.headers.get('Idempotency-Key') or request.META.get('HTTP_IDEMPOTENCY_KEY')
+        req_id = request.headers.get('X-Request-ID') or str(uuid.uuid4())
+        # Extract user token from Authorization header (Bearer <JWT>)
+        auth_header = request.META.get('HTTP_AUTHORIZATION', '')
+        user_token = None
+        if isinstance(auth_header, str) and auth_header.startswith('Bearer '):
+            user_token = auth_header.split(' ', 1)[1].strip()
+
+        try:
+            result = generate_strategy_config(
+                bot_version=bot_version_id,
+                prompt=data['prompt'],
+                user_id=request.user.id,
+                idempotency_key=idem_key,
+                options=data.get('options') or {},
+                user_token=user_token,
+            )
+        except ProviderValidationError as e:
+            payload = getattr(e, 'payload', None)
+            if isinstance(payload, dict):
+                return Response(payload, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+            return Response({"detail": str(e)}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+        except ProviderError as e:
+            msg = str(e)
+            if msg == 'timeout':
+                return Response({"detail": "Provider timeout"}, status=status.HTTP_504_GATEWAY_TIMEOUT)
+            if msg == 'circuit_open':
+                return Response({"detail": "Service temporarily unavailable"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+            return Response({"detail": "Upstream provider error"}, status=status.HTTP_502_BAD_GATEWAY)
+        except Exception as e:
+            logger.exception(f"strategy-config generate failed: {e}")
+            return Response({"detail": "Internal error"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        resp = StrategyConfigGenerateResponseSerializer(result).data
+        response = Response(resp, status=status.HTTP_200_OK)
+        response["X-Request-ID"] = req_id
+        if idem_key:
+            response["Idempotency-Key"] = idem_key
+        return response
