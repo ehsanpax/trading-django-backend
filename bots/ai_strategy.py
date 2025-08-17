@@ -89,28 +89,48 @@ def _call_provider(payload: Dict[str, Any], request_id: str) -> Dict[str, Any]:
     timeout = getattr(settings, "AI_STRATEGY_TIMEOUT_SEC", 15)
     headers = _build_headers(request_id)
 
+    # Mask sensitive fields for logs
+    safe_payload = dict(payload)
+    if 'trading_account_api_key' in safe_payload and safe_payload['trading_account_api_key']:
+        safe_payload['trading_account_api_key'] = f"***{str(safe_payload['trading_account_api_key'])[-4:]}"
+    safe_headers = {k: ("***" if k.lower() == "authorization" else v) for k, v in headers.items()}
+
+    logger.info(f"[AI] request_id={request_id} POST {url} timeout={timeout}s")
+    logger.debug(f"[AI] headers={safe_headers} payload_keys={list(safe_payload.keys())} session_id={safe_payload.get('session_id')}")
+
+    start = time.time()
     with httpx.Client(timeout=timeout) as client:
         resp = _breaker.call(client.post, url, headers=headers, json=payload)
-        status = resp.status_code
-        if status == 200:
-            try:
-                data = resp.json()
-            except Exception as e:
-                raise ProviderError(f"Invalid JSON from provider: {e}")
-            return data
-        elif status in (400, 422):
-            try:
-                data = resp.json()
-                raise ValidationError("provider_validation_error", payload=data)
-            except ValueError:
-                # not JSON
-                raise ValidationError(resp.text or "provider_validation_error")
-        elif status in (401, 403):
-            raise ProviderError("Provider auth failed")
-        elif status in (500, 502, 503, 504):
-            raise ProviderError(f"Upstream error {status}")
-        else:
-            raise ProviderError(f"Unexpected status {status}")
+    duration_ms = int((time.time() - start) * 1000)
+
+    status = resp.status_code
+    body_snippet = (resp.text or "")[:1000]
+    logger.info(f"[AI] request_id={request_id} status={status} duration_ms={duration_ms}")
+
+    if status == 200:
+        try:
+            data = resp.json()
+        except Exception as e:
+            logger.warning(f"[AI] request_id={request_id} invalid JSON: {e}; body_snippet={body_snippet}")
+            raise ProviderError(f"Invalid JSON from provider: {e}")
+        return data
+    elif status in (400, 422):
+        try:
+            data = resp.json()
+        except ValueError:
+            logger.warning(f"[AI] request_id={request_id} validation non-JSON body: {body_snippet}")
+            raise ValidationError(resp.text or "provider_validation_error")
+        logger.warning(f"[AI] request_id={request_id} validation error payload={json.dumps(data)[:1000]}")
+        raise ValidationError("provider_validation_error", payload=data)
+    elif status in (401, 403):
+        logger.warning(f"[AI] request_id={request_id} auth failed status={status} body={body_snippet}")
+        raise ProviderError("Provider auth failed")
+    elif status in (500, 502, 503, 504):
+        logger.error(f"[AI] request_id={request_id} upstream error status={status} body={body_snippet}")
+        raise ProviderError(f"Upstream error {status}")
+    else:
+        logger.error(f"[AI] request_id={request_id} unexpected status={status} body={body_snippet}")
+        raise ProviderError(f"Unexpected status {status}")
 
 
 def generate_strategy_config(
@@ -160,12 +180,18 @@ def generate_strategy_config(
                 pass
 
     # Build new provider payload (no auth header required)
+    session_id = (options or {}).get('session_id') or request_id
     payload = {
         "chatInput": prompt,
-        "session_id": request_id,
+        "session_id": session_id,
         "trading_account_api_key": user_token or "",
         "backend_url": getattr(settings, "BACKEND_URL", ""),
     }
+
+    logger.info(
+        f"[AI] generate start request_id={request_id} bot_version={bot_version} user_id={user_id} "
+        f"prompt_len={len(prompt)} idempotency={'yes' if idempotency_key else 'no'} session_id={session_id}"
+    )
 
     start = time.time()
     try:
@@ -173,19 +199,23 @@ def generate_strategy_config(
     except ValidationError:
         raise
     except pybreaker.CircuitBreakerError:
+        logger.error(f"[AI] circuit open request_id={request_id}")
         raise ProviderError("circuit_open")
     except httpx.ReadTimeout:
+        logger.error(f"[AI] timeout request_id={request_id}")
         raise ProviderError("timeout")
     except Exception as e:
+        logger.error(f"[AI] provider call failed request_id={request_id} err={e}")
         raise ProviderError(str(e))
     duration_ms = int((time.time() - start) * 1000)
 
     # Expect provider return structure; be permissive initially
     raw = provider_resp if isinstance(provider_resp, dict) else {}
-    config = raw.get("config") if isinstance(raw, dict) else None
+    config = json.loads(raw["output"])
     if not isinstance(config, dict):
         config = raw if isinstance(raw, dict) else None
     if not isinstance(config, dict):
+        logger.error(f"[AI] invalid response shape request_id={request_id} raw_snippet={json.dumps(raw)[:1000] if raw else 'None'}")
         raise ValidationError("Invalid provider response shape")
 
     config = _normalize_config(config)
@@ -213,4 +243,5 @@ def generate_strategy_config(
         except Exception:
             logger.warning("Failed to save AI strategy response to Redis cache")
 
+    logger.info(f"[AI] generate success request_id={request_id} duration_ms={duration_ms} cached=False")
     return result

@@ -92,7 +92,7 @@ class IndicatorMetadataAPIView(APIView):
 
 
 class NodeMetadataAPIView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.AllowAny]
 
     def get(self, request, *args, **kwargs):
         nodes = {
@@ -540,7 +540,7 @@ class BacktestChartDataAPIView(APIView):
             return Response({"error": f"Could not retrieve chart data: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 class StrategyConfigGenerateAPIView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.AllowAny]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'strategy_gen'
 
@@ -551,26 +551,26 @@ class StrategyConfigGenerateAPIView(APIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
 
-        # Optional ownership/permission check: ensure user can access the bot version if it exists in DB
+        # Optional ownership/permission check: only enforce if user is authenticated and bot_version looks like a UUID
         bot_version_id = data.get('bot_version')
-        try:
-            # If it looks like a UUID, enforce ownership
-            uuid.UUID(str(bot_version_id))
+        if request.user.is_authenticated and bot_version_id:
             try:
-                bv = BotVersion.objects.select_related('bot').get(id=bot_version_id)
-                user = request.user
-                if not (user.is_staff or user.is_superuser or bv.bot.created_by == user):
-                    return Response({"detail": "You do not have permission for this bot version."}, status=status.HTTP_403_FORBIDDEN)
-            except BotVersion.DoesNotExist:
-                # Allow non-existent if external versions are used; comment out to enforce existence
+                uuid.UUID(str(bot_version_id))
+                try:
+                    bv = BotVersion.objects.select_related('bot').get(id=bot_version_id)
+                    user = request.user
+                    if not (user.is_staff or user.is_superuser or bv.bot.created_by == user):
+                        return Response({"detail": "You do not have permission for this bot version."}, status=status.HTTP_403_FORBIDDEN)
+                except BotVersion.DoesNotExist:
+                    # Allow non-existent if external versions are used; comment out to enforce existence
+                    pass
+            except Exception:
+                # Non-UUID identifiers allowed
                 pass
-        except Exception:
-            # Non-UUID identifiers allowed
-            pass
 
         idem_key = request.headers.get('Idempotency-Key') or request.META.get('HTTP_IDEMPOTENCY_KEY')
         req_id = request.headers.get('X-Request-ID') or str(uuid.uuid4())
-        # Extract user token from Authorization header (Bearer <JWT>)
+        # Extract user token from Authorization header (Bearer <JWT>) if present
         auth_header = request.META.get('HTTP_AUTHORIZATION', '')
         user_token = None
         if isinstance(auth_header, str) and auth_header.startswith('Bearer '):
@@ -580,18 +580,25 @@ class StrategyConfigGenerateAPIView(APIView):
             result = generate_strategy_config(
                 bot_version=bot_version_id,
                 prompt=data['prompt'],
-                user_id=request.user.id,
+                user_id=(request.user.id if request.user.is_authenticated else 'anonymous'),
                 idempotency_key=idem_key,
                 options=data.get('options') or {},
                 user_token=user_token,
             )
         except ProviderValidationError as e:
             payload = getattr(e, 'payload', None)
+            # Log validation details for debugging
+            try:
+                payload_snippet = json.dumps(payload)[:1000] if isinstance(payload, dict) else str(payload)[:1000]
+            except Exception:
+                payload_snippet = str(payload)[:1000]
+            logger.warning(f"[AI] validation error req_id={req_id} idem_key={idem_key} payload={payload_snippet}")
             if isinstance(payload, dict):
                 return Response(payload, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
             return Response({"detail": str(e)}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
         except ProviderError as e:
             msg = str(e)
+            logger.error(f"[AI] provider error req_id={req_id} idem_key={idem_key} msg={msg}")
             if msg == 'timeout':
                 return Response({"detail": "Provider timeout"}, status=status.HTTP_504_GATEWAY_TIMEOUT)
             if msg == 'circuit_open':
@@ -607,3 +614,173 @@ class StrategyConfigGenerateAPIView(APIView):
         if idem_key:
             response["Idempotency-Key"] = idem_key
         return response
+
+class NodeSchemaAPIView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request, *args, **kwargs):
+        def to_jsonschema_param(prop_schema: dict) -> dict:
+            if not isinstance(prop_schema, dict):
+                return {}
+            type_map = {
+                'int': 'integer', 'integer': 'integer',
+                'float': 'number', 'number': 'number',
+                'str': 'string', 'string': 'string',
+                'bool': 'boolean', 'boolean': 'boolean',
+                'object': 'object', 'array': 'array',
+            }
+            js: dict = {}
+            ptype = prop_schema.get('type')
+            if ptype:
+                js['type'] = type_map.get(ptype, ptype)
+            # enums / options
+            if isinstance(prop_schema.get('enum'), list):
+                js['enum'] = prop_schema['enum']
+            elif isinstance(prop_schema.get('options'), list):
+                js['enum'] = prop_schema['options']
+            # numeric/string constraints
+            if 'min' in prop_schema and js.get('type') in ('number', 'integer'):
+                js['minimum'] = prop_schema['min']
+            if 'max' in prop_schema and js.get('type') in ('number', 'integer'):
+                js['maximum'] = prop_schema['max']
+            if 'min_length' in prop_schema and js.get('type') == 'string':
+                js['minLength'] = prop_schema['min_length']
+            if 'max_length' in prop_schema and js.get('type') == 'string':
+                js['maxLength'] = prop_schema['max_length']
+            if 'pattern' in prop_schema and js.get('type') == 'string':
+                js['pattern'] = prop_schema['pattern']
+            if 'description' in prop_schema:
+                js['description'] = prop_schema['description']
+            if 'default' in prop_schema:
+                js['default'] = prop_schema['default']
+            return js
+
+        def build_params_object_schema(params_schema: dict) -> dict:
+            props = {}
+            required = []
+            for pname, pspec in (params_schema or {}).items():
+                props[pname] = to_jsonschema_param(pspec)
+                # Treat params without defaults and not explicitly optional as required
+                if not (isinstance(pspec, dict) and (pspec.get('optional') or 'default' in pspec)):
+                    required.append(pname)
+            schema = {"type": "object", "properties": props, "additionalProperties": False}
+            if required:
+                schema['required'] = required
+            return schema
+
+        # Build indicator rules
+        indicators_map = indicator_registry.get_all_indicators()
+        indicator_names = sorted(list(indicators_map.keys()))
+        indicator_allOf = []
+        for name, cls in indicators_map.items():
+            params_schema = getattr(cls, 'PARAMS_SCHEMA', {}) or {}
+            outputs = getattr(cls, 'OUTPUTS', []) or []
+            pane_type = getattr(cls, 'PANE_TYPE', None)
+            then_schema = {
+                "properties": {
+                    "name": {"const": name},
+                    "params": build_params_object_schema(params_schema),
+                },
+                "required": ["name", "params"],
+                # Non-standard extensions to help agents
+                "x-outputs": outputs,
+                "x-pane_type": pane_type,
+            }
+            indicator_allOf.append({
+                "if": {"properties": {"name": {"const": name}}, "required": ["name"]},
+                "then": then_schema,
+            })
+
+        # Build operator rules
+        operators_map = operator_registry.get_all_operators()
+        operator_names = sorted(list(operators_map.keys()))
+        operator_allOf = []
+        for name, cls in operators_map.items():
+            params_schema = getattr(cls, 'PARAMS_SCHEMA', {}) or {}
+            operator_allOf.append({
+                "if": {"properties": {"name": {"const": name}}, "required": ["name"]},
+                "then": {
+                    "properties": {
+                        "name": {"const": name},
+                        "params": build_params_object_schema(params_schema),
+                    },
+                    "required": ["name", "params"],
+                },
+            })
+
+        # Build action rules
+        actions_map = action_registry.get_all_actions()
+        action_names = sorted(list(actions_map.keys()))
+        action_allOf = []
+        for name, cls in actions_map.items():
+            params_schema = getattr(cls, 'PARAMS_SCHEMA', {}) or {}
+            action_allOf.append({
+                "if": {"properties": {"name": {"const": name}}, "required": ["name"]},
+                "then": {
+                    "properties": {
+                        "name": {"const": name},
+                        "params": build_params_object_schema(params_schema),
+                    },
+                    "required": ["name", "params"],
+                },
+            })
+
+        schema = {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": f"{getattr(settings, 'BACKEND_URL', '')}/api/bots/nodes/schema/",
+            "title": "No-Code Strategy Nodes Schema",
+            "type": "object",
+            "properties": {
+                "indicators": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "enum": indicator_names},
+                            "params": {"type": "object"},
+                        },
+                        "required": ["name", "params"],
+                        "allOf": indicator_allOf,
+                        "additionalProperties": False,
+                    },
+                },
+                "operators": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "enum": operator_names},
+                            "params": {"type": "object"},
+                        },
+                        "required": ["name", "params"],
+                        "allOf": operator_allOf,
+                        "additionalProperties": False,
+                    },
+                },
+                "actions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "enum": action_names},
+                            "params": {"type": "object"},
+                        },
+                        "required": ["name", "params"],
+                        "allOf": action_allOf,
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["indicators", "operators", "actions"],
+            "additionalProperties": False,
+            # Also include a non-standard catalog to help agents render docs without evaluating schema
+            "x-catalog": {
+                "indicators": [
+                    {"name": n, "outputs": getattr(indicators_map[n], 'OUTPUTS', []) or [], "pane_type": getattr(indicators_map[n], 'PANE_TYPE', None)}
+                    for n in indicator_names
+                ],
+                "operators": [{"name": n} for n in operator_names],
+                "actions": [{"name": n} for n in action_names],
+            },
+        }
+        return Response(schema, status=status.HTTP_200_OK)

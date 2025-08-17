@@ -258,7 +258,7 @@ class IndicatorMetadataSerializer(serializers.Serializer):
     parameters = BotParameterMetadataSerializer(many=True)
 
 class StrategyConfigGenerateRequestSerializer(serializers.Serializer):
-    bot_version = serializers.CharField()  # accept UUID or custom version identifier as str
+    bot_version = serializers.CharField(required=False, allow_blank=True, allow_null=True)  # was required; now optional
     prompt = serializers.CharField(max_length=getattr(__import__('django.conf').conf.settings, 'AI_STRATEGY_MAX_PROMPT_CHARS', 4000))
     options = serializers.DictField(required=False, allow_null=True, default=dict)
 

@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 from datetime import timedelta
 import environ
+from corsheaders.defaults import default_headers  # Added for CORS custom headers
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -86,6 +87,7 @@ INSTALLED_APPS = [
 
 
 MIDDLEWARE = [
+    "corsheaders.middleware.CorsMiddleware",  # Moved to top as recommended
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -94,12 +96,20 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
-    "corsheaders.middleware.CorsMiddleware",
-    "django.middleware.common.CommonMiddleware",
 ]
 
 CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
+# Allow custom headers used by the frontend
+CORS_ALLOW_HEADERS = list(default_headers) + [
+    "x-request-id",
+    "idempotency-key",
+]
+# Expose response headers so the frontend can read them
+CORS_EXPOSE_HEADERS = [
+    "X-Request-ID",
+    "Idempotency-Key",
+]
 
 ROOT_URLCONF = "trading_platform.urls"
 
@@ -323,7 +333,7 @@ EXEC_LOCK_TTL_MS = env.int("EXEC_LOCK_TTL_MS", default=5000)  # 5s default
 MIN_ENTRY_COOLDOWN_SEC = env.int("MIN_ENTRY_COOLDOWN_SEC", default=0)  # per-run default; strategy may override
 
 # --- AI Strategy Generation Service settings ---
-AI_STRATEGY_API_URL = env.str("https://endlessly-central-gelding.ngrok-free.app/webhook/6b891469-8e13-40be-80ed-767932094cff", default="")
+AI_STRATEGY_API_URL = env.str("AI_STRATEGY_API_URL", default="https://endlessly-central-gelding.ngrok-free.app/webhook/6b891469-8e13-40be-80ed-767932094cff")
 AI_STRATEGY_API_KEY = env.str("AI_STRATEGY_API_KEY", default="")
 AI_STRATEGY_TIMEOUT_SEC = env.int("AI_STRATEGY_TIMEOUT_SEC", default=15)
 AI_STRATEGY_MAX_PROMPT_CHARS = env.int("AI_STRATEGY_MAX_PROMPT_CHARS", default=4000)
