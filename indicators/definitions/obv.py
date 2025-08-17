@@ -16,6 +16,27 @@ class OBVIndicator:
     VERSION = 1
     PANE_TYPE = 'pane'
     OUTPUTS = ["obv"]
+    # Visual metadata
+    VISUAL_SCHEMA = {
+        "series": {
+            "obv": {
+                "color": {"type": "string"},
+                "lineStyle": {"type": "string", "enum": ["solid", "dashed", "dotted"]},
+                "lineWidth": {"type": "integer", "min": 1, "max": 5},
+                "plotType": {"type": "string", "enum": ["line"]},
+                "visible": {"type": "boolean"}
+            }
+        },
+        "guides": {
+            "zero": {"value": {"type": "number"}, "color": {"type": "string"}, "visible": {"type": "boolean"}}
+        }
+    }
+    VISUAL_DEFAULTS = {
+        "series": {
+            "obv": {"color": "#4682b4", "lineStyle": "solid", "lineWidth": 1, "plotType": "line", "visible": True}
+        },
+        "guides": {"zero": {"value": 0, "color": "#808080", "visible": False}}
+    }
     PARAMS_SCHEMA = {
         "source": {
             "type": "string",

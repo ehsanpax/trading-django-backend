@@ -46,7 +46,7 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
         self._group_symbol = (self.symbol or "").upper()
 
         await self.accept()
-        logger.info(f"Price WS connected account={self.account_id} symbol={self.symbol}")
+        #logger.info(f"Price WS connected account={self.account_id} symbol={self.symbol}")
 
         monitoring_service.register_connection(
             self.channel_name,
@@ -75,7 +75,7 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
         channel_layer = get_channel_layer()
         if channel_layer:
             await channel_layer.group_add(price_group, self.channel_name)
-            logger.info(f"Joined price group: {price_group}")
+            #logger.info(f"Joined price group: {price_group}")
         self._price_group = price_group
         self._candle_group = None
 
@@ -101,7 +101,7 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
                 # Subscribe to price ticks for this symbol (headless)
                 await mt5_subscribe_price(**self._mt5_args, symbol=self.symbol)
                 self._mt5_price_subscribed = True
-                logger.info(f"Headless MT5 price subscribe requested for {self.symbol} (account={self.account_id})")
+                #logger.info(f"Headless MT5 price subscribe requested for {self.symbol} (account={self.account_id})")
             except Exception as e:
                 await self.send_json({"error": str(e)})
                 await self.close()
@@ -318,7 +318,7 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
                     await mt5_unsubscribe_price(**self._mt5_args, symbol=self.symbol)
                 if self.timeframe:
                     await mt5_unsubscribe_candles(**self._mt5_args, symbol=self.symbol, timeframe=self.timeframe)
-                logger.info(f"Headless MT5 unsubscribe price and candles for {self.symbol}@{self.timeframe}")
+                #logger.info(f"Headless MT5 unsubscribe price and candles for {self.symbol}@{self.timeframe}")
             except Exception as e:
                 logger.debug(f"Headless MT5 unsubscribe failed: {e}")
         elif self.price_task:

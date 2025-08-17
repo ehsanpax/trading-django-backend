@@ -66,8 +66,10 @@ class StrategyManager:
                 })
             # Enrich with outputs and pane type for frontend output selection and chart placement
             outputs = getattr(indicator_cls, 'OUTPUTS', None) or ["default"]
-            pane_type = getattr(indicator_cls, 'PANE_TYPE', 'OVERLAY')
-            display_name = getattr(indicator_cls, 'DISPLAY_NAME', name.replace("Indicator", ""))
+            pane_type = getattr(indicator_cls, 'PANE_TYPE', None) or 'overlay'
+            display_name = getattr(indicator_cls, 'NAME', name)
+            visual_schema = getattr(indicator_cls, 'VISUAL_SCHEMA', None)
+            visual_defaults = getattr(indicator_cls, 'VISUAL_DEFAULTS', None)
 
             metadata.append({
                 "name": name,
@@ -75,6 +77,8 @@ class StrategyManager:
                 "parameters": params_list,
                 "outputs": outputs,
                 "pane_type": pane_type,
+                "visual_schema": visual_schema,
+                "visual_defaults": visual_defaults,
             })
         return metadata
 

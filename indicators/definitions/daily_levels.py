@@ -12,7 +12,27 @@ class DailyLevelsIndicator:
     """
     NAME = "DailyLevels"
     VERSION = 1
+    PANE_TYPE = 'overlay'
     OUTPUTS = ["high_of_day", "low_of_day", "day_open", "prev_day_high", "prev_day_low"]
+    # Visual metadata
+    VISUAL_SCHEMA = {
+        "series": {
+            "high_of_day": {"color": {"type": "string"}, "lineStyle": {"type": "string", "enum": ["solid", "dashed", "dotted"]}, "lineWidth": {"type": "integer", "min": 1, "max": 5}, "visible": {"type": "boolean"}},
+            "low_of_day": {"color": {"type": "string"}, "lineStyle": {"type": "string", "enum": ["solid", "dashed", "dotted"]}, "lineWidth": {"type": "integer", "min": 1, "max": 5}, "visible": {"type": "boolean"}},
+            "day_open": {"color": {"type": "string"}, "lineStyle": {"type": "string", "enum": ["solid", "dashed", "dotted"]}, "lineWidth": {"type": "integer", "min": 1, "max": 5}, "visible": {"type": "boolean"}},
+            "prev_day_high": {"color": {"type": "string"}, "lineStyle": {"type": "string", "enum": ["solid", "dashed", "dotted"]}, "lineWidth": {"type": "integer", "min": 1, "max": 5}, "visible": {"type": "boolean"}},
+            "prev_day_low": {"color": {"type": "string"}, "lineStyle": {"type": "string", "enum": ["solid", "dashed", "dotted"]}, "lineWidth": {"type": "integer", "min": 1, "max": 5}, "visible": {"type": "boolean"}}
+        }
+    }
+    VISUAL_DEFAULTS = {
+        "series": {
+            "high_of_day": {"color": "#008000", "lineStyle": "solid", "lineWidth": 1, "visible": True},
+            "low_of_day": {"color": "#ff0000", "lineStyle": "solid", "lineWidth": 1, "visible": True},
+            "day_open": {"color": "#0000ff", "lineStyle": "dotted", "lineWidth": 1, "visible": True},
+            "prev_day_high": {"color": "#90ee90", "lineStyle": "dashed", "lineWidth": 1, "visible": True},
+            "prev_day_low": {"color": "#f08080", "lineStyle": "dashed", "lineWidth": 1, "visible": True}
+        }
+    }
     PARAMS_SCHEMA = {
         "show_high": {"type": "boolean", "default": True, "ui_only": True, "display_name": "Show Day's High"},
         "show_low": {"type": "boolean", "default": True, "ui_only": True, "display_name": "Show Day's Low"},

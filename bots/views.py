@@ -84,8 +84,7 @@ class IndicatorMetadataAPIView(APIView):
     def get(self, request, *args, **kwargs):
         try:
             metadata = StrategyManager.get_available_indicators_metadata()
-            serializer = IndicatorMetadataSerializer(metadata, many=True)
-            return Response(serializer.data, status=status.HTTP_200_OK)
+            return Response(metadata, status=status.HTTP_200_OK)
         except Exception as e:
             logger.error(f"Error fetching indicator metadata: {e}", exc_info=True)
             return Response({"error": "Could not retrieve indicator metadata."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -95,8 +94,9 @@ class NodeMetadataAPIView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def get(self, request, *args, **kwargs):
+        indicators_meta = StrategyManager.get_available_indicators_metadata()
         nodes = {
-            "indicators": StrategyManager.get_available_indicators_metadata(),
+            "indicators": indicators_meta,
             "operators": [
                 {"name": name, "params": op.PARAMS_SCHEMA}
                 for name, op in operator_registry.get_all_operators().items()
@@ -676,6 +676,8 @@ class NodeSchemaAPIView(APIView):
             params_schema = getattr(cls, 'PARAMS_SCHEMA', {}) or {}
             outputs = getattr(cls, 'OUTPUTS', []) or []
             pane_type = getattr(cls, 'PANE_TYPE', None)
+            visual_schema = getattr(cls, 'VISUAL_SCHEMA', None)
+            visual_defaults = getattr(cls, 'VISUAL_DEFAULTS', None)
             then_schema = {
                 "properties": {
                     "name": {"const": name},
@@ -685,6 +687,8 @@ class NodeSchemaAPIView(APIView):
                 # Non-standard extensions to help agents
                 "x-outputs": outputs,
                 "x-pane_type": pane_type,
+                "x-visual_schema": visual_schema,
+                "x-visual_defaults": visual_defaults,
             }
             indicator_allOf.append({
                 "if": {"properties": {"name": {"const": name}}, "required": ["name"]},
@@ -776,7 +780,13 @@ class NodeSchemaAPIView(APIView):
             # Also include a non-standard catalog to help agents render docs without evaluating schema
             "x-catalog": {
                 "indicators": [
-                    {"name": n, "outputs": getattr(indicators_map[n], 'OUTPUTS', []) or [], "pane_type": getattr(indicators_map[n], 'PANE_TYPE', None)}
+                    {
+                        "name": n,
+                        "outputs": getattr(indicators_map[n], 'OUTPUTS', []) or [],
+                        "pane_type": getattr(indicators_map[n], 'PANE_TYPE', None),
+                        "visual_schema": getattr(indicators_map[n], 'VISUAL_SCHEMA', None),
+                        "visual_defaults": getattr(indicators_map[n], 'VISUAL_DEFAULTS', None),
+                    }
                     for n in indicator_names
                 ],
                 "operators": [{"name": n} for n in operator_names],

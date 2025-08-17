@@ -16,6 +16,48 @@ class MACDIndicator:
     VERSION = 1
     PANE_TYPE = 'pane'
     OUTPUTS = ["macd", "histogram", "signal"]
+    # Visual metadata
+    VISUAL_SCHEMA = {
+        "series": {
+            "macd": {
+                "color": {"type": "string"},
+                "lineStyle": {"type": "string", "enum": ["solid", "dashed", "dotted"]},
+                "lineWidth": {"type": "integer", "min": 1, "max": 5},
+                "plotType": {"type": "string", "enum": ["line"]},
+                "visible": {"type": "boolean"}
+            },
+            "signal": {
+                "color": {"type": "string"},
+                "lineStyle": {"type": "string", "enum": ["solid", "dashed", "dotted"]},
+                "lineWidth": {"type": "integer", "min": 1, "max": 5},
+                "plotType": {"type": "string", "enum": ["line"]},
+                "visible": {"type": "boolean"}
+            },
+            "histogram": {
+                "positiveColor": {"type": "string"},
+                "negativeColor": {"type": "string"},
+                "plotType": {"type": "string", "enum": ["histogram"]},
+                "visible": {"type": "boolean"}
+            }
+        },
+        "guides": {
+            "zero": {
+                "value": {"type": "number"},
+                "color": {"type": "string"},
+                "visible": {"type": "boolean"}
+            }
+        }
+    }
+    VISUAL_DEFAULTS = {
+        "series": {
+            "macd": {"color": "#1f77b4", "lineStyle": "solid", "lineWidth": 1, "plotType": "line", "visible": True},
+            "signal": {"color": "#ff7f0e", "lineStyle": "solid", "lineWidth": 1, "plotType": "line", "visible": True},
+            "histogram": {"positiveColor": "#2ca02c", "negativeColor": "#d62728", "plotType": "histogram", "visible": True}
+        },
+        "guides": {
+            "zero": {"value": 0, "color": "#808080", "visible": True}
+        }
+    }
     PARAMS_SCHEMA = {
         "fast": {
             "type": "integer",

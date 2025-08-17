@@ -296,7 +296,7 @@ class MT5APIClient:
         try:
             headers = {'Content-Type': 'application/json'}
             url = f"{self.base_url}{endpoint}"
-            logger.info(f"MT5APIClient: Making POST request to {url}")
+            #logger.info(f"MT5APIClient: Making POST request to {url}")
             response = requests.post(
                 url,
                 json=json_data,
@@ -567,7 +567,7 @@ class MT5HeadlessOrchestrator:
                 try:
                     await self._run_blocking(client.start_headless_poller)
                     self._ready_accounts.add(internal_account_id)
-                    logger.debug(f"Headless poller started for {internal_account_id}")
+                    #logger.debug(f"Headless poller started for {internal_account_id}")
                 except Exception as e:
                     logger.warning(f"Failed to start headless poller for {internal_account_id}: {e}")
             return client

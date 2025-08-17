@@ -16,6 +16,27 @@ class CMFIndicator:
     VERSION = 1
     PANE_TYPE = 'pane'
     OUTPUTS = ["cmf"]
+    # Visual metadata
+    VISUAL_SCHEMA = {
+        "series": {
+            "cmf": {
+                "color": {"type": "string"},
+                "lineStyle": {"type": "string", "enum": ["solid", "dashed", "dotted"]},
+                "lineWidth": {"type": "integer", "min": 1, "max": 5},
+                "plotType": {"type": "string", "enum": ["line", "area"]},
+                "visible": {"type": "boolean"}
+            }
+        },
+        "guides": {
+            "zero": {"value": {"type": "number"}, "color": {"type": "string"}, "visible": {"type": "boolean"}}
+        }
+    }
+    VISUAL_DEFAULTS = {
+        "series": {
+            "cmf": {"color": "#008080", "lineStyle": "solid", "lineWidth": 1, "plotType": "line", "visible": True}
+        },
+        "guides": {"zero": {"value": 0, "color": "#808080", "visible": True}}
+    }
     PARAMS_SCHEMA = {
         "length": {
             "type": "integer",

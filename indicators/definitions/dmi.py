@@ -16,6 +16,39 @@ class DMIIndicator:
     VERSION = 1
     PANE_TYPE = 'pane'
     OUTPUTS = ["plus_di", "minus_di", "adx"]
+    # Visual metadata
+    VISUAL_SCHEMA = {
+        "series": {
+            "plus_di": {
+                "color": {"type": "string"},
+                "lineStyle": {"type": "string", "enum": ["solid", "dashed", "dotted"]},
+                "lineWidth": {"type": "integer", "min": 1, "max": 5},
+                "plotType": {"type": "string", "enum": ["line"]},
+                "visible": {"type": "boolean"}
+            },
+            "minus_di": {
+                "color": {"type": "string"},
+                "lineStyle": {"type": "string", "enum": ["solid", "dashed", "dotted"]},
+                "lineWidth": {"type": "integer", "min": 1, "max": 5},
+                "plotType": {"type": "string", "enum": ["line"]},
+                "visible": {"type": "boolean"}
+            },
+            "adx": {
+                "color": {"type": "string"},
+                "lineStyle": {"type": "string", "enum": ["solid", "dashed", "dotted"]},
+                "lineWidth": {"type": "integer", "min": 1, "max": 5},
+                "plotType": {"type": "string", "enum": ["line"]},
+                "visible": {"type": "boolean"}
+            }
+        }
+    }
+    VISUAL_DEFAULTS = {
+        "series": {
+            "plus_di": {"color": "#2ca02c", "lineStyle": "solid", "lineWidth": 1, "plotType": "line", "visible": True},
+            "minus_di": {"color": "#d62728", "lineStyle": "solid", "lineWidth": 1, "plotType": "line", "visible": True},
+            "adx": {"color": "#1f77b4", "lineStyle": "solid", "lineWidth": 1, "plotType": "line", "visible": True}
+        }
+    }
     PARAMS_SCHEMA = {
         "length": {
             "type": "integer",

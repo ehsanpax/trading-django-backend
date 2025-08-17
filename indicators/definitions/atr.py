@@ -17,6 +17,23 @@ class ATRIndicator:
     PANE_TYPE = 'pane'
     SCALE_TYPE = 'linear'
     OUTPUTS = ["atr"]
+    # Visual metadata for frontend UI
+    VISUAL_SCHEMA = {
+        "series": {
+            "atr": {
+                "color": {"type": "string"},
+                "lineStyle": {"type": "string", "enum": ["solid", "dashed", "dotted"]},
+                "lineWidth": {"type": "integer", "min": 1, "max": 5},
+                "plotType": {"type": "string", "enum": ["line", "area"]},
+                "visible": {"type": "boolean"},
+            }
+        }
+    }
+    VISUAL_DEFAULTS = {
+        "series": {
+            "atr": {"color": "#9467bd", "lineStyle": "solid", "lineWidth": 1, "plotType": "line", "visible": True}
+        }
+    }
     PARAMS_SCHEMA = {
         "length": {
             "type": "integer",

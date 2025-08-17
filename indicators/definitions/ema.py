@@ -14,7 +14,26 @@ class EMAIndicator:
     """
     NAME = "EMA"
     VERSION = 1
+    # Add pane type as overlay per spec
+    PANE_TYPE = 'overlay'
     OUTPUTS = ["ema"]
+    # Visual metadata for frontend UI
+    VISUAL_SCHEMA = {
+        "series": {
+            "ema": {
+                "color": {"type": "string"},
+                "lineStyle": {"type": "string", "enum": ["solid", "dashed", "dotted"]},
+                "lineWidth": {"type": "integer", "min": 1, "max": 5},
+                "plotType": {"type": "string", "enum": ["line"]},
+                "visible": {"type": "boolean"},
+            }
+        }
+    }
+    VISUAL_DEFAULTS = {
+        "series": {
+            "ema": {"color": "#1f77b4", "lineStyle": "solid", "lineWidth": 1, "plotType": "line", "visible": True}
+        }
+    }
     PARAMS_SCHEMA = {
         "length": {
             "type": "integer",

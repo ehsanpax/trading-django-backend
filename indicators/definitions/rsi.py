@@ -16,6 +16,45 @@ class RSIIndicator:
     VERSION = 1
     PANE_TYPE = 'pane'
     OUTPUTS = ["rsi"]
+    # Visual metadata for frontend UI
+    VISUAL_SCHEMA = {
+        "series": {
+            "rsi": {
+                "color": {"type": "string"},
+                "lineStyle": {"type": "string", "enum": ["solid", "dashed", "dotted"]},
+                "lineWidth": {"type": "integer", "min": 1, "max": 5},
+                "plotType": {"type": "string", "enum": ["line"]},
+                "visible": {"type": "boolean"},
+            }
+        },
+        "guides": {
+            "upper": {
+                "value": {"type": "number"},
+                "color": {"type": "string"},
+                "visible": {"type": "boolean"}
+            },
+            "lower": {
+                "value": {"type": "number"},
+                "color": {"type": "string"},
+                "visible": {"type": "boolean"}
+            },
+            "middle": {
+                "value": {"type": "number"},
+                "color": {"type": "string"},
+                "visible": {"type": "boolean"}
+            }
+        }
+    }
+    VISUAL_DEFAULTS = {
+        "series": {
+            "rsi": {"color": "#800080", "lineStyle": "solid", "lineWidth": 1, "plotType": "line", "visible": True}
+        },
+        "guides": {
+            "upper": {"value": 70, "color": "#808080", "visible": True},
+            "lower": {"value": 30, "color": "#808080", "visible": True},
+            "middle": {"value": 50, "color": "#d3d3d3", "visible": False}
+        }
+    }
     PARAMS_SCHEMA = {
         "length": {
             "type": "integer",

@@ -16,6 +16,39 @@ class StochasticRSIIndicator:
     VERSION = 1
     PANE_TYPE = 'pane'
     OUTPUTS = ["stoch_rsi_k", "stoch_rsi_d"]
+    # Visual metadata
+    VISUAL_SCHEMA = {
+        "series": {
+            "stoch_rsi_k": {
+                "color": {"type": "string"},
+                "lineStyle": {"type": "string", "enum": ["solid", "dashed", "dotted"]},
+                "lineWidth": {"type": "integer", "min": 1, "max": 5},
+                "plotType": {"type": "string", "enum": ["line"]},
+                "visible": {"type": "boolean"}
+            },
+            "stoch_rsi_d": {
+                "color": {"type": "string"},
+                "lineStyle": {"type": "string", "enum": ["solid", "dashed", "dotted"]},
+                "lineWidth": {"type": "integer", "min": 1, "max": 5},
+                "plotType": {"type": "string", "enum": ["line"]},
+                "visible": {"type": "boolean"}
+            }
+        },
+        "guides": {
+            "upper": {"value": {"type": "number"}, "color": {"type": "string"}, "visible": {"type": "boolean"}},
+            "lower": {"value": {"type": "number"}, "color": {"type": "string"}, "visible": {"type": "boolean"}}
+        }
+    }
+    VISUAL_DEFAULTS = {
+        "series": {
+            "stoch_rsi_k": {"color": "#1f77b4", "lineStyle": "solid", "lineWidth": 1, "plotType": "line", "visible": True},
+            "stoch_rsi_d": {"color": "#d62728", "lineStyle": "solid", "lineWidth": 1, "plotType": "line", "visible": True}
+        },
+        "guides": {
+            "upper": {"value": 80, "color": "#808080", "visible": True},
+            "lower": {"value": 20, "color": "#808080", "visible": True}
+        }
+    }
     PARAMS_SCHEMA = {
         "rsi_length": {
             "type": "integer",
