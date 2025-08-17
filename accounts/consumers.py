@@ -159,7 +159,7 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         channel_layer = get_channel_layer()
         if channel_layer:
             await channel_layer.group_add(self._account_group, self.channel_name)
-            logger.info(f"Joined account group: {self._account_group}")
+            #logger.info(f"Joined account group: {self._account_group}")
 
     async def disconnect(self, close_code):
         """
@@ -304,14 +304,14 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
                 "pending_orders": processed_pending_orders
             }
         }
-        logger.info(f"Sending account_update to client account={self.account_id} positions={len(processed_positions)} pending={len(processed_pending_orders)}")
+        #logger.info(f"Sending account_update to client account={self.account_id} positions={len(processed_positions)} pending={len(processed_pending_orders)}")
         await self.send_json(payload)
         monitoring_service.update_server_message(self.channel_name, payload)
 
     # Handlers for Channels group messages
     async def account_info_update(self, event):
         # event: {"type": "account_info_update", "account_info": {...}}
-        logger.info(f"Channels account_info_update received for account={self.account_id}")
+        #logger.info(f"Channels account_info_update received for account={self.account_id}")
         info = event.get("account_info", {})
         await self.send_account_update(info)
 
