@@ -9,6 +9,7 @@ from .choices import (
     ScheduleRecurrenceChoices,
     WeekDayChoices,
     SessionScheduleTaskStatusChoices,
+    ChatSessionTypeChoices,
 )
 from rest_framework.authtoken.models import Token
 
@@ -46,6 +47,11 @@ class ChatSession(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid4, editable=False)
     user = models.ForeignKey(
         User, on_delete=models.CASCADE, related_name="ai_chat_sessions"
+    )
+    session_type = models.CharField(
+        max_length=50,
+        choices=ChatSessionTypeChoices.choices,
+        default=ChatSessionTypeChoices.CHAT.value,
     )
     external_session_id = models.CharField(max_length=255, unique=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)

@@ -4,7 +4,7 @@ from trade_journal.models import TradeJournal
 from django.db import models
 from trading.models import Trade, Order
 from trades.serializers import TradeSerializer, OrderSerializer
-from .choices import WeekDayChoices
+from .choices import WeekDayChoices, ChatSessionTypeChoices
 import datetime
 
 
@@ -38,12 +38,17 @@ class SessionExecutionSerializer(serializers.Serializer):
     )
     session_data = serializers.JSONField(default=dict, required=False)
     total_cost = serializers.FloatField(required=False, allow_null=True)
+    session_type = serializers.ChoiceField(
+        choices=ChatSessionTypeChoices.choices,
+        default=ChatSessionTypeChoices.CHAT.value,
+    )
 
     def save(self, **kwargs):
         user = self.context["request"].user
         chat_session, updated = ChatSession.objects.update_or_create(
             external_session_id=self.validated_data.get("external_session_id"),
             user=user,
+            session_type=self.validated_data.get("session_type"),
             defaults=dict(
                 user_first_message=self.validated_data.get("user_first_message"),
                 session_data=self.validated_data.get("session_data"),
@@ -110,7 +115,9 @@ class SessionScheduleSerializer(serializers.ModelSerializer):
     external_session_id = serializers.CharField(
         source="session.external_session_id", read_only=True
     )
-    excluded_days = serializers.CharField(allow_blank=True, allow_null=True, required=False)
+    excluded_days = serializers.CharField(
+        allow_blank=True, allow_null=True, required=False
+    )
 
     class Meta:
         model = SessionSchedule

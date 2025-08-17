@@ -7,6 +7,7 @@ from .serializers import (
     TradeJournalSerializer,
     SessionScheduleSerializer,
 )
+from .choices import ChatSessionTypeChoices
 from rest_framework.views import APIView
 from rest_framework.viewsets import ModelViewSet
 from rest_framework.authentication import TokenAuthentication
@@ -64,7 +65,9 @@ class StoreSessionExecutionViewset(APIView):
 class ChatSessionViewset(ModelViewSet):
     serializer_class = ChatSessionSerializer
     permission_classes = [permissions.IsAuthenticated]
-    queryset = ChatSession.objects.all()
+    queryset = ChatSession.objects.filter(
+        session_type=ChatSessionTypeChoices.CHAT.value
+    )
 
     def get_queryset(self):
         return (
@@ -93,9 +96,15 @@ class TradeJournalViewset(ModelViewSet):
         if account_id:
             try:
                 account_id = uuid.UUID(account_id, version=4)
-                queryset = queryset.filter(trade__account__id=account_id, trade__account__user=self.request.user)
+                queryset = queryset.filter(
+                    trade__account__id=account_id,
+                    trade__account__user=self.request.user,
+                )
             except Exception:
-                queryset = queryset.filter(trade__account__name__iexact=str(account_id), trade__account__user=self.request.user)
+                queryset = queryset.filter(
+                    trade__account__name__iexact=str(account_id),
+                    trade__account__user=self.request.user,
+                )
 
         return queryset
 
