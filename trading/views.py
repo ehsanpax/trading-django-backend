@@ -50,5 +50,31 @@ class EquityCurveView(APIView):
             if start_date:
                 queryset = queryset.filter(date__gte=start_date)
 
-        serializer = EquityDataPointSerializer(queryset, many=True)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        # Build enriched equity curve with drawdown/runup per point
+        points = list(queryset.values_list('date', 'equity'))
+        result = []
+        peak = None  # running max equity
+        trough = None  # running min equity
+        for dt, eq in points:
+            # Convert to float for calculations, keep original Decimal for output if desired
+            eq_float = float(eq)
+            peak = eq_float if peak is None else max(peak, eq_float)
+            trough = eq_float if trough is None else min(trough, eq_float)
+
+            drawdown_val = max(0.0, peak - eq_float)
+            drawdown_pct = (drawdown_val / peak * 100.0) if peak not in (None, 0.0) else 0.0
+
+            runup_val = max(0.0, eq_float - trough)
+            denom = abs(trough) if trough not in (None, 0.0) else None
+            runup_pct = (runup_val / denom * 100.0) if denom else 0.0
+
+            result.append({
+                'date': dt,
+                'equity': eq,
+                'drawdown': round(drawdown_val, 2),
+                'drawdown_pct': round(drawdown_pct, 4),
+                'runup': round(runup_val, 2),
+                'runup_pct': round(runup_pct, 4),
+            })
+
+        return Response(result, status=status.HTTP_200_OK)

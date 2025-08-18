@@ -184,15 +184,37 @@ class BacktestEngine:
         direction = action['side'].upper()
         
         fill_price = self.apply_fill_model(direction, intended_price, bar_data, self.execution_config)
+        fill_price_dec = Decimal(str(fill_price))
+
+        # Derive TP from rr_ratio/default_rr when tp is missing but sl is provided
+        sl_dec = Decimal(str(action['sl'])) if action.get('sl') is not None else None
+        tp_dec = None
+        if action.get('tp') is not None:
+            tp_dec = Decimal(str(action.get('tp')))
+        elif sl_dec is not None:
+            # Determine RR: prefer action.rr_ratio, then engine risk_settings.default_rr, fallback 2.0
+            rr = action.get('rr_ratio')
+            try:
+                rr = float(rr) if rr is not None else float(self.risk_settings.get('default_rr', 2.0))
+            except Exception:
+                rr = 2.0
+            if rr and rr > 0:
+                price_sl_distance = abs(fill_price_dec - sl_dec)
+                if price_sl_distance > 0:
+                    if direction == 'BUY':
+                        tp_dec = fill_price_dec + Decimal(str(rr)) * price_sl_distance
+                    else:  # SELL
+                        tp_dec = fill_price_dec - Decimal(str(rr)) * price_sl_distance
+                    logger.info(f"Derived TP for backtest using RR={rr}: entry={fill_price_dec}, SL_dist={price_sl_distance} -> TP={tp_dec}")
 
         new_pos = {
             'id': str(uuid.uuid4()),
             'intended_price': float(intended_price),
-            'entry_price': float(fill_price),
+            'entry_price': float(fill_price_dec),
             'volume': float(action['qty']),
             'direction': direction,
-            'stop_loss': float(action['sl']) if action.get('sl') else None,
-            'take_profit': float(action['tp']) if action.get('tp') else None,
+            'stop_loss': float(sl_dec) if sl_dec is not None else None,
+            'take_profit': float(tp_dec) if tp_dec is not None else (float(action['tp']) if action.get('tp') is not None else None),
             'entry_timestamp': bar_data.name.isoformat(),
             'symbol': self.strategy.legacy_strategy.instrument_symbol, # Bit of a hack to get the symbol
             'comment': action.get('tag', '')

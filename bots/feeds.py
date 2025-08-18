@@ -434,17 +434,26 @@ class AMQPFeed(MarketDataFeed):
         """Ensure MT5 poller and create headless subscriptions for symbol/timeframe."""
         try:
             await mt5_ensure_ready(**self._mt5_args)
-            await mt5_subscribe_price(**self._mt5_args, symbol=self.symbol)
+            count_p = await mt5_subscribe_price(**self._mt5_args, symbol=self.symbol)
             self._mt5_subscribed_price = True
+            count_c = None
             if self.timeframe:
-                await mt5_subscribe_candles(**self._mt5_args, symbol=self.symbol, timeframe=self.timeframe)
+                count_c = await mt5_subscribe_candles(**self._mt5_args, symbol=self.symbol, timeframe=self.timeframe)
                 self._mt5_subscribed_candles = True
             logger.info(
-                "AMQPFeed headless subscribed: account=%s symbol=%s timeframe=%s",
+                "AMQPFeed headless subscribed: account=%s symbol=%s timeframe=%s price_refs=%s candle_refs=%s",
                 self.account_id,
                 self.symbol,
                 self.timeframe,
+                count_p,
+                count_c,
             )
+            try:
+                from trading_platform.mt5_api_client import mt5_subscriptions_status
+                status = await mt5_subscriptions_status(**self._mt5_args)
+                logger.info("MT5 headless status after AMQPFeed subscribe: %s", status)
+            except Exception as e:
+                logger.debug(f"AMQPFeed mt5_subscriptions_status failed: {e}")
         except Exception as e:
             logger.warning(f"AMQPFeed headless subscribe failed: {e}")
 
@@ -452,27 +461,31 @@ class AMQPFeed(MarketDataFeed):
         try:
             if self._mt5_subscribed_price:
                 try:
-                    await mt5_unsubscribe_price(**self._mt5_args, symbol=self.symbol)
+                    from trading_platform.mt5_api_client import mt5_subscriptions_status
+                    count_p = await mt5_unsubscribe_price(**self._mt5_args, symbol=self.symbol)
+                    logger.info("AMQPFeed headless unsubscribed price: account=%s symbol=%s refs=%s", self.account_id, self.symbol, count_p)
                 except Exception:
                     pass
             if self._mt5_subscribed_candles and self.timeframe:
                 try:
-                    await mt5_unsubscribe_candles(**self._mt5_args, symbol=self.symbol, timeframe=self.timeframe)
+                    count_c = await mt5_unsubscribe_candles(**self._mt5_args, symbol=self.symbol, timeframe=self.timeframe)
+                    logger.info("AMQPFeed headless unsubscribed candles: account=%s symbol=%s timeframe=%s refs=%s", self.account_id, self.symbol, self.timeframe, count_c)
                 except Exception:
                     pass
             self._mt5_subscribed_price = False
             self._mt5_subscribed_candles = False
-            logger.info(
-                "AMQPFeed headless unsubscribed: account=%s symbol=%s timeframe=%s",
-                self.account_id,
-                self.symbol,
-                self.timeframe,
-            )
+            try:
+                status = await mt5_subscriptions_status(**self._mt5_args)
+                logger.info("MT5 headless status after AMQPFeed unsubscribe: %s", status)
+            except Exception as e:
+                logger.debug(f"AMQPFeed mt5_subscriptions_status failed: {e}")
         except Exception:
             pass
 
     async def _async_run(self):
         self._stop_evt = asyncio.Event()
+        last_tick_ts = None
+        last_candle_ts = None
         try:
             self._conn = await aio_pika.connect_robust(self._amqp_url)
             self._channel = await self._conn.channel()
@@ -527,6 +540,7 @@ class AMQPFeed(MarketDataFeed):
                                 data = {**candle, 'timeframe': tf}
                                 try:
                                     self._q.put_nowait({'type': 'candle', 'data': data})
+                                    last_candle_ts = data.get('time')
                                 except Exception:
                                     pass
                         elif etype == 'price.tick':
@@ -541,9 +555,12 @@ class AMQPFeed(MarketDataFeed):
                                 }
                                 try:
                                     self._q.put_nowait({'type': 'tick', 'data': tick})
+                                    last_tick_ts = tick.get('time')
                                 except Exception:
                                     pass
-                        # Other event types ignored by bot feed
+                        # Optionally, log inactivity every ~60 deliveries
+                        if (last_candle_ts or last_tick_ts) and (hash((last_candle_ts, last_tick_ts)) % 60 == 0):
+                            logger.debug("AMQPFeed activity: last_tick=%s last_candle=%s", last_tick_ts, last_candle_ts)
                     except Exception as e:
                         logger.debug(f"AMQPFeed message parse error: {e}")
                         return

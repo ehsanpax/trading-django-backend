@@ -14,6 +14,7 @@ from trading_platform.mt5_api_client import (
     mt5_unsubscribe_price,
     mt5_subscribe_candles,
     mt5_unsubscribe_candles,
+    mt5_subscriptions_status,
 )
 from django.conf import settings
 import websockets, aiohttp
@@ -38,6 +39,8 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
         self._mt5_price_subscribed = False
         # Group naming uses uppercase symbol to match backend fanout keys
         self._group_symbol = None
+        self._last_tick_ts = None
+        self._last_candle_ts = None
 
     async def connect(self):
         self.account_id = self.scope["url_route"]["kwargs"]["account_id"]
@@ -99,9 +102,14 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
                 # Keep a client for REST endpoints like historical candles
                 self.mt5_client = await connection_manager.get_client(**self._mt5_args)
                 # Subscribe to price ticks for this symbol (headless)
-                await mt5_subscribe_price(**self._mt5_args, symbol=self.symbol)
+                refs = await mt5_subscribe_price(**self._mt5_args, symbol=self.symbol)
                 self._mt5_price_subscribed = True
-                #logger.info(f"Headless MT5 price subscribe requested for {self.symbol} (account={self.account_id})")
+                logger.info(f"Headless MT5 price subscribe requested for {self.symbol} (account={self.account_id}) refs={refs}")
+                try:
+                    status = await mt5_subscriptions_status(**self._mt5_args)
+                    logger.info(f"MT5 headless status after connect price subscribe: {status}")
+                except Exception as e:
+                    logger.debug(f"mt5_subscriptions_status failed: {e}")
             except Exception as e:
                 await self.send_json({"error": str(e)})
                 await self.close()
@@ -148,9 +156,16 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
         if self.platform == "MT5" and self._mt5_args:
             try:
                 if self._mt5_price_subscribed:
-                    await mt5_unsubscribe_price(**self._mt5_args, symbol=self.symbol)
+                    refs = await mt5_unsubscribe_price(**self._mt5_args, symbol=self.symbol)
+                    logger.info(f"MT5 headless unsubscribe price on disconnect {self.symbol} refs={refs}")
                 if self.timeframe:
-                    await mt5_unsubscribe_candles(**self._mt5_args, symbol=self.symbol, timeframe=self.timeframe)
+                    refs_c = await mt5_unsubscribe_candles(**self._mt5_args, symbol=self.symbol, timeframe=self.timeframe)
+                    logger.info(f"MT5 headless unsubscribe candles on disconnect {self.symbol}@{self.timeframe} refs={refs_c}")
+                try:
+                    status = await mt5_subscriptions_status(**self._mt5_args)
+                    logger.info(f"MT5 headless status after disconnect: {status}")
+                except Exception as e:
+                    logger.debug(f"mt5_subscriptions_status failed: {e}")
             except Exception as e:
                 logger.debug(f"MT5 headless unsubscribe on disconnect failed: {e}")
         elif self.price_task:
@@ -187,8 +202,13 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
                 self.timeframe = new_timeframe
                 if self._mt5_args:
                     try:
-                        await mt5_subscribe_candles(**self._mt5_args, symbol=self.symbol, timeframe=self.timeframe)
-                        logger.info(f"Headless MT5 subscribe candles {self.symbol}@{self.timeframe} (account={self.account_id})")
+                        count = await mt5_subscribe_candles(**self._mt5_args, symbol=self.symbol, timeframe=self.timeframe)
+                        logger.info(f"Headless MT5 subscribe candles {self.symbol}@{self.timeframe} (account={self.account_id}) refs={count}")
+                        try:
+                            status = await mt5_subscriptions_status(**self._mt5_args)
+                            logger.info(f"MT5 headless status after subscribe candles: {status}")
+                        except Exception as e:
+                            logger.debug(f"mt5_subscriptions_status failed: {e}")
                     except Exception as e:
                         await self.send_json({"error": f"Failed to subscribe candles: {e}"})
 
@@ -315,10 +335,16 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
         if self.platform == "MT5" and self._mt5_args:
             try:
                 if self._mt5_price_subscribed:
-                    await mt5_unsubscribe_price(**self._mt5_args, symbol=self.symbol)
+                    count = await mt5_unsubscribe_price(**self._mt5_args, symbol=self.symbol)
+                    logger.info(f"Headless MT5 unsubscribe price {self.symbol} refs={count}")
                 if self.timeframe:
-                    await mt5_unsubscribe_candles(**self._mt5_args, symbol=self.symbol, timeframe=self.timeframe)
-                #logger.info(f"Headless MT5 unsubscribe price and candles for {self.symbol}@{self.timeframe}")
+                    count_c = await mt5_unsubscribe_candles(**self._mt5_args, symbol=self.symbol, timeframe=self.timeframe)
+                    logger.info(f"Headless MT5 unsubscribe candles {self.symbol}@{self.timeframe} refs={count_c}")
+                try:
+                    status = await mt5_subscriptions_status(**self._mt5_args)
+                    logger.info(f"MT5 headless status after unsubscribe: {status}")
+                except Exception as e:
+                    logger.debug(f"mt5_subscriptions_status failed: {e}")
             except Exception as e:
                 logger.debug(f"Headless MT5 unsubscribe failed: {e}")
         elif self.price_task:
@@ -335,6 +361,11 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
         }
         await self.send_json(payload)
         monitoring_service.update_server_message(self.channel_name, payload)
+
+        try:
+            self._last_tick_ts = price_data.get("time") or price_data.get("timestamp")
+        except Exception:
+            pass
 
     async def send_candle_update(self, candle_data):
         """Callback function to handle candle updates, calculating indicators on actual close."""

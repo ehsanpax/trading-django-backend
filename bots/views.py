@@ -729,6 +729,94 @@ class NodeSchemaAPIView(APIView):
                 },
             })
 
+        # --- New: Risk and Filters JSON Schemas ---
+        # Risk schema supported by SectionedStrategy and engine gates
+        risk_schema = {
+            "type": "object",
+            "properties": {
+                "risk_pct": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1,
+                    "default": 0.01,
+                    "description": "Fraction of account equity to risk per trade (e.g., 0.01 = 1%)."
+                },
+                "default_rr": {
+                    "type": "number",
+                    "minimum": 0,
+                    "default": 2.0,
+                    "description": "Default reward-to-risk multiple used to derive TP when tp is not provided."
+                },
+                "fixed_lot_size": {
+                    "type": "number",
+                    "minimum": 0,
+                    "default": 1.0,
+                    "description": "Fallback fixed position size when dynamic sizing cannot be computed."
+                },
+                "max_open_positions": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Maximum concurrent open positions allowed by the engine gate."
+                },
+                "daily_loss_pct": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 100,
+                    "description": "Max daily drawdown percentage after which entries are blocked (engine gate)."
+                },
+                "sl": {
+                    "type": "object",
+                    "description": "Stop-loss configuration.",
+                    "properties": {
+                        "type": {"type": "string", "enum": ["atr", "pct"], "default": "atr"},
+                        "mult": {"type": "number", "default": 1.5, "description": "Multiplier applied to ATR for SL distance (when type=atr)."},
+                        "length": {"type": "integer", "default": 14, "description": "ATR length (when type=atr)."},
+                        "value": {"type": "number", "default": 0.01, "description": "Percent SL (e.g., 0.01 = 1%) when type=pct."}
+                    },
+                    "additionalProperties": False
+                },
+                "take_profit_pips": {
+                    "type": "number",
+                    "description": "Absolute TP distance in pips from entry (SectionedStrategy convenience). If omitted, TP can be derived from default_rr and SL."
+                }
+            },
+            "additionalProperties": True
+        }
+
+        # Filters schema supported by evaluate_filters
+        filters_schema = {
+            "type": "object",
+            "properties": {
+                "allowed_days_of_week": {
+                    "type": "array",
+                    "items": {"type": "integer", "minimum": 0, "maximum": 6},
+                    "description": "Allowed trading days (0=Mon .. 6=Sun)."
+                },
+                "allowed_sessions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "start": {
+                                "type": "string",
+                                "pattern": "^([01]?\\d|2[0-3]):[0-5]\\d$",
+                                "description": "Session start time in HH:MM (24h, UTC)."
+                            },
+                            "end": {
+                                "type": "string",
+                                "pattern": "^([01]?\\d|2[0-3]):[0-5]\\d$",
+                                "description": "Session end time in HH:MM (24h, UTC)."
+                            }
+                        },
+                        "required": ["start", "end"],
+                        "additionalProperties": False
+                    },
+                    "description": "Time windows during which entries are allowed."
+                }
+            },
+            "additionalProperties": True
+        }
+
         schema = {
             "$schema": "https://json-schema.org/draft/2020-12/schema",
             "$id": f"{getattr(settings, 'BACKEND_URL', '')}/api/bots/nodes/schema/",
@@ -774,6 +862,9 @@ class NodeSchemaAPIView(APIView):
                         "additionalProperties": False,
                     },
                 },
+                # New: add risk and filters sections
+                "risk": risk_schema,
+                "filters": filters_schema,
             },
             "required": ["indicators", "operators", "actions"],
             "additionalProperties": False,
@@ -791,6 +882,20 @@ class NodeSchemaAPIView(APIView):
                 ],
                 "operators": [{"name": n} for n in operator_names],
                 "actions": [{"name": n} for n in action_names],
+                # New: include hints for risk/filters
+                "risk": {
+                    "defaults": {"risk_pct": 0.01, "default_rr": 2.0, "sl": {"type": "atr", "mult": 1.5, "length": 14}},
+                    "notes": [
+                        "default_rr is used to derive TP from SL when tp is missing (also respected in backtests).",
+                        "take_profit_pips provides a fixed TP distance alternative."
+                    ]
+                },
+                "filters": {
+                    "notes": [
+                        "allowed_days_of_week uses 0=Mon..6=Sun",
+                        "allowed_sessions times are interpreted in UTC"
+                    ]
+                },
             },
         }
         return Response(schema, status=status.HTTP_200_OK)

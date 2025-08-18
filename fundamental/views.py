@@ -175,7 +175,14 @@ class NewsListAPIView(ListAPIView):
         source = self.request.query_params.get('source')
 
         if date_from and date_to:
-            queryset = queryset.filter(time__date__gte=date_from, time__date__lte=date_to)
+            try:
+                date_from = datetime.strptime(date_from, "%Y-%m-%d %H:%M:%S")
+                date_from = timezone.make_aware(date_from, timezone.get_current_timezone())
+                date_to = datetime.strptime(date_to, "%Y-%m-%d %H:%M:%S")
+                date_to = timezone.make_aware(date_to, timezone.get_current_timezone())
+                queryset = queryset.filter(time__gte=date_from, time__lte=date_to)
+            except ValueError:
+                pass
 
         if source:
             queryset = queryset.filter(source__iexact=source)

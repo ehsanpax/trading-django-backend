@@ -8,6 +8,7 @@ from typing import Dict, Any, Optional, Callable, List, Tuple, Set
 from datetime import datetime
 from trades.exceptions import BrokerAPIError, BrokerConnectionError
 import os
+from utils.concurrency import get_redis_client
 
 # Feature flag: Disable MT5 WebSocket path from Django to MT5.
 # To re-activate the WebSocket path, set environment variable MT5_WS_ENABLED=1 (or true/yes) and restart the backend.
@@ -290,6 +291,11 @@ class MT5APIClient:
         payload["symbol"] = symbol
         return self._post("/mt5/price", json_data=payload)
 
+    # --- Headless subscriptions diagnostics ---
+    def headless_subscriptions_status(self) -> Dict[str, Any]:
+        """Fetch current headless subscription counters from MT5 service."""
+        return self._get("/mt5/headless/subscriptions/status")
+
     # --- HTTP Methods for one-off actions ---
 
     def _post(self, endpoint: str, json_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -546,6 +552,55 @@ class MT5HeadlessOrchestrator:
         self._ready_accounts: Set[str] = set()
         self._price_refs: Dict[str, Dict[str, int]] = {}
         self._candle_refs: Dict[str, Dict[Tuple[str, str], int]] = {}
+        # Cross-process store (optional)
+        self._redis = get_redis_client()
+
+    # --- Redis helpers ---
+    def _price_key(self, internal_account_id: str, symbol: str) -> str:
+        return f"md:rc:price:{internal_account_id}:{(symbol or '').upper()}"
+
+    def _candle_key(self, internal_account_id: str, symbol: str, timeframe: str) -> str:
+        return f"md:rc:candles:{internal_account_id}:{(symbol or '').upper()}:{(timeframe or '').upper()}"
+
+    def _incr_counter(self, key: str, local_bucket: Dict, local_key) -> int:
+        # Prefer Redis atomic INCR; fallback to local in-memory refs
+        if self._redis:
+            try:
+                return int(self._redis.incr(key))
+            except Exception as e:
+                logger.warning(f"Redis INCR failed for {key}: {e}. Falling back to memory.")
+        # Fallback (process-local)
+        count = int(local_bucket.get(local_key, 0)) + 1
+        local_bucket[local_key] = count
+        return count
+
+    def _decr_counter(self, key: str, local_bucket: Dict, local_key) -> int:
+        if self._redis:
+            try:
+                # Safe decrement: don't go negative, delete at zero
+                script = (
+                    "local v = redis.call('GET', KEYS[1])\n"
+                    "if not v then v = 0 else v = tonumber(v) end\n"
+                    "if v <= 0 then return 0 end\n"
+                    "v = v - 1\n"
+                    "if v == 0 then redis.call('DEL', KEYS[1]) else redis.call('SET', KEYS[1], v) end\n"
+                    "return v\n"
+                )
+                new_val = int(self._redis.eval(script, 1, key))
+                return new_val
+            except Exception as e:
+                logger.warning(f"Redis DECR failed for {key}: {e}. Falling back to memory.")
+        # Fallback (process-local)
+        count = int(local_bucket.get(local_key, 0))
+        new_count = max(0, count - 1)
+        if new_count == 0:
+            try:
+                local_bucket.pop(local_key, None)
+            except Exception:
+                local_bucket[local_key] = 0
+        else:
+            local_bucket[local_key] = new_count
+        return new_count
 
     def _get_lock(self, internal_account_id: str) -> asyncio.Lock:
         lock = self._account_locks.get(internal_account_id)
@@ -577,35 +632,33 @@ class MT5HeadlessOrchestrator:
         client = await self.ensure_ready(base_url, account_id, password, broker_server, internal_account_id)
         lock = self._get_lock(internal_account_id)
         async with lock:
-            refs = self._price_refs.setdefault(internal_account_id, {})
-            count = refs.get(symbol, 0)
-            if count == 0:
+            # Redis/global counter first
+            key = self._price_key(internal_account_id, symbol)
+            local_bucket = self._price_refs.setdefault(internal_account_id, {})
+            new_count = self._incr_counter(key, local_bucket, symbol)
+            if new_count == 1:
                 try:
                     await self._run_blocking(client.headless_subscribe_price, symbol)
                 except BrokerAPIError as e:
-                    # Treat duplicate/409 as ok
+                    # Treat duplicate/409 as ok (idempotent)
                     if "409" not in str(e):
                         raise
-            refs[symbol] = count + 1
-            return refs[symbol]
+            return new_count
 
     async def unsubscribe_price(self, base_url: str, account_id: int, password: str, broker_server: str, internal_account_id: str, symbol: str) -> int:
         symbol = symbol or ""
         client = await self.ensure_ready(base_url, account_id, password, broker_server, internal_account_id)
         lock = self._get_lock(internal_account_id)
         async with lock:
-            refs = self._price_refs.setdefault(internal_account_id, {})
-            count = refs.get(symbol, 0)
-            new_count = max(0, count - 1)
-            if count > 0 and new_count == 0:
+            key = self._price_key(internal_account_id, symbol)
+            local_bucket = self._price_refs.setdefault(internal_account_id, {})
+            new_count = self._decr_counter(key, local_bucket, symbol)
+            if new_count == 0:
                 try:
                     await self._run_blocking(client.headless_unsubscribe_price, symbol)
                 except BrokerAPIError as e:
                     if "404" not in str(e):
                         raise
-                refs.pop(symbol, None)
-            else:
-                refs[symbol] = new_count
             return new_count
 
     async def subscribe_candles(self, base_url: str, account_id: int, password: str, broker_server: str, internal_account_id: str, symbol: str, timeframe: str) -> int:
@@ -615,16 +668,16 @@ class MT5HeadlessOrchestrator:
         lock = self._get_lock(internal_account_id)
         async with lock:
             refs = self._candle_refs.setdefault(internal_account_id, {})
-            key = (symbol, timeframe)
-            count = refs.get(key, 0)
-            if count == 0:
+            key = self._candle_key(internal_account_id, symbol, timeframe)
+            tuple_key = (symbol, timeframe)
+            new_count = self._incr_counter(key, refs, tuple_key)
+            if new_count == 1:
                 try:
                     await self._run_blocking(client.headless_subscribe_candles, symbol, timeframe)
                 except BrokerAPIError as e:
                     if "409" not in str(e):
                         raise
-            refs[key] = count + 1
-            return refs[key]
+            return new_count
 
     async def unsubscribe_candles(self, base_url: str, account_id: int, password: str, broker_server: str, internal_account_id: str, symbol: str, timeframe: str) -> int:
         symbol = symbol or ""
@@ -633,18 +686,15 @@ class MT5HeadlessOrchestrator:
         lock = self._get_lock(internal_account_id)
         async with lock:
             refs = self._candle_refs.setdefault(internal_account_id, {})
-            key = (symbol, timeframe)
-            count = refs.get(key, 0)
-            new_count = max(0, count - 1)
-            if count > 0 and new_count == 0:
+            key = self._candle_key(internal_account_id, symbol, timeframe)
+            tuple_key = (symbol, timeframe)
+            new_count = self._decr_counter(key, refs, tuple_key)
+            if new_count == 0:
                 try:
                     await self._run_blocking(client.headless_unsubscribe_candles, symbol, timeframe)
                 except BrokerAPIError as e:
                     if "404" not in str(e):
                         raise
-                refs.pop(key, None)
-            else:
-                refs[key] = new_count
             return new_count
 
     async def subscriptions_status(self, base_url: str, account_id: int, password: str, broker_server: str, internal_account_id: str) -> Dict[str, Any]:
