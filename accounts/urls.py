@@ -8,6 +8,7 @@ from .views import DeleteAccountView
 from .views import FetchAccountDetailsView
 from .views import ProfitTakingProfileViewSet
 from .views import MeView, UserRegistrationView # Added MeView import
+from .views import InternalCTraderTokensView # Added InternalCTraderTokensView import
 
 # bind the viewset actions to view functions
 profit_profile_list = ProfitTakingProfileViewSet.as_view({
@@ -31,6 +32,8 @@ urlpatterns = [
     path('profit-profiles/', profit_profile_list, name='profit-profile-list'),
     path('profit-profiles/<int:pk>/', profit_profile_detail, name='profit-profile-detail'),
     path('me/', MeView.as_view(), name='me'), # Added 'me' endpoint
+    # Internal endpoints for microservice (accept int CTraderAccount.id or UUID Account.id)
+    path("internal/brokers/ctrader/<str:ctrader_account_id>/tokens", InternalCTraderTokensView.as_view(), name="internal-ctrader-tokens"),
     
     # You can add additional endpoints (list, detail, update, delete) here.
 ]

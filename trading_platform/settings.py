@@ -353,3 +353,9 @@ BOTS_TRACE_ENABLED_DEFAULT = env.bool("BOTS_TRACE_ENABLED_DEFAULT", default=True
 BOTS_TRACE_MAX_ROWS = env.int("BOTS_TRACE_MAX_ROWS", default=250_000)
 BOTS_TRACE_BATCH_SIZE = env.int("BOTS_TRACE_BATCH_SIZE", default=1000)
 BOTS_TRACE_SAMPLING = env.int("BOTS_TRACE_SAMPLING", default=1)
+
+INTERNAL_SHARED_SECRET = env.str("INTERNAL_SHARED_SECRET", default=os.getenv("APP_INTERNAL_SHARED_SECRET", ""))
+if not INTERNAL_SHARED_SECRET:
+    # Generate a stable-on-boot random secret if none provided (dev only). For prod, set env var.
+    import secrets
+    INTERNAL_SHARED_SECRET = secrets.token_urlsafe(32)

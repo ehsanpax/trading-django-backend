@@ -24,6 +24,97 @@ Build a containerized FastAPI microservice that integrates with cTrader Open API
 
 ---
 
+## Key Learnings & Must-Follow Conventions (2025-08-19)
+- Transport/protocol
+  - The JSON channel of cTrader Open API must use WebSocket over TLS: `wss://{demo|live}.ctraderapi.com:5036`.
+  - Do not use raw TCP or newline-delimited JSON; each WS frame contains a single JSON message.
+- Message flow for onboarding account listing
+  - Send 2100 `ApplicationAuthReq` with `{clientId, clientSecret}` → expect 2101 `ApplicationAuthRes`.
+  - Send 2149 `GetAccountListByAccessTokenReq` with `{accessToken}` → expect 2150 response containing `ctidTraderAccount[]`.
+  - Optionally send 2151 `GetCtidProfileByAccessTokenReq` → expect 2152 response with `profile.userId` (ctid_user_id).
+  - Always handle 2142 `ProtoOAErrorRes` and surface `{errorCode, description}`.
+- Field mapping conventions
+  - Accounts are in `payload.ctidTraderAccount[]`; use `ctidTraderAccountId` as the account key.
+  - Broker display: prefer `brokerTitleShort` fallback `brokerName`.
+  - Environment: derive from `isLive` → `LIVE` else `DEMO`.
+- OAuth & tokens
+  - Token exchange endpoint: GET `https://openapi.ctrader.com/apps/token` with query params `{grant_type=authorization_code, code, redirect_uri, client_id, client_secret}`. Accept JSON response.
+  - The cTrader "grantingaccess" flow may omit `state` in the callback; support a `temp_id` path: cache `{code}` by `temp_id` for 15 minutes and complete later.
+  - Do not persist tokens in the service; immediately forward to backend via internal endpoint, keep only short-lived onboarding cache.
+- Security/observability
+  - Never log tokens or PII; redact sensitive fields. Cache TTL for onboarding state = 15 minutes.
+  - Return precise errors for OpenAPI failures including `{errorCode, description}`; use 5xx for upstream failures, 4xx for client/state issues.
+  - Frontend must use Django proxy endpoints; do not expose the microservice publicly.
+
+---
+
+## FIX-ready architecture (hybrid with Open API)
+To enable adding cTrader FIX later without rework, we will keep the transport layer pluggable.
+- Transport-agnostic interface
+  - Define `BrokerExecution` interface: connect, disconnect, place_order, amend_order, cancel_order, close_position, get_positions, get_account, subscribe_prices, subscribe_events.
+  - Domain models remain unified; adapters map transport-specific fields to domain enums (e.g., FIX ExecType/OrdStatus).
+- Adapter implementations
+  - `OpenApiAdapter` (current) wraps Open API WS session and REST helpers.
+  - `FixAdapter` (later) manages FIX session, sequence store, and message mapping.
+- Runtime selection per account
+  - Backend persists `transport=openapi|fix` per account; service chooses adapter on connect.
+  - SessionManager stores adapter sessions (not hard-coded Open API).
+- Idempotency & correlation
+  - Require client_order_id for all orders; map to broker OrderID/ExecID.
+  - Safe retries with duplicate detection.
+- Queues, heartbeats, and rate limits
+  - One serialized send queue per connection; pluggable throttling (Open API ~50 rps non-historical/5 rps historical; FIX per broker policy).
+  - Heartbeat abstraction (Open API 1001 vs FIX Heartbeat/TestRequest) behind adapters.
+- Errors, fallbacks, and metrics
+  - Normalize errors to domain types; optional feature-flag fallback to Open API if FIX down.
+  - Tag logs/metrics with transport=openapi|fix for observability.
+- Symbols & IDs
+  - Central symbol cache/mapping, with thin adapter-specific conversions.
+
+---
+
+## Environment & Secrets
+- CTRADER_CLIENT_ID, CTRADER_CLIENT_SECRET, CTRADER_REDIRECT_URI
+- CTRADER_ENV=DEMO|LIVE
+- CTRADER_OPENAPI_HOST, CTRADER_OPENAPI_PORT (default: demo/live:5036)
+- CTRADER_AUTH_URL (authorize endpoint for your app)
+- CTRADER_TOKEN_URL (default: https://openapi.ctrader.com/apps/token)
+- SERVICE_BASE_URL, WS_BASE_URL
+- BACKEND_BASE_URL (Django API base)
+- INTERNAL_SHARED_SECRET (for internal token endpoints)
+- FRONTEND_ORIGIN (exact origin for OAuth postMessage and CORS, e.g. http://localhost:8000)
+- Django setting: CTRADER_API_BASE_URL (points to FastAPI base, e.g. http://localhost:7999)
+- RABBITMQ_URL (optional)
+- FIX configuration (future)
+  - FIX_HOST, FIX_PORT, FIX_SENDER_COMP_ID, FIX_TARGET_COMP_ID
+  - FIX_TLS_ENABLED=true|false, FIX_CA_BUNDLE
+  - FIX_HEARTBTINT (seconds), FIX_LOGON_RESET=true|false
+  - FIX_IP_ALLOWLIST notes (managed outside envs)
+- Secure token/secret store per `account_id`
+
+---
+
+## Backend integration contract
+- Internal tokens endpoint: `PUT/GET /api/accounts/internal/brokers/ctrader/{id}/tokens` with header `X-Internal-Secret`.
+  - Note: `{id}` may be the numeric CTraderAccount.id or the internal Account UUID. The backend resolves either form.
+- Persist: `{access_token, refresh_token, token_expires_at, ctid_user_id, ctid_trader_account_id, environment}`.
+
+### Django proxy endpoints (now implemented)
+These backend routes proxy to the FastAPI microservice, so the frontend never calls the microservice directly.
+- POST `/ctrader/onboard/` → forwards to FastAPI `POST /ctrader/onboard` with `X-Internal-Secret`
+- GET  `/ctrader/oauth/callback` → redirects to FastAPI `GET /ctrader/oauth/callback`
+- GET  `/ctrader/accounts/` → forwards to FastAPI `GET /ctrader/accounts` with `X-Internal-Secret`
+- POST `/ctrader/onboard/<str:account_id>/complete` → forwards to FastAPI `POST /ctrader/onboard/{account_id}/complete` with `X-Internal-Secret` (accepts UUID or int)
+- POST `/ctrader/connect/` → forwards to FastAPI `POST /ctrader/connect` with `X-Internal-Secret`
+- POST `/ctrader/close/` → forwards to FastAPI `POST /ctrader/close` with `X-Internal-Secret`
+- DELETE `/ctrader/instance/<str:account_id>` → forwards to FastAPI `DELETE /ctrader/instance/{account_id}` with `X-Internal-Secret`
+Notes:
+- Configure Django env `CTRADER_API_BASE_URL` to the FastAPI base URL.
+- Ensure `INTERNAL_SHARED_SECRET` matches between Django and the FastAPI service.
+- Accounts proxy is hardened to surface non‑JSON upstream responses as structured errors (status, content_type, body snippet) for easier debugging.
+
+---
+
 ## Terminology & Key Mappings
 - Volume: 1 lot = 100000 units (cTrader uses units). Round to symbol volume step.
 - Timeframes: {M1,M5,M15,M30,H1,H4,D1} ↔ ProtoOATrendbarPeriod enums.
@@ -107,50 +198,6 @@ ctrader-fastapi-integrated/
 
 ---
 
-## Environment & Secrets
-- CTRADER_CLIENT_ID, CTRADER_CLIENT_SECRET, CTRADER_REDIRECT_URI
-- CTRADER_ENV=DEMO|LIVE
-- CTRADER_OPENAPI_HOST, CTRADER_OPENAPI_PORT
-- SERVICE_BASE_URL, WS_BASE_URL
-- RABBITMQ_URL (optional)
-- Secure token store per `account_id`: {access_token, refresh_token, expiry, accountId, broker, env}
-
----
-
-## Observability & Ops
-- Health: `/healthz`, `/readyz`
-- Logs: structured (JSON), correlation IDs, redaction of PII/tokens
-- Metrics: connection status, reconnect count, message rate, WS subscribers, request latency, error codes
-- Alerts: sustained reconnect failures, token refresh failures, message backlog
-
----
-
-## Testing Strategy
-- Unit: proto framing, parsers, mappers, validators
-- Integration: demo account flows (connect, subscribe, trade, history)
-- Soak: long-lived WS with reconnects
-- Load: multiple accounts, many subscriptions
-- CI: lint/format, unit/integration suites, container build, basic smoke tests
-
----
-
-## Rollout Plan
-- Phase 0–3 internal demos on DEMO env
-- Staged enablement for selected demo accounts
-- Harden, then limited LIVE rollout
-- Feature flag in backend to choose MT5 vs cTrader per account
-
----
-
-## Risks & Mitigations
-- Token expiry/invalid: proactive refresh, retry on 401, alerts
-- Netting vs hedging: normalize responses; document semantics; tests for partial closes
-- Rate limits: client-side throttling/backoff; batch subscriptions
-- Symbol mapping drift: refresh catalog on 404; invalidate on reconnect
-- Live candle semantics: finalize bar on close; dedupe updates
-
----
-
 ## Phase-by-Phase Plan
 
 Each phase includes status checkboxes to track progress. Update as you complete tasks.
@@ -160,6 +207,7 @@ Each phase includes status checkboxes to track progress. Update as you complete 
 - [x] Implement FastAPI app with `/healthz`, `/readyz`
 - [x] Dockerfile, docker-compose, requirements
 - [ ] CI: build, lint, unit-test scaffold
+- [x] Introduce transport abstraction (interface + adapter registry) — skeleton only
 
 Deliverables:
 - Bootable container with healthchecks and CI green
@@ -170,15 +218,17 @@ Exit Criteria:
 ---
 
 ### Phase 1 — OAuth Onboarding & Token Storage
-- [x] POST `/ctrader/onboard` → returns authorize URL (scaffolded)
-- [x] GET `/ctrader/oauth/callback` → exchanges code (placeholder), persists temp state; lists accounts (scaffolded)
-- [x] POST `/ctrader/onboard/{account_id}/complete` → bind selected trading account and finalize onboarding (scaffolded)
+- [x] POST `/ctrader/onboard` → returns authorize URL
+- [x] GET `/ctrader/oauth/callback` → exchanges code, persists tokens to backend; supports `temp_id` when `state` missing
+- [x] GET `/ctrader/accounts` → lists accounts via OpenAPI WebSocket (2100→2149/2150, 2151/2152)
+- [x] POST `/ctrader/onboard/{account_id}/complete` → bind selected trading account and finalize onboarding
 - [ ] Token store abstraction (encrypted at rest)
 - [ ] Token refresh job and retry on 401
 
 Progress notes:
-- Scaffolding implemented in `ctrader-fastapi/app/main.py`, with temporary `FileTokenStore` and in-memory state in `app/storage.py`.
-- OAuth URLs are placeholders; replace with actual cTrader endpoints and implement token exchange.
+- Implemented token exchange against `https://openapi.ctrader.com/apps/token` (GET with params).
+- Replaced earlier TCP attempt with proper WebSocket to `wss://{demo|live}.ctraderapi.com:5036` for JSON channel.
+- Error handling surfaces `ProtoOAErrorRes` details; onboarding cache uses 15-minute TTL.
 
 Deliverables:
 - End-to-end onboarding for demo env
@@ -189,53 +239,39 @@ Exit Criteria:
 #### Onboarding flow (clarified)
 1) In Django, user creates an Account with platform = cTrader. Backend creates:
    - `accounts.Account` (internal account, has UUID `account_id`)
-   - `ctrader.CTraderAccount` placeholder linked to the above, status = `PENDING`, tokens null.
+   - `accounts.CTraderAccount` placeholder linked to the above, status = `PENDING`, tokens null.
 2) Backend initiates onboarding: call `POST /ctrader/onboard` with `account_id`.
-   - Service generates OAuth state embedding/signed with `account_id` (+ nonce, expiry), returns the cTrader authorization URL.
+   - Service generates OAuth state bound to `account_id` (+ nonce, expiry), returns the cTrader authorization URL.
 3) User authenticates with cTrader ID; service handles `GET /ctrader/oauth/callback?code&state`.
-   - Exchange `code` → `access_token` + `refresh_token` (+ expiry).
-   - Fetch CTID profile and list of trading accounts (accountId, broker, env).
-   - Temporarily cache `{tokens, accounts}` keyed by `state` (short-lived, e.g., 15 minutes).
-4) UI shows the returned list; user selects one trading account (usually one).
-   - Backend calls `POST /ctrader/onboard/{account_id}/complete` with payload `{ctid_user_id, ctrader_account_id, environment}`.
-5) Service persists tokens and selection onto the `CTraderAccount` row for that `account_id`:
-   - `ctid_user_id`, `ctrader_account_id`, `broker`, `environment`, `access_token`, `refresh_token`, `token_expires_at`, status = `ACTIVE`.
-   - Optionally trigger `POST /ctrader/connect` to start the session.
+   - If `state` missing (grantingaccess), generate a `temp_id` and cache `{code}` under it for ~15 min.
+   - If `state` present, exchange `code` → tokens and cache under `state`.
+   - Popup posts a message to the frontend and closes. Fallback: redirect to frontend with `?ctrader_temp_id=...`.
+4) UI then calls `GET /ctrader/accounts?temp_id=<temp_id>` (or `state=<state>`) to exchange code (if needed) and list accounts via Open API WS; also retrieves `ctid_user_id`.
+5) UI posts selection to `POST /ctrader/onboard/{account_id}/complete` with `{temp_id|state, ctrader_account_id, environment, ctid_user_id?}`.
+   - Service persists tokens and selection to the backend for that `account_id`.
+   - Optional: call `/ctrader/connect` to start the session.
 
-Data model (suggested):
-- Table: `ctrader_account`
-  - `id` (uuid, PK)
-  - `account` (FK → `accounts.Account`, unique)
-  - `ctid_user_id` (bigint)
-  - `ctrader_account_id` (bigint)
-  - `broker` (str), `environment` (enum DEMO/LIVE)
-  - `access_token` (encrypted), `refresh_token` (encrypted), `token_expires_at` (datetime), `scope` (str)
-  - `status` (PENDING|ACTIVE|ERROR)
-  - `created_at`, `updated_at`
-  - Indexes: (`ctid_user_id`, `ctrader_account_id`), (`account`)
+Frontend callback handshake
+- The callback window executes a small script to:
+  - postMessage `{ source: 'ctrader', temp_id|state }` to `FRONTEND_ORIGIN` if `window.opener` is available, then close.
+  - fallback-redirect to the frontend origin with `?ctrader_temp_id=...` (and `state` if present) so the app can pick it up.
+- The frontend must:
+  - attach a `window.addEventListener('message', ...)` before opening the popup;
+  - trust only the expected origin(s) in production;
+  - on receiving `{ temp_id|state }`, call `/api/ctrader/accounts` with that key and render the returned accounts.
 
-Token storage options:
-- Approach A (simple): store tokens directly on `CTraderAccount` per `account_id`.
-  - Pros: straightforward binding and rotation.
-  - Cons: duplicates if same CTID used across multiple internal accounts.
-- Approach B (centralized): `CTraderUserToken` by `ctid_user_id`, and a mapping table `InternalAccountBinding` with `{account_id, ctrader_account_id, ctid_user_id}` referencing the token row.
-  - Pros: single refresh flow, deduped storage.
-  - Cons: more moving parts.
-
-Recommendation: start with Approach A; evolve to B if reuse across accounts becomes common.
-
-Security notes:
-- Sign and expire `state`; validate `redirect_uri`; store tokens encrypted; never log tokens/PII.
-- Enforce that `account_id` in `state` matches the completion call input.
+ID handling
+- The service and Django now accept either a numeric `CTraderAccount.id` or the internal Account UUID for `broker_connection_id`/`account_id` where applicable.
+- Recommendation: use the Account UUID end‑to‑end for consistency.
 
 ---
 
 ### Phase 2 — Low-level Connector (ProtoOA/TLS)
-- [ ] TLS socket, length-prefixed ProtoBuf framing
-- [ ] Authenticate with access token; `ConnectToTradingAccount(accountId)`
-- [ ] Heartbeats and ping/pong
+- [x] JSON WS session scaffold (2100 app auth, 2102 account auth, heartbeat 1001)
+- [ ] Adapterize current connector as `OpenApiAdapter` (implements BrokerExecution)
+- [ ] SessionManager to depend on interface; store adapter session per account
+- [ ] Per-socket send queue and basic throttling (Open API limits)
 - [ ] Reconnect (exponential backoff + jitter), re-auth, re-subscribe
-- [ ] Session manager (one per `account_id`)
 
 Deliverables:
 - Stable connection receiving heartbeats/events
@@ -302,10 +338,8 @@ Exit Criteria:
 
 ### Phase 7 — Trading Operations
 - [ ] `/ctrader/trade` → market/limit/stop with `client_order_id`
-- [ ] `/ctrader/orders/cancel`
-- [ ] `/ctrader/positions/modify_protection` (SL/TP)
-- [ ] `/ctrader/positions/close` (full/partial; lots→units)
-- [ ] Error mapping and user-friendly messages
+- [ ] Error mapping and idempotency across transports
+- [ ] Feature-flag to route via FIX adapter when available
 
 Deliverables:
 - E2E trading on demo accounts
@@ -398,12 +432,16 @@ Exit Criteria:
 ---
 
 ## Open Questions / Decisions Log
-- [ ] Finalize symbol info fields exposed to match MT5 exactly
-- [ ] Decide on RabbitMQ usage vs. WS-only for internal distribution
+- [ ] FIX availability per broker/account; supported message set and MD access
+- [ ] FIX session policies (TLS, IP allowlist, HeartBtInt, reset-on-logon)
+- [ ] Whether to implement FIX MD or keep Open API MD only
 - [ ] Token storage backend selection (DB vs. secret manager)
-- [ ] Netting aggregation details in responses
 
 ---
 
 ## Change Log
 - 2025-08-19: Initial draft created
+- 2025-08-19: Added protocol learnings (WebSocket JSON), onboarding temp_id support, backend token contract, and environment updates
+- 2025-08-19: Added FIX-ready architecture, environment placeholders, and abstraction tasks
+- 2025-08-19: Documented Django proxy endpoints and FRONTEND_ORIGIN env; added operational steps
+- 2025-08-19: Wired Django proxies for connect/close/instance delete and documented them
