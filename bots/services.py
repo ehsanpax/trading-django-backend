@@ -13,7 +13,60 @@ from .tasks import live_loop, run_backtest
 from core.registry import indicator_registry, strategy_registry
 from bots.base import BaseStrategy, BotParameter
 
+# --- New: validator for sectioned specs ---
+try:
+    from .validation.sectioned import validate_sectioned_spec, Issue  # type: ignore
+except Exception:  # pragma: no cover
+    def validate_sectioned_spec(spec: Dict[str, Any], indicator_catalog: Optional[Dict[str, Any]] = None):
+        return []
+    class Issue:  # fallback ghost type
+        level = "error"
+        message = ""
+
 logger = logging.getLogger(__name__)
+
+# --- New: helper to build indicator catalog for validator ---
+def _build_indicator_catalog() -> Dict[str, Any]:
+    catalog: Dict[str, Any] = {}
+    try:
+        for name, indicator_cls in indicator_registry.get_all_indicators().items():
+            outputs = getattr(indicator_cls, 'OUTPUTS', None) or ["value"]
+            params_schema = getattr(indicator_cls, 'PARAMS_SCHEMA', {}) or {}
+            timeframes = getattr(indicator_cls, 'TIMEFRAMES', None)
+            # normalize param schema
+            norm_params: Dict[str, Any] = {}
+            for p, meta in params_schema.items():
+                ptype = meta.get("type")
+                if ptype in ("int", "integer"):
+                    ptype = "int"
+                elif ptype in ("float", "number"):
+                    ptype = "float"
+                norm_params[p] = {
+                    "type": ptype,
+                    "min": meta.get("min"),
+                    "max": meta.get("max"),
+                    "required": meta.get("required", False),
+                }
+            catalog[name] = {
+                "outputs": outputs,
+                "params": norm_params,
+                "timeframes": list(timeframes) if timeframes else [],
+            }
+    except Exception as e:
+        logger.debug(f"Failed to build indicator catalog: {e}")
+    return catalog
+
+# --- New: helper to extract actual sectioned spec from strategy_params ---
+def _extract_sectioned_spec(spec_or_params: Dict[str, Any]) -> Dict[str, Any]:
+    """If the incoming dict contains a nested 'sectioned_spec', return that; else return the dict itself."""
+    try:
+        if isinstance(spec_or_params, dict):
+            inner = spec_or_params.get('sectioned_spec')
+            if isinstance(inner, dict):
+                return inner
+    except Exception:
+        pass
+    return spec_or_params
 
 class StrategyManager:
     """
@@ -120,6 +173,20 @@ class StrategyManager:
                 raise ValidationError(f"Parameter '{param_name}' must be at most {param_def.max_value}.")
 
     @staticmethod
+    def _validate_sectioned_spec_or_raise(spec: Dict[str, Any]):
+        # Unwrap nested section if present
+        spec = _extract_sectioned_spec(spec or {})
+        catalog = _build_indicator_catalog()
+        issues = validate_sectioned_spec(spec or {}, indicator_catalog=catalog)
+        errors = [i for i in issues if getattr(i, 'level', 'error') == 'error']
+        if errors:
+            raise ValidationError("; ".join(sorted({i.message for i in errors})))
+        # Log warnings/info for observability
+        infos = [i for i in issues if getattr(i, 'level', 'error') != 'error']
+        for i in infos:
+            logger.info(f"SectionedSpec validation: {i.level} {i.code} at {i.path}: {i.message}")
+
+    @staticmethod
     def instantiate_strategy(
         strategy_name: str,
         instrument_symbol: str,
@@ -134,14 +201,20 @@ class StrategyManager:
         """
         if strategy_name == "SECTIONED_SPEC":
             from .sectioned_adapter import SectionedStrategy
+            # Validate sectioned spec before instantiation (supports nested sectioned_spec)
+            try:
+                StrategyManager._validate_sectioned_spec_or_raise(strategy_params)
+            except ValidationError:
+                raise
+            except Exception as e:
+                logger.warning(f"Sectioned spec validation error ignored during instantiation: {e}")
             logger.info("Instantiating SectionedStrategy adapter.")
-            # The spec, risk, and filters are all passed within the strategy_params bundle
             return SectionedStrategy(
                 instrument_symbol=instrument_symbol,
                 account_id=account_id,
                 instrument_spec=instrument_spec,
                 strategy_params=strategy_params,
-                indicator_params=indicator_configs, # May be redundant if adapter handles it
+                indicator_params=indicator_configs,  # May be redundant if adapter handles it
                 risk_settings=risk_settings
             )
 
@@ -192,6 +265,9 @@ def create_bot_version(
         except Exception as e:
             logger.error(f"Unexpected error during BotVersion validation: {e}", exc_info=True)
             raise ValidationError(f"An unexpected error occurred during validation: {e}")
+    else:
+        # Validate sectioned spec using the new validator (supports nested sectioned_spec)
+        StrategyManager._validate_sectioned_spec_or_raise(strategy_params)
 
     bot_version = BotVersion.objects.create(
         bot=bot,
@@ -344,8 +420,8 @@ def launch_backtest(backtest_run_id: uuid.UUID, random_seed: Optional[int] = Non
     Triggers the run_backtest Celery task for an existing BacktestRun record.
     """
     try:
-        backtest_run = BacktestRun.objects.select_related('config__bot_version__bot').get(id=backtest_run_id)
-        bot_version = backtest_run.config.bot_version
+        backtest_run = BacktestRun.objects.select_related('config__bot_version__bot', 'bot_version__bot').get(id=backtest_run_id)
+        bot_version = backtest_run.bot_version or backtest_run.config.bot_version
 
         backtest_run.runtime_fingerprint = collect_runtime_fingerprint(bot_version.strategy_name)
         backtest_run.random_seed = random_seed

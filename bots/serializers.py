@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Bot, BotVersion, BacktestConfig, BacktestRun, LiveRun, ExecutionConfig
+from .models import Bot, BotVersion, BacktestConfig, BacktestRun, LiveRun, ExecutionConfig, BacktestDecisionTrace
 from accounts.serializers import AccountSerializer # Assuming you have this
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
@@ -71,14 +71,56 @@ class BacktestConfigSerializer(serializers.ModelSerializer):
     timeframe_display = serializers.CharField(source='get_timeframe_display', read_only=True)
     execution_config = ExecutionConfigSerializer(read_only=True)
     execution_config_id = serializers.UUIDField(write_only=True, required=False, allow_null=True)
+    # New scope fields
+    bot_id = serializers.UUIDField(write_only=True, required=False, allow_null=True)
+    owner_id = serializers.IntegerField(write_only=True, required=False, allow_null=True)
+    bot = serializers.PrimaryKeyRelatedField(read_only=True)
+    owner = UserSimpleSerializer(read_only=True)
 
     class Meta:
         model = BacktestConfig
         fields = [
-            'id', 'name', 'bot_version', 'bot_version_info', 'timeframe', 'timeframe_display',
-            'risk_json', 'execution_config', 'execution_config_id', 'label', 'created_at'
+            'id', 'name', 'bot_version', 'bot_version_info', 'bot', 'bot_id', 'owner', 'owner_id',
+            'timeframe', 'timeframe_display', 'risk_json', 'execution_config', 'execution_config_id', 'label', 'created_at'
         ]
-        read_only_fields = ['id', 'created_at', 'bot_version_info', 'timeframe_display', 'execution_config']
+        read_only_fields = ['id', 'created_at', 'bot_version_info', 'timeframe_display', 'execution_config', 'bot', 'owner']
+
+    def validate(self, attrs):
+        # Resolve scope
+        bot_version = attrs.get('bot_version')
+        bot_id = attrs.pop('bot_id', None)
+        owner_id = attrs.pop('owner_id', None)
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+
+        if bot_id:
+            try:
+                attrs['bot'] = Bot.objects.get(id=bot_id)
+            except Bot.DoesNotExist:
+                raise serializers.ValidationError('bot_id is invalid')
+        if owner_id is not None:
+            if not (user and (user.is_staff or user.is_superuser or user.id == owner_id)):
+                raise serializers.ValidationError('You cannot set owner to another user.')
+            attrs['owner_id'] = owner_id
+        else:
+            # default owner to request.user for user-scoped configs when neither bot_version nor bot provided explicitly
+            if not bot_version and not attrs.get('bot'):
+                if not user or not user.is_authenticated:
+                    raise serializers.ValidationError('Authentication required to create a user-scoped config.')
+                attrs['owner'] = user
+
+        # Permission checks
+        if bot_version:
+            if not (user and (user.is_staff or user.is_superuser or bot_version.bot.created_by_id == user.id)):
+                raise serializers.ValidationError('You do not own the selected bot version.')
+        if attrs.get('bot'):
+            if not (user and (user.is_staff or user.is_superuser or attrs['bot'].created_by_id == user.id)):
+                raise serializers.ValidationError('You do not own the selected bot.')
+
+        # At least one scope
+        if not (bot_version or attrs.get('bot') or attrs.get('owner') or attrs.get('owner_id')):
+            raise serializers.ValidationError('Provide one of bot_version, bot_id, or rely on owner (user-scoped).')
+        return attrs
 
     def create(self, validated_data):
         execution_config_id = validated_data.pop('execution_config_id', None)
@@ -88,22 +130,55 @@ class BacktestConfigSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         execution_config_id = validated_data.pop('execution_config_id', None)
+        validated_data.pop('bot_id', None)
+        validated_data.pop('owner_id', None)
         if execution_config_id:
             instance.execution_config = ExecutionConfig.objects.get(id=execution_config_id)
         return super().update(instance, validated_data)
 
 class BacktestRunSerializer(serializers.ModelSerializer):
     config_label = serializers.CharField(source='config.label', read_only=True, allow_null=True)
-    bot_name = serializers.CharField(source='config.bot_version.bot.name', read_only=True)
+    bot_name = serializers.CharField(source='bot_version.bot.name', read_only=True)
     original_timeframe = serializers.CharField(source='config.timeframe', read_only=True)
 
     class Meta:
         model = BacktestRun
         fields = [
-            'id', 'config', 'instrument_symbol', 'config_label', 'bot_name', 'original_timeframe', 'data_window_start', 
+            'id', 'config', 'bot_version', 'instrument_symbol', 'config_label', 'bot_name', 'original_timeframe', 'data_window_start', 
             'data_window_end', 'equity_curve', 'stats', 'simulated_trades_log', 'status', 'progress', 'created_at'
         ]
         read_only_fields = ['id', 'instrument_symbol', 'equity_curve', 'stats', 'simulated_trades_log', 'created_at', 'config_label', 'bot_name', 'progress', 'original_timeframe']
+
+class LaunchBacktestSerializer(serializers.Serializer):
+    config_id = serializers.UUIDField()
+    bot_version_id = serializers.UUIDField()
+    instrument_symbol = serializers.CharField(max_length=50)
+    data_window_start = serializers.DateTimeField()
+    data_window_end = serializers.DateTimeField()
+    random_seed = serializers.IntegerField(required=False, allow_null=True)
+
+    def validate(self, data):
+        if data['data_window_start'] >= data['data_window_end']:
+            raise serializers.ValidationError("data_window_end must be after data_window_start.")
+        user = self.context['request'].user if 'request' in self.context else None
+        try:
+            cfg = BacktestConfig.objects.select_related('bot_version__bot', 'bot').get(id=data['config_id'])
+        except BacktestConfig.DoesNotExist:
+            raise serializers.ValidationError("BacktestConfig with provided ID does not exist.")
+        try:
+            ver = BotVersion.objects.select_related('bot').get(id=data['bot_version_id'])
+        except BotVersion.DoesNotExist:
+            raise serializers.ValidationError("BotVersion with provided ID does not exist.")
+        if user and not (user.is_staff or user.is_superuser):
+            owns_version = (ver.bot.created_by_id == user.id)
+            owns_cfg = (
+                (cfg.bot_version and cfg.bot_version.bot.created_by_id == user.id) or
+                (cfg.bot and cfg.bot.created_by_id == user.id) or
+                (cfg.owner_id == user.id)
+            )
+            if not (owns_version and owns_cfg):
+                raise serializers.ValidationError("You do not have permission to use this config/version.")
+        return data
 
 class LiveRunSerializer(serializers.ModelSerializer):
     bot_name = serializers.CharField(source='bot_version.bot.name', read_only=True)
@@ -232,6 +307,16 @@ class BacktestChartDataSerializer(serializers.Serializer):
         read_only=True
     )
     trade_markers = BacktestTradeMarkerSerializer(many=True, read_only=True)
+
+# --- New: Decision Trace Serializer ---
+class BacktestDecisionTraceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = BacktestDecisionTrace
+        fields = [
+            'id', 'ts', 'bar_index', 'symbol', 'timeframe',
+            'section', 'kind', 'payload', 'idx'
+        ]
+        read_only_fields = fields
 
 # --- New Metadata Serializers ---
 

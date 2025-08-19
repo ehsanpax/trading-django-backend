@@ -3,6 +3,7 @@ from pathlib import Path # For constructing path to strategy templates
 from django.conf import settings # To get BASE_DIR
 import dataclasses # For inspecting dataclass fields
 from datetime import datetime # Added for timestamp conversion
+from django.db import models
 
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
@@ -20,6 +21,7 @@ from .serializers import (
     BacktestIndicatorDataSerializer, BacktestTradeMarkerSerializer,
     StrategyMetadataSerializer, IndicatorMetadataSerializer # New metadata serializers
 )
+from .serializers import BacktestDecisionTraceSerializer
 from .models import BacktestOhlcvData, BacktestIndicatorData
 from . import services
 from .compiler import GraphCompiler
@@ -242,20 +244,45 @@ class BacktestConfigViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        qs = BacktestConfig.objects.select_related('bot_version__bot').all()
+        qs = BacktestConfig.objects.select_related('bot_version__bot', 'bot', 'owner').all()
         if not (user.is_staff or user.is_superuser):
-            qs = qs.filter(bot_version__bot__created_by=user)
-
+            qs = qs.filter(
+                models.Q(bot_version__bot__created_by=user) |
+                models.Q(bot__created_by=user) |
+                models.Q(owner=user)
+            )
         bot_version_id = self.request.query_params.get('bot_version_id')
+        bot_id = self.request.query_params.get('bot_id')
+        scope = self.request.query_params.get('scope')
         if bot_version_id:
-            qs = qs.filter(bot_version_id=bot_version_id)
+            ver_bot_id = BotVersion.objects.filter(id=bot_version_id).values_list('bot_id', flat=True).first()
+            q = models.Q(bot_version_id=bot_version_id)
+            if ver_bot_id:
+                q |= models.Q(bot_id=ver_bot_id)
+            q |= models.Q(owner=user)
+            qs = qs.filter(q)
+        if bot_id:
+            qs = qs.filter(models.Q(bot_id=bot_id) | models.Q(owner=user))
+        if scope == 'version':
+            qs = qs.filter(bot_version__isnull=False)
+        elif scope == 'bot':
+            qs = qs.filter(bot__isnull=False)
+        elif scope == 'user':
+            qs = qs.filter(owner__isnull=False)
         return qs
 
     def perform_create(self, serializer):
-        bot_version = serializer.validated_data.get('bot_version')
         user = self.request.user
-        if not (user.is_staff or user.is_superuser or bot_version.bot.created_by == user):
-            raise PermissionDenied("You do not have permission for this bot version.")
+        bv = serializer.validated_data.get('bot_version')
+        bot = serializer.validated_data.get('bot')
+        owner = serializer.validated_data.get('owner') or serializer.validated_data.get('owner_id')
+        if not (user.is_staff or user.is_superuser):
+            if bv and bv.bot.created_by_id != user.id:
+                raise PermissionDenied("You do not have permission for this bot version.")
+            if bot and bot.created_by_id != user.id:
+                raise PermissionDenied("You do not have permission for this bot.")
+            if owner and getattr(owner, 'id', owner) != user.id:
+                raise PermissionDenied("You cannot assign configs to another user.")
         serializer.save()
 
 
@@ -266,18 +293,127 @@ class BacktestRunViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        qs = BacktestRun.objects.select_related('config__bot_version__bot').all()
+        qs = BacktestRun.objects.select_related('config__bot_version__bot', 'config__bot', 'config__owner', 'bot_version__bot').all()
         if not (user.is_staff or user.is_superuser):
-            qs = qs.filter(config__bot_version__bot__created_by=user)
-
+            qs = qs.filter(
+                models.Q(bot_version__bot__created_by=user) |
+                models.Q(config__bot__created_by=user) |
+                models.Q(config__owner=user)
+            )
         config_id = self.request.query_params.get('config_id')
         if config_id:
             qs = qs.filter(config_id=config_id)
         bot_version_id = self.request.query_params.get('bot_version_id')
         if bot_version_id:
-            qs = qs.filter(config__bot_version_id=bot_version_id)
+            qs = qs.filter(bot_version_id=bot_version_id)
+        bot_id = self.request.query_params.get('bot_id')
+        if bot_id:
+            qs = qs.filter(models.Q(bot_version__bot_id=bot_id) | models.Q(config__bot_id=bot_id))
         return qs
 
+    @action(detail=True, methods=['get'], url_path='trace')
+    def trace(self, request, pk=None):
+        run = self.get_object()
+        user = request.user
+        if not (user.is_staff or user.is_superuser or (run.bot_version and run.bot_version.bot.created_by == user) or (run.config.bot and run.config.bot.created_by == user) or (run.config.owner == user)):
+            return Response({"detail": "You do not have permission to access traces for this run."}, status=status.HTTP_403_FORBIDDEN)
+
+        # Filters
+        bar_index = request.query_params.get('bar_index')
+        ts = request.query_params.get('ts')
+        section = request.query_params.get('section')
+        kind = request.query_params.get('kind')
+        limit = int(request.query_params.get('limit') or 200)
+        offset = int(request.query_params.get('offset') or 0)
+
+        qs = run.decision_traces.all()
+        if bar_index is not None:
+            try:
+                qs = qs.filter(bar_index=int(bar_index))
+            except ValueError:
+                return Response({"detail": "bar_index must be an integer"}, status=status.HTTP_400_BAD_REQUEST)
+        if ts is not None:
+            # Support both epoch seconds and ISO8601
+            try:
+                import datetime
+                if ts.isdigit():
+                    ts_dt = datetime.datetime.utcfromtimestamp(int(ts))
+                else:
+                    ts_dt = datetime.datetime.fromisoformat(ts)
+                qs = qs.filter(ts=ts_dt)
+            except Exception:
+                return Response({"detail": "Invalid ts; use epoch seconds or ISO8601."}, status=status.HTTP_400_BAD_REQUEST)
+        if section:
+            qs = qs.filter(section=section)
+        if kind:
+            qs = qs.filter(kind=kind)
+
+        total = qs.count()
+        items = qs.order_by('bar_index', 'idx', 'id')[offset:offset+limit]
+        from .serializers import BacktestDecisionTraceSerializer
+        data = BacktestDecisionTraceSerializer(items, many=True).data
+        return Response({"items": data, "count": total}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get'], url_path='explain')
+    def explain(self, request, pk=None):
+        run = self.get_object()
+        user = request.user
+        if not (user.is_staff or user.is_superuser or (run.bot_version and run.bot_version.bot.created_by == user) or (run.config.bot and run.config.bot.created_by == user) or (run.config.owner == user)):
+            return Response({"detail": "You do not have permission to access explanations for this run."}, status=status.HTTP_403_FORBIDDEN)
+
+        bar_index = request.query_params.get('bar_index')
+        ts = request.query_params.get('ts')
+        include = request.query_params.get('include')
+        include_set = set((include or '').split(',')) if include else set()
+
+        qs = run.decision_traces.all()
+        target_qs = None
+        try:
+            if bar_index is not None:
+                target_qs = qs.filter(bar_index=int(bar_index))
+            elif ts is not None:
+                import datetime
+                if ts.isdigit():
+                    ts_dt = datetime.datetime.utcfromtimestamp(int(ts))
+                else:
+                    ts_dt = datetime.datetime.fromisoformat(ts)
+                target_qs = qs.filter(ts=ts_dt)
+            else:
+                return Response({"detail": "Provide bar_index or ts"}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            return Response({"detail": "Invalid bar_index or ts"}, status=status.HTTP_400_BAD_REQUEST)
+
+        atoms = list(target_qs.order_by('idx', 'id').values('section', 'kind', 'payload'))
+        # Group by section
+        grouped: Dict[str, list] = {}
+        for a in atoms:
+            sec = a.get('section') or 'engine'
+            grouped.setdefault(sec, []).append(a)
+
+        # Simple heuristic summary
+        summary = {"action": "no_entry", "reason": ""}
+        fills = grouped.get('fill', [])
+        if any(x.get('kind') == 'entry' for x in fills):
+            summary = {"action": "entry", "reason": "fill:entry"}
+        elif any(x.get('kind') == 'exit' for x in fills):
+            summary = {"action": "exit", "reason": "fill:exit"}
+        else:
+            # check blocks
+            if any(x.get('kind') == 'blocked' for x in grouped.get('filter', [])):
+                summary = {"action": "no_entry", "reason": f"Filter blocked: {grouped['filter'][0]['payload'].get('reason')}"}
+            elif any(x.get('kind') == 'blocked' for x in grouped.get('risk', [])):
+                summary = {"action": "no_entry", "reason": f"Risk blocked: {grouped['risk'][0]['payload'].get('reason')}"}
+
+        response = {
+            "bar_index": int(bar_index) if bar_index is not None else None,
+            "symbol": run.instrument_symbol,
+            "timeframe": run.config.timeframe,
+            "summary": summary,
+            "path": grouped,
+            "state": {"position": None, "balance": None},  # can be enriched later
+        }
+        return Response(response, status=status.HTTP_200_OK)
+        
 class LiveRunViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = LiveRun.objects.all()
     serializer_class = LiveRunSerializer
@@ -300,37 +436,41 @@ class LaunchBacktestAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, *args, **kwargs):
-        serializer = LaunchBacktestSerializer(data=request.data)
+        serializer = LaunchBacktestSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
             data = serializer.validated_data
             try:
                 config = get_object_or_404(BacktestConfig, id=data['config_id'])
-                if not (request.user.is_staff or request.user.is_superuser or config.bot_version.bot.created_by == request.user):
-                    return Response({"detail": "You do not have permission for this backtest configuration."},
-                                    status=status.HTTP_403_FORBIDDEN)
+                bot_version = get_object_or_404(BotVersion, id=data['bot_version_id'])
+                user = request.user
+                if not (user.is_staff or user.is_superuser):
+                    owns_cfg = (
+                        (config.bot_version and config.bot_version.bot.created_by_id == user.id) or
+                        (config.bot and config.bot.created_by_id == user.id) or
+                        (config.owner_id == user.id)
+                    )
+                    if not owns_cfg or bot_version.bot.created_by_id != user.id:
+                        return Response({"detail": "You do not have permission to use this backtest configuration or version."},
+                                        status=status.HTTP_403_FORBIDDEN)
 
-                # Create the BacktestRun instance first
                 backtest_run = BacktestRun.objects.create(
                     config=config,
+                    bot_version=bot_version,
                     instrument_symbol=data['instrument_symbol'],
                     data_window_start=data['data_window_start'],
                     data_window_end=data['data_window_end'],
                     status='PENDING'
                 )
 
-                # Then, launch the backtest with the new backtest_run_id
                 services.launch_backtest(
                     backtest_run_id=backtest_run.id,
                     random_seed=data.get('random_seed')
                 )
-                
                 response_serializer = BacktestRunSerializer(backtest_run)
                 return Response(response_serializer.data, status=status.HTTP_202_ACCEPTED)
-            except BacktestConfig.DoesNotExist as e:
-                 return Response({"detail": str(e)}, status=status.HTTP_404_NOT_FOUND)
             except DjangoValidationError as ve:
-                logger.error(f"Validation error launching backtest: {ve.message_dict if hasattr(ve, 'message_dict') else str(ve)}", exc_info=True)
-                return Response({"detail": ve.message_dict if hasattr(ve, 'message_dict') else str(ve)}, status=status.HTTP_400_BAD_REQUEST)
+                logger.error(f"Validation error launching backtest: {ve}", exc_info=True)
+                return Response({"detail": str(ve)}, status=status.HTTP_400_BAD_REQUEST)
             except Exception as e:
                 logger.error(f"Error launching backtest: {e}", exc_info=True)
                 return Response({"detail": "An error occurred while launching the backtest."},

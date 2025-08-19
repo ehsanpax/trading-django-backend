@@ -93,7 +93,13 @@ class BacktestConfig(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=255, blank=True, null=True, help_text="User-defined name for this backtest config")
-    bot_version = models.ForeignKey(BotVersion, on_delete=models.CASCADE, related_name="backtest_configs")
+    # Make version optional so configs can be reused across versions
+    bot_version = models.ForeignKey('bots.BotVersion', on_delete=models.CASCADE, related_name="backtest_configs", null=True, blank=True)
+    # Direct reference to Bot for easier filtering in admin and queries (bot-scoped configs)
+    bot = models.ForeignKey('bots.Bot', on_delete=models.CASCADE, related_name='backtest_configs', null=True, blank=True)
+    # New: owner-scoped (user-level) configs
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='backtest_configs', null=True, blank=True)
+
     timeframe = models.CharField(
         max_length=10,
         choices=TIMEframe_CHOICES,
@@ -106,11 +112,32 @@ class BacktestConfig(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
-        return f"BacktestConfig {self.label or self.id} for {self.bot_version.bot.name} v{self.bot_version.created_at.strftime('%Y%m%d%H%M%S')} ({self.get_timeframe_display()})"
+        scope = None
+        try:
+            if self.bot_version:
+                scope = f"{self.bot_version.bot.name} v{self.bot_version.created_at.strftime('%Y%m%d%H%M%S')}"
+            elif self.bot:
+                scope = f"bot {self.bot.name}"
+            elif self.owner:
+                scope = f"user {getattr(self.owner, 'username', self.owner_id)}"
+        except Exception:
+            scope = scope or 'unscoped'
+        return f"BacktestConfig {self.label or self.id} ({self.get_timeframe_display()}) [{scope or 'unscoped'}]"
+
+    def clean(self):
+        # Ensure at least one scope is present
+        if not (self.bot_version or self.bot or self.owner):
+            from django.core.exceptions import ValidationError
+            raise ValidationError("BacktestConfig must be linked to a bot_version, a bot, or an owner.")
+        # If version is set but bot not set, keep bot redundant link for convenience
+        if self.bot_version and not self.bot:
+            self.bot = self.bot_version.bot
 
 class BacktestRun(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     config = models.ForeignKey(BacktestConfig, on_delete=models.CASCADE, related_name="runs")
+    # New: concrete BotVersion used for this run (even if config is bot/user scoped)
+    bot_version = models.ForeignKey('bots.BotVersion', on_delete=models.PROTECT, related_name='backtest_runs', null=True, blank=False)
     instrument_symbol = models.CharField(max_length=50, help_text="The trading instrument symbol for this backtest run") # Added field
     data_window_start = models.DateTimeField()
     data_window_end = models.DateTimeField()
@@ -167,6 +194,33 @@ class BacktestIndicatorData(models.Model):
         unique_together = ('backtest_run', 'timestamp', 'indicator_name') # This will be the composite unique index for TimescaleDB
         verbose_name = "Backtest Indicator Data"
         verbose_name_plural = "Backtest Indicator Data"
+
+# --- New: Structured decision trace storage for explainability ---
+class BacktestDecisionTrace(models.Model):
+    id = models.BigAutoField(primary_key=True)
+    backtest_run = models.ForeignKey(BacktestRun, on_delete=models.CASCADE, related_name="decision_traces")
+    ts = models.DateTimeField(db_index=True)
+    bar_index = models.IntegerField(db_index=True)
+    symbol = models.CharField(max_length=50)
+    timeframe = models.CharField(max_length=10)
+    section = models.CharField(max_length=32, null=True, blank=True, help_text="entry|exit|filter|risk|fill|engine")
+    kind = models.CharField(max_length=64, help_text="Atom kind, e.g., condition_eval, filter_result, risk_check, order, fill, state")
+    payload = JSONField(default=dict, help_text="Compact JSON payload of the trace atom")
+    idx = models.IntegerField(null=True, blank=True, help_text="Stable order within the bar if needed")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["backtest_run", "bar_index"]),
+            models.Index(fields=["backtest_run", "ts"]),
+            models.Index(fields=["backtest_run", "section"]),
+        ]
+        verbose_name = "Backtest Decision Trace"
+        verbose_name_plural = "Backtest Decision Traces"
+        ordering = ["backtest_run", "bar_index", "idx", "id"]
+
+    def __str__(self) -> str:
+        return f"Trace run={self.backtest_run_id} bar={self.bar_index} sec={self.section} kind={self.kind}"
 
 class LiveRun(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

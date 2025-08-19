@@ -6,6 +6,7 @@ from decimal import Decimal
 from bots.base import BaseStrategy, make_open_trade, make_close_position, make_reduce_position
 from core.interfaces import IndicatorRequest
 import logging
+from typing import Optional, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,44 @@ class SectionedStrategy(BaseStrategy):
         # Deduplicate any repeated column names
         self.indicator_column_names = list(dict.fromkeys(self.indicator_column_names))
         # --- End Fix ---
+
+        # Tracing controls (opt-in). Frontend/API can toggle later.
+        self._trace_enabled: bool = bool(strategy_params.get('trace_enabled', False))
+        self._trace_callback: Optional[Callable[[Dict[str, Any]], None]] = None
+        self._trace_sampling: int = int(strategy_params.get('trace_sampling', 1) or 1)
+        self._trace_counter: int = 0
+
+    # --- Tracing API ---
+    def set_trace(self, enabled: bool = True, callback: Optional[Callable[[Dict[str, Any]], None]] = None, sampling: int = 1):
+        self._trace_enabled = enabled
+        self._trace_callback = callback
+        self._trace_sampling = max(1, int(sampling or 1))
+
+    def _emit_trace(self, section: str, kind: str, payload: Dict[str, Any], df_current_window: Optional[pd.DataFrame] = None):
+        if not self._trace_enabled or not self._trace_callback:
+            return
+        self._trace_counter += 1
+        if (self._trace_counter % self._trace_sampling) != 0:
+            return
+        ts = None
+        bar_index = None
+        try:
+            if df_current_window is not None and len(df_current_window.index) > 0:
+                ts = pd.Timestamp(df_current_window.index[-1]).to_pydatetime()
+                bar_index = len(df_current_window) - 1
+        except Exception:
+            pass
+        atom = {
+            'section': section,
+            'kind': kind,
+            'ts': ts.isoformat() if ts else None,
+            'bar_index': bar_index,
+            'payload': payload,
+        }
+        try:
+            self._trace_callback(atom)
+        except Exception:
+            logger.debug('Trace callback failed', exc_info=True)
 
     def required_indicators(self) -> List[IndicatorRequest]:
         """
@@ -153,6 +192,13 @@ class SectionedStrategy(BaseStrategy):
         and emits actions. This method is pure and does not perform any fills.
         """
         actions = []
+        # Emit a minimal inputs snapshot (price only) for context
+        try:
+            self._emit_trace('engine', 'inputs', {
+                'close': float(df_current_window.iloc[-1]['close']),
+            }, df_current_window)
+        except Exception:
+            pass
         
         def _create_trade_action(direction: str):
             risk_params = self.spec.risk
@@ -216,30 +262,46 @@ class SectionedStrategy(BaseStrategy):
         # --- Evaluate Entry Conditions ---
         if self.spec.entry_long:
             try:
-                if self._evaluate_condition(self.spec.entry_long, df_current_window):
-                    actions.append(_create_trade_action("BUY"))
+                long_ok = self._evaluate_condition(self.spec.entry_long, df_current_window)
+                self._emit_trace('entry', 'condition_eval', {'side': 'LONG', 'result': bool(long_ok)}, df_current_window)
+                if long_ok:
+                    act = _create_trade_action("BUY")
+                    if act:
+                        actions.append(act)
+                        self._emit_trace('entry', 'order_intent', {'side': 'BUY', 'qty': act.get('qty')}, df_current_window)
             except Exception as e:
                 logger.error(f"Error evaluating long entry condition: {e}", exc_info=True)
 
         if self.spec.entry_short:
             try:
-                if self._evaluate_condition(self.spec.entry_short, df_current_window):
-                    actions.append(_create_trade_action("SELL"))
+                short_ok = self._evaluate_condition(self.spec.entry_short, df_current_window)
+                self._emit_trace('entry', 'condition_eval', {'side': 'SHORT', 'result': bool(short_ok)}, df_current_window)
+                if short_ok:
+                    act = _create_trade_action("SELL")
+                    if act:
+                        actions.append(act)
+                        self._emit_trace('entry', 'order_intent', {'side': 'SELL', 'qty': act.get('qty')}, df_current_window)
             except Exception as e:
                 logger.error(f"Error evaluating short entry condition: {e}", exc_info=True)
 
         # --- Evaluate Exit Conditions ---
         if self.spec.exit_long:
             try:
-                if self._evaluate_condition(self.spec.exit_long, df_current_window):
+                exit_long = self._evaluate_condition(self.spec.exit_long, df_current_window)
+                self._emit_trace('exit', 'condition_eval', {'side': 'LONG', 'result': bool(exit_long)}, df_current_window)
+                if exit_long:
                     actions.append(make_close_position(side="BUY", qty="ALL", tag="Exit Long"))
+                    self._emit_trace('exit', 'order_intent', {'side': 'BUY', 'qty': 'ALL'}, df_current_window)
             except Exception as e:
                 logger.error(f"Error evaluating long exit condition: {e}", exc_info=True)
         
         if self.spec.exit_short:
             try:
-                if self._evaluate_condition(self.spec.exit_short, df_current_window):
+                exit_short = self._evaluate_condition(self.spec.exit_short, df_current_window)
+                self._emit_trace('exit', 'condition_eval', {'side': 'SHORT', 'result': bool(exit_short)}, df_current_window)
+                if exit_short:
                     actions.append(make_close_position(side="SELL", qty="ALL", tag="Exit Short"))
+                    self._emit_trace('exit', 'order_intent', {'side': 'SELL', 'qty': 'ALL'}, df_current_window)
             except Exception as e:
                 logger.error(f"Error evaluating short exit condition: {e}", exc_info=True)
             

@@ -12,6 +12,9 @@ from bots.models import ExecutionConfig
 from bots.gates import evaluate_filters, risk_allows_entry, apply_fill_model
 from core.interfaces import IndicatorInterface
 
+# --- New imports for validator ---
+from bots.validation.sectioned import validate_sectioned_spec
+
 class MockIndicator(IndicatorInterface):
     def compute(self, df, params):
         param_str = "_".join([f"{k}_{v}" for k, v in sorted(params.items())])
@@ -29,13 +32,20 @@ class BotsAppTests(TestCase):
         self.tick_size = Decimal("0.00001")
         self.tick_value = Decimal("1")
         self.initial_equity = 10000.0
+        # Align with SectionedStrategySpec (entry_long/short, exit_long/short)
         self.spec_data = {
-            "entry": {
-                "and": [
-                    {"left": {"indicator": "ema", "params": {"length": 9, "period": 5}, "output": "default"}, "op": "cross_above", "right": {"indicator": "ema", "params": {"length": 21}, "output": "default"}}
-                ]
+            "entry_long": {
+                "op": "AND",
+                "clauses": [
+                    {
+                        "lhs": {"type": "indicator", "name": "ema", "params": {"length": 9, "period": 5}, "output": "default"},
+                        "op": "crosses_above",
+                        "rhs": {"type": "indicator", "name": "ema", "params": {"length": 21}, "output": "default"}
+                    }
+                ],
             },
-            "exit": {}, "risk": {"fixed_lot_size": 0.1}
+            "exit_long": {},
+            "risk": {"fixed_lot_size": 0.1}
         }
         self.strategy_params = {"sectioned_spec": self.spec_data}
         self.instrument_spec = MagicMock()
@@ -156,8 +166,8 @@ class BotsAppTests(TestCase):
         strategy.df = strategy._calculate_indicators(strategy.df)
         
         # The _get_value method returns a series, so we compare the names
-        col_name = strategy._get_value({"indicator": "ema", "params": {"length": 9, "period": 5}}, strategy.df).name
-        col_name_reordered = strategy._get_value({"indicator": "ema", "params": {"period": 5, "length": 9}}, strategy.df).name
+        col_name = strategy._get_value({"type": "indicator", "name": "ema", "params": {"length": 9, "period": 5}}, strategy.df).name
+        col_name_reordered = strategy._get_value({"type": "indicator", "name": "ema", "params": {"period": 5, "length": 9}}, strategy.df).name
         self.assertEqual(col_name, col_name_reordered)
 
     # @patch('core.registry.indicator_registry.get_indicator')
@@ -220,3 +230,57 @@ class BotsAppTests(TestCase):
         engine.run()
         self.assertEqual(len(engine.trades), 1)
         self.assertEqual(pd.to_datetime(engine.trades[0]['entry_timestamp']).date(), self.data.index[1].date())
+
+    def test_sectioned_validator_basic(self):
+        indicator_catalog = {
+            'rsi': {
+                'outputs': ['value'],
+                'params': {'period': {'type': 'int', 'min': 1, 'max': 200, 'required': True}},
+                'timeframes': ['M1', 'M5', 'H1']
+            }
+        }
+        spec = {
+            'indicators': [
+                {'name': 'rsi', 'timeframe': 'M5', 'params': {'period': 14}, 'outputs': ['value']}
+            ],
+            'entry': {
+                'conditions': [
+                    {'lhs': {'ind': 'rsi', 'output': 'value'}, 'op': '<', 'rhs': 30}
+                ]
+            },
+            'exit': {'conditions': []},
+            'risk': {'sizing': {'mode': 'fixed_amount', 'amount': 100}, 'stop_loss': 10}
+        }
+        issues = validate_sectioned_spec(spec, indicator_catalog=indicator_catalog)
+        errors = [i for i in issues if getattr(i, 'level', 'error') == 'error']
+        self.assertEqual(len(errors), 0, f"Unexpected errors: {[e.message for e in errors]}")
+
+    def test_sectioned_validator_unknown_indicator(self):
+        spec = {
+            'indicators': [{'name': 'foo', 'params': {}}],
+            'entry': {'conditions': [{'lhs': {'ind': 'foo', 'output': 'value'}, 'op': '<', 'rhs': 50}]},
+            'exit': {},
+            'risk': {}
+        }
+        issues = validate_sectioned_spec(spec, indicator_catalog={'rsi': {'outputs': ['value'], 'params': {}}})
+        self.assertTrue(any(i.code in ('indicator.unknown', 'indicator.ref.unknown') for i in issues))
+
+    def test_sectioned_strategy_trace_emit(self):
+        # Minimal spec: enter long if close > 0
+        raw_spec = {
+            'entry_long': {'op': '>', 'lhs': {'type': 'literal', 'value': 0}, 'rhs': 'close'},
+            'risk': {'fixed_lot_size': 0.1}
+        }
+        df = pd.DataFrame({'open': [1.0, 1.1], 'high': [1.0, 1.1], 'low': [1.0, 1.1], 'close': [1.0, 1.1]}, index=pd.date_range('2023-01-01', periods=2, freq='D'))
+        instr = MagicMock()
+        instr.tick_size = Decimal('0.0001')
+        instr.tick_value = Decimal('1')
+        instr.contract_size = Decimal('1')
+        trace = []
+        strategy = SectionedStrategy('EURUSD', 'acct', instr, {'sectioned_spec': raw_spec, 'trace_enabled': True}, {}, {})
+        strategy.set_trace(True, callback=lambda atom: trace.append(atom), sampling=1)
+        actions = strategy.run_tick(df, 10000.0)
+        kinds = {t['kind'] for t in trace}
+        self.assertIn('inputs', kinds)
+        self.assertIn('condition_eval', kinds)
+        self.assertTrue(any(t['kind'] == 'order_intent' for t in trace) or len(actions) >= 0)

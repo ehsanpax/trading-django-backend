@@ -12,6 +12,12 @@ import numpy as np
 import threading
 import os
 from django.db import close_old_connections
+from trades.helpers import fetch_symbol_info_for_platform as _fetch_symbol_info_for_platform
+from django.conf import settings
+
+# Expose a stable attribute for tests to patch
+def fetch_symbol_info_for_platform(account, symbol: str) -> dict:  # pragma: no cover
+    return _fetch_symbol_info_for_platform(account, symbol)
 
 from .models import LiveRun, BacktestRun, BotVersion, BacktestConfig, BacktestOhlcvData, BacktestIndicatorData
 from accounts.models import Account
@@ -385,14 +391,15 @@ def run_backtest(self, backtest_run_id, strategy_name, strategy_params, indicato
     ohlcv_df = None  # Initialize ohlcv_df to None
     try:
         backtest_run = BacktestRun.objects.select_related(
-            'config__bot_version__bot__account'
+            'config__bot_version__bot__account',
+            'bot_version__bot__account',
         ).get(id=backtest_run_id)
         
         backtest_run.status = 'RUNNING'
         backtest_run.save(update_fields=['status'])
 
         config = backtest_run.config
-        bot_version = config.bot_version
+        bot_version = backtest_run.bot_version or config.bot_version
         bot = bot_version.bot
         
         if not instrument_symbol:
@@ -516,7 +523,12 @@ def run_backtest(self, backtest_run_id, strategy_name, strategy_params, indicato
             tick_value=Decimal(str(instrument_spec_instance.tick_value)),
             initial_equity=initial_equity,
             risk_settings=final_risk_settings, # Use the final merged settings
-            filter_settings=strategy_params.get("filters", {}) # Assuming filters are passed in strategy_params
+            filter_settings=strategy_params.get("filters", {}), # Assuming filters are passed in strategy_params
+            trace_enabled=getattr(settings, "BOTS_TRACE_ENABLED_DEFAULT", False),
+            trace_sampling=getattr(settings, "BOTS_TRACE_SAMPLING", 1),
+            backtest_run=backtest_run,
+            trace_symbol=instrument_symbol,
+            trace_timeframe=config.timeframe,
         )
 
         # Adapt the legacy strategy to the new StrategyInterface, passing the engine instance

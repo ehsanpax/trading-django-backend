@@ -347,3 +347,9 @@ REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"] = {
     **REST_FRAMEWORK.get("DEFAULT_THROTTLE_RATES", {}),
     "strategy_gen": env.str("THROTTLE_RATE_STRATEGY_GEN", default="20/min"),
 }
+
+# --- Bots tracing/explainability feature flags ---
+BOTS_TRACE_ENABLED_DEFAULT = env.bool("BOTS_TRACE_ENABLED_DEFAULT", default=True)
+BOTS_TRACE_MAX_ROWS = env.int("BOTS_TRACE_MAX_ROWS", default=250_000)
+BOTS_TRACE_BATCH_SIZE = env.int("BOTS_TRACE_BATCH_SIZE", default=1000)
+BOTS_TRACE_SAMPLING = env.int("BOTS_TRACE_SAMPLING", default=1)

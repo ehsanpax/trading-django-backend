@@ -22,16 +22,16 @@ class BotVersionAdmin(admin.ModelAdmin):
 
 @admin.register(BacktestConfig)
 class BacktestConfigAdmin(admin.ModelAdmin):
-    list_display = ('label', 'bot_version', 'execution_config', 'created_at')
-    list_filter = ('bot_version__bot__name',)
-    search_fields = ('label', 'bot_version__bot__name')
+    list_display = ('label', 'bot', 'execution_config', 'created_at')
+    list_filter = ('bot__name',)
+    search_fields = ('label', 'bot__name')
     readonly_fields = ('id', 'created_at')
 
 @admin.register(BacktestRun)
 class BacktestRunAdmin(admin.ModelAdmin):
     list_display = ('id', 'config', 'instrument_symbol', 'status', 'data_window_start', 'data_window_end', 'created_at')
-    list_filter = ('status', 'instrument_symbol', 'config__bot_version__bot__name')
-    search_fields = ('id__iexact', 'instrument_symbol', 'config__label', 'config__bot_version__bot__name')
+    list_filter = ('status', 'instrument_symbol', 'config__bot__name')
+    search_fields = ('id__iexact', 'instrument_symbol', 'config__label', 'config__bot__name')
     readonly_fields = ('id', 'created_at', 'equity_curve', 'stats') # equity_curve and stats are results
 
 @admin.register(LiveRun)
