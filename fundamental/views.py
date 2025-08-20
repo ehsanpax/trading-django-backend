@@ -85,7 +85,9 @@ class EconomicCalendarEventListAPIView(APIView):
                 )
                 date_to = datetime.strptime(date_to, "%Y-%m-%d %H:%M:%S")
                 date_to = timezone.make_aware(date_to, timezone.get_current_timezone())
-                queryset = queryset.filter(time__gte=date_from, time__lte=date_to)
+                queryset = queryset.filter(
+                    event_time__gte=date_from, event_time__lte=date_to
+                )
             except ValueError:
                 pass
 
