@@ -57,7 +57,6 @@ class EconomicCalendarAPIView(APIView):
                 logger.error(f"Missing key in item: {e}")
                 continue
 
-
         return Response(
             {"message": "Data processed successfully."}, status=status.HTTP_200_OK
         )
@@ -78,21 +77,24 @@ class EconomicCalendarEventListAPIView(APIView):
         impact = self.request.query_params.get("impact")
         event = self.request.query_params.get("event")
 
-        if date_from:
-            dt_from = parse_datetime(date_from)
-            if dt_from:
-                queryset = queryset.filter(event_time__gte=dt_from)
-        if date_to:
-            dt_to = parse_datetime(date_to)
-            if dt_to:
-                queryset = queryset.filter(event_time__lte=dt_to)
+        if date_from and date_to:
+            try:
+                date_from = datetime.strptime(date_from, "%Y-%m-%d %H:%M:%S")
+                date_from = timezone.make_aware(
+                    date_from, timezone.get_current_timezone()
+                )
+                date_to = datetime.strptime(date_to, "%Y-%m-%d %H:%M:%S")
+                date_to = timezone.make_aware(date_to, timezone.get_current_timezone())
+                queryset = queryset.filter(time__gte=date_from, time__lte=date_to)
+            except ValueError:
+                pass
 
         if currency:
-            currencies = currency.split(',')
+            currencies = currency.split(",")
             queryset = queryset.filter(currency__currency__in=currencies)
 
         if impact:
-            impacts = impact.split(',')
+            impacts = impact.split(",")
             queryset = queryset.filter(impact__in=impacts)
 
         if event:
@@ -115,9 +117,9 @@ class NewsAPIView(APIView):
         if not isinstance(news_data, list):
             return Response(
                 {"detail": "Invalid data format. Expected a list of news."},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
-        
+
         for item in news_data:
             try:
                 # parse time string to aware datetime
@@ -126,14 +128,15 @@ class NewsAPIView(APIView):
                     continue
 
                 try:
-                   
+
                     time_naive = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
-                    event_time = timezone.make_aware(time_naive, timezone.get_current_timezone())
+                    event_time = timezone.make_aware(
+                        time_naive, timezone.get_current_timezone()
+                    )
                 except ValueError:
-                  
+
                     event_time = None
 
-     
                 defaults = {
                     "headline": item.get("Headline"),
                     "time": event_time,
@@ -144,23 +147,18 @@ class NewsAPIView(APIView):
                 if not url:
                     continue
 
-                News.objects.update_or_create(
-                    url=url,
-                    defaults=defaults
-                )
+                News.objects.update_or_create(url=url, defaults=defaults)
 
             except Exception as e:
                 return Response(
                     {"detail": f"Error processing item: {str(e)}"},
-                    status=status.HTTP_400_BAD_REQUEST
+                    status=status.HTTP_400_BAD_REQUEST,
                 )
 
         return Response(
-            {"message": "News data processed successfully."},
-            status=status.HTTP_200_OK
-        )    
-        
-        
+            {"message": "News data processed successfully."}, status=status.HTTP_200_OK
+        )
+
 
 class NewsListAPIView(ListAPIView):
     authentication_classes = [TokenAuthentication]
@@ -168,16 +166,18 @@ class NewsListAPIView(ListAPIView):
     serializer_class = NewsSerializer
 
     def get_queryset(self):
-        queryset = News.objects.all().order_by('-time')
+        queryset = News.objects.all().order_by("-time")
 
-        date_from = self.request.query_params.get('date_from')
-        date_to = self.request.query_params.get('date_to')
-        source = self.request.query_params.get('source')
+        date_from = self.request.query_params.get("date_from")
+        date_to = self.request.query_params.get("date_to")
+        source = self.request.query_params.get("source")
 
         if date_from and date_to:
             try:
                 date_from = datetime.strptime(date_from, "%Y-%m-%d %H:%M:%S")
-                date_from = timezone.make_aware(date_from, timezone.get_current_timezone())
+                date_from = timezone.make_aware(
+                    date_from, timezone.get_current_timezone()
+                )
                 date_to = datetime.strptime(date_to, "%Y-%m-%d %H:%M:%S")
                 date_to = timezone.make_aware(date_to, timezone.get_current_timezone())
                 queryset = queryset.filter(time__gte=date_from, time__lte=date_to)
@@ -187,4 +187,4 @@ class NewsListAPIView(ListAPIView):
         if source:
             queryset = queryset.filter(source__iexact=source)
 
-        return queryset        
+        return queryset
