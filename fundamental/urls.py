@@ -17,4 +17,3 @@ urlpatterns = [
     path('news-list/', NewsListAPIView.as_view(), name='news-list'),
 
 ]
-
