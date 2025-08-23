@@ -5,30 +5,8 @@ from django.db import transaction
 from decimal import Decimal
 from celery import shared_task
 from trading.models import ProfitTarget, Trade, Order # Added Order import
-from accounts.models import Account, MT5Account, CTraderAccount
-from trading_platform.mt5_api_client import MT5APIClient
-from django.conf import settings
-from connectors.ctrader_client import CTraderClient
-
-
-def get_connector(account: Account):
-    """
-    Return an authenticated connector for the given account.
-    """
-    if account.platform == "MT5":
-        mt5_acc = MT5Account.objects.get(account=account)
-        return MT5APIClient(
-            base_url=settings.MT5_API_BASE_URL,
-            account_id=mt5_acc.account_number,
-            password=mt5_acc.encrypted_password,
-            broker_server=mt5_acc.broker_server
-        )
-
-    if account.platform == "cTrader":
-        ct_acc = CTraderAccount.objects.get(account=account)
-        return CTraderClient(ct_acc)
-
-    raise ValueError(f"Unsupported platform: {account.platform}")
+from accounts.models import Account
+from connectors.trading_service import TradingService
 
 
 def hit_target(direction: str, price: dict, target_price: Decimal) -> bool:
@@ -62,8 +40,6 @@ def scan_profit_targets():
 
     pending_targets = ProfitTarget.objects.select_related(
         "trade__account",
-        "trade__account__mt5_account",  # Ensures MT5Account is fetched if platform is MT5
-        "trade__account__ctrader_account" # Ensures CTraderAccount is fetched if platform is CTrader
     ).filter(status="pending", trade__trade_status="open")
 
     if not pending_targets.exists():
@@ -87,23 +63,21 @@ def scan_profit_targets():
         # Assume all targets for this account use the same platform
         account_instance = account_targets[0].trade.account
         log_prefix_account = f"{task_name} (Account: {account_instance.id}, Platform: {account_instance.platform}): "
-        
-        connector = None
-        mt5_session_managed_by_this_loop = False
 
+        ts = None
         try:
-            print(f"{log_prefix_account}Attempting to get connector.")
-            connector = get_connector(account_instance)
-            if not connector:
-                print(f"{log_prefix_account}Failed to get connector. Skipping targets for this account.")
+            print(f"{log_prefix_account}Initializing TradingService.")
+            ts = TradingService(account_instance)
+            if not ts.is_platform_supported():
+                print(f"{log_prefix_account}Platform '{account_instance.platform}' not supported by TradingService. Skipping.")
+                errors_occurred += len(account_targets)
+                continue
+            if not ts:
+                print(f"{log_prefix_account}Failed to init TradingService. Skipping targets for this account.")
                 errors_occurred += len(account_targets)
                 continue
             
-            # If MT5, this task initiated the connection via get_connector, so it should manage its shutdown.
-            if account_instance.platform == "MT5":
-                mt5_session_managed_by_this_loop = True
-            
-            print(f"{log_prefix_account}Connector obtained. Processing {len(account_targets)} targets.")
+            print(f"{log_prefix_account}TradingService ready. Processing {len(account_targets)} targets.")
 
             for pt in account_targets:
                 trade = pt.trade
@@ -113,8 +87,12 @@ def scan_profit_targets():
                     print(f"{log_prefix_trade}Skipping - Trade has no position_id.")
                     continue
 
-                print(f"{log_prefix_trade}Fetching live price...")
-                price_data = connector.get_live_price(trade.instrument)
+                print(f"{log_prefix_trade}Fetching live price via TradingService...")
+                try:
+                    price_data = ts.get_live_price_sync(trade.instrument)
+                except Exception as e_price:
+                    print(f"{log_prefix_trade}Failed to get live price. Skipping. Error: {e_price}")
+                    continue
 
                 if not price_data or ("bid" not in price_data and "ask" not in price_data): # Check for valid price structure
                     print(f"{log_prefix_trade}Failed to get valid live price. Skipping. Price Data: {price_data}")
@@ -133,10 +111,10 @@ def scan_profit_targets():
                         # The MT5Connector.close_trade method uses 'position' parameter with this ticket.
                         print(f"{log_prefix_trade}Attempting to close partial volume: {pt.target_volume} for position {trade.position_id}")
                         platform_actions_attempted = True
-                        close_response = connector.close_trade(
-                            ticket=trade.position_id, 
-                            volume=float(pt.target_volume), 
-                            symbol=trade.instrument
+                        close_response = ts.close_position_sync(
+                            position_id=str(trade.position_id),
+                            volume=float(pt.target_volume),
+                            symbol=trade.instrument,
                         )
 
                         if close_response.get("error"):
@@ -151,19 +129,18 @@ def scan_profit_targets():
                         # If TP1 and SL to Breakeven is configured
                         if pt.rank == 1 and trade.entry_price is not None:
                             print(f"{log_prefix_trade}TP1 hit. Attempting to move SL to breakeven: {trade.entry_price}")
-                            if hasattr(connector, "modify_position_protection"):
-                                sl_response = connector.modify_position_protection(
-                                    position_id=trade.position_id,
+                            try:
+                                sl_response = ts.modify_position_protection_sync(
+                                    position_id=str(trade.position_id),
                                     symbol=trade.instrument,
-                                    stop_loss=float(trade.entry_price)
+                                    stop_loss=float(trade.entry_price),
                                 )
                                 if sl_response.get("error"):
                                     print(f"{log_prefix_trade}Error moving SL to breakeven: {sl_response['error']}")
-                                    # Log error but don't necessarily fail the whole TP hit
                                 else:
                                     print(f"{log_prefix_trade}SL moved to breakeven successfully.")
-                            else:
-                                print(f"{log_prefix_trade}Connector does not support modify_position_protection.")
+                            except Exception as e_sl:
+                                print(f"{log_prefix_trade}SL to breakeven not supported or failed: {e_sl}")
                         
                         # Mark ProfitTarget as hit in DB after successful platform operation
                         with transaction.atomic():
@@ -200,7 +177,12 @@ def scan_profit_targets():
                                     try:
                                         order_for_tp_deal = Order.objects.get(broker_deal_id=tp_deal_id, trade=trade)
                                         order_for_tp_deal.closure_reason = f"TP{pt.rank} hit by automated scan"
-                                        order_for_tp_deal.save(update_fields=['closure_reason'])
+                                        # Structured close tags for analytics
+                                        order_for_tp_deal.close_reason = 'TP_HIT'
+                                        order_for_tp_deal.close_subreason = (
+                                            'EXIT_LONG' if (trade.direction or '').upper() == 'BUY' else 'EXIT_SHORT'
+                                        )
+                                        order_for_tp_deal.save(update_fields=['closure_reason', 'close_reason', 'close_subreason'])
                                         print(f"{log_prefix_trade}Updated closure_reason for Order (DealID: {tp_deal_id}) to 'TP{pt.rank} hit by automated scan'.")
                                     except Order.DoesNotExist:
                                         print(f"{log_prefix_trade}Could not find Order with DealID {tp_deal_id} to update closure_reason.")
@@ -222,7 +204,6 @@ def scan_profit_targets():
             traceback.print_exc()
             errors_occurred += len(account_targets) # Count all targets for this account as errored/skipped
         finally:
-            # No explicit shutdown needed for MT5APIClient as it's stateless HTTP
             pass
 
 
@@ -265,18 +246,16 @@ def reconcile_open_positions():
     task_name = "reconcile_open_positions"
     print(f"CELERY TASK: {task_name} CALLED at {timezone.now()}")
 
-    active_mt5_accounts = MT5Account.objects.filter(account__is_active=True)
-    
-    if not active_mt5_accounts.exists():
-        print(f"{task_name}: No active MT5 accounts found.")
-        return f"{task_name}: No active MT5 accounts."
+    active_accounts = Account.objects.filter(is_active=True)
+    if not active_accounts.exists():
+        print(f"{task_name}: No active accounts found.")
+        return f"{task_name}: No active accounts."
 
     total_synced = 0
     total_errors = 0
 
-    for mt5_account in active_mt5_accounts:
-        account = mt5_account.account
-        log_prefix = f"{task_name} (Account: {account.id}, MT5 Login: {mt5_account.account_number}): "
+    for account in active_accounts:
+        log_prefix = f"{task_name} (Account: {account.id}, Platform: {account.platform}): "
 
         # 1. Query for open trades in the local database first to avoid unnecessary API calls
         local_open_trades = Trade.objects.filter(account=account, trade_status="open")
@@ -288,23 +267,14 @@ def reconcile_open_positions():
         print(f"{log_prefix}Found {local_open_trades.count()} open trade(s) in DB. Checking against platform.")
 
         try:
-            # 2. If local open trades exist, then connect and fetch platform positions
-            connector = MT5APIClient(
-                base_url=settings.MT5_API_BASE_URL,
-                account_id=mt5_account.account_number,
-                password=mt5_account.encrypted_password,
-                broker_server=mt5_account.broker_server,
-                internal_account_id=str(account.id)
-            )
-
-            platform_positions_response = connector.get_all_open_positions_rest()
-            if "error" in platform_positions_response:
-                print(f"{log_prefix}Error fetching open positions from platform: {platform_positions_response['error']}")
-                total_errors += 1
+            # 2. If local open trades exist, then fetch platform positions via TradingService
+            ts = TradingService(account)
+            if not ts.is_platform_supported():
+                print(f"{log_prefix}Platform '{account.platform}' not supported by TradingService. Skipping.")
                 continue
-
-            platform_open_positions = platform_positions_response.get("open_positions", [])
-            platform_position_ids = {str(pos['ticket']) for pos in platform_open_positions if 'ticket' in pos and pos.get('type') != 'pending_order'}
+            # Standardized PositionInfo list
+            platform_positions = ts.get_open_positions_sync()
+            platform_position_ids = {str(p.position_id) for p in platform_positions}
             print(f"{log_prefix}Found {len(platform_position_ids)} open position(s) on platform.")
 
             # 3. Compare and find discrepancies
@@ -327,44 +297,8 @@ def reconcile_open_positions():
                     print(f"{log_prefix}Exception during synchronization for trade {trade_to_sync.id}: {e_sync}")
                     total_errors += 1
 
-            # Check for new trades (from filled pending orders)
-            new_on_platform = platform_position_ids - local_position_ids
-            if new_on_platform:
-                print(f"{log_prefix}Found {len(new_on_platform)} new position(s) on platform: {new_on_platform}")
-                for position_id in new_on_platform:
-                    position_data = next((pos for pos in platform_open_positions if str(pos.get('ticket')) == position_id), None)
-                    if not position_data:
-                        continue
-
-                    try:
-                        instrument = position_data.get('symbol')
-                        volume = Decimal(str(position_data.get('volume')))
-                        direction = "BUY" if position_data.get('type') == 0 else "SELL"
-                        price = Decimal(str(position_data.get('price_open')))
-
-                        # Find a matching pending order
-                        pending_order = Order.objects.filter(
-                            account=account,
-                            instrument=instrument,
-                            volume=volume,
-                            direction=direction,
-                            status='pending'
-                        ).first()
-
-                        if pending_order:
-                            print(f"{log_prefix}Found matching pending order {pending_order.id} for new position {position_id}.")
-                            pending_order.mark_filled(
-                                price=price,
-                                volume=volume,
-                                broker_deal_id=int(position_id)
-                            )
-                            print(f"{log_prefix}Successfully created trade for new position {position_id}.")
-                            total_synced += 1
-                        else:
-                            print(f"{log_prefix}No matching pending order found for new position {position_id}.")
-                    except Exception as e_new_trade:
-                        print(f"{log_prefix}Error processing new position {position_id}: {e_new_trade}")
-                        total_errors += 1
+            # Optional: detect new platform positions not in DB
+            # This path is platform-specific; keeping conservative for now.
 
         except Exception as e_account:
             print(f"{log_prefix}An unexpected error occurred while processing this account: {e_account}")
@@ -386,12 +320,11 @@ def synchronize_account_trades(account_id: int):
 
     try:
         account = Account.objects.get(id=account_id)
-        mt5_account = MT5Account.objects.get(account=account)
-    except (Account.DoesNotExist, MT5Account.DoesNotExist):
-        print(f"{task_name}: Account or MT5Account not found for id {account_id}.")
-        return f"{task_name}: Account or MT5Account not found."
+    except Account.DoesNotExist:
+        print(f"{task_name}: Account not found for id {account_id}.")
+        return f"{task_name}: Account not found."
 
-    log_prefix = f"{task_name} (Account: {account.id}, MT5 Login: {mt5_account.account_number}): "
+    log_prefix = f"{task_name} (Account: {account.id}, Platform: {account.platform}): "
     total_synced = 0
     total_errors = 0
 
@@ -404,21 +337,9 @@ def synchronize_account_trades(account_id: int):
     print(f"{log_prefix}Found {local_open_trades.count()} open trade(s) in DB. Checking against platform.")
 
     try:
-        connector = MT5APIClient(
-            base_url=settings.MT5_API_BASE_URL,
-            account_id=mt5_account.account_number,
-            password=mt5_account.encrypted_password,
-            broker_server=mt5_account.broker_server,
-            internal_account_id=str(account.id)
-        )
-
-        platform_positions_response = connector.get_all_open_positions_rest()
-        if "error" in platform_positions_response:
-            print(f"{log_prefix}Error fetching open positions from platform: {platform_positions_response['error']}")
-            return f"{task_name}: Error fetching positions."
-
-        platform_open_positions = platform_positions_response.get("open_positions", [])
-        platform_position_ids = {str(pos['ticket']) for pos in platform_open_positions if 'ticket' in pos and pos.get('type') != 'pending_order'}
+        ts = TradingService(account)
+        platform_positions = ts.get_open_positions_sync()
+        platform_position_ids = {str(p.position_id) for p in platform_positions}
         print(f"{log_prefix}Found {len(platform_position_ids)} open position(s) on platform.")
 
         local_position_ids = {str(trade.position_id) for trade in local_open_trades if trade.position_id}

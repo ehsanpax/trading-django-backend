@@ -7,12 +7,15 @@ Status: Draft
 ## Executive Summary
 Build a containerized FastAPI microservice that integrates with cTrader Open API (ProtoBuf/TLS), plus a Python backend client, both mirroring the behavior of the existing MT5 service/client. Use microservices for live trading connectors; keep backtests offline with a simulated broker for determinism and safety.
 
+- Update: Microservice now publishes normalized snapshots to RabbitMQ on connect: account_info, open_positions, pending_orders.
+
 ## Goals
 - Parity with `MT5-fastapi-integrated`: REST/WS interface, resilience, and caching.
 - Support DEMO and LIVE environments via OAuth2 (cTrader ID) with secure token storage and refresh.
 - One runtime session per `account_id`, with reconnect/re-auth and re-subscribe.
 - WebSocket fan-out for price, candles, account info, open positions, and closed trades.
 - Drop-in Python client (similar to `MT5APIClient`).
+- RabbitMQ fan-out between microservice and backend (parity with MT5 backend transport).
 
 ## Non-Goals
 - Backtesting through the live service (keep backtests in-process with a simulated broker).
@@ -44,7 +47,7 @@ Build a containerized FastAPI microservice that integrates with cTrader Open API
 - Security/observability
   - Never log tokens or PII; redact sensitive fields. Cache TTL for onboarding state = 15 minutes.
   - Return precise errors for OpenAPI failures including `{errorCode, description}`; use 5xx for upstream failures, 4xx for client/state issues.
-  - Frontend must use Django proxy endpoints; do not expose the microservice publicly.
+  - Frontend must use Django proxy endpoints and Django Channels; do not expose the microservice publicly. WebSocket endpoints are internal-only (backend <-> microservice).
 
 ---
 
@@ -84,7 +87,8 @@ To enable adding cTrader FIX later without rework, we will keep the transport la
 - INTERNAL_SHARED_SECRET (for internal token endpoints)
 - FRONTEND_ORIGIN (exact origin for OAuth postMessage and CORS, e.g. http://localhost:8000)
 - Django setting: CTRADER_API_BASE_URL (points to FastAPI base, e.g. http://localhost:7999)
-- RABBITMQ_URL (optional)
+- RABBITMQ_URL (enabled; primary transport between microservice and backend fan-out)
+- AMQP_EVENTS_EXCHANGE (optional, default: `mt5.events`)
 - FIX configuration (future)
   - FIX_HOST, FIX_PORT, FIX_SENDER_COMP_ID, FIX_TARGET_COMP_ID
   - FIX_TLS_ENABLED=true|false, FIX_CA_BUNDLE
@@ -98,6 +102,20 @@ To enable adding cTrader FIX later without rework, we will keep the transport la
 - Internal tokens endpoint: `PUT/GET /api/accounts/internal/brokers/ctrader/{id}/tokens` with header `X-Internal-Secret`.
   - Note: `{id}` may be the numeric CTraderAccount.id or the internal Account UUID. The backend resolves either form.
 - Persist: `{access_token, refresh_token, token_expires_at, ctid_user_id, ctid_trader_account_id, environment}`.
+- Backend transport (fan-out): microservice publishes to RabbitMQ topics; Django subscribes and fans out to Channels.
+  - Topics (implemented):
+    - `account.{account_id}.account_info` — envelope type: `account_info`
+    - `account.{account_id}.open_positions` — envelope type: `open_positions`
+    - `account.{account_id}.pending_orders` — envelope type: `pending_orders`
+    - `price.{account_id}.{symbol}` (planned)
+
+### Event payloads (normalized)
+- account_info
+  - `{ account_id, source: 'ctrader', balance, equity, margin, free_margin, currency, leverage, raw }`
+- open_positions
+  - `{ account_id, source: 'ctrader', positions: [{ id, symbol, volume, side, open_price, stop_loss, take_profit, commission, swap, profit, raw }...] }`
+- pending_orders
+  - `{ account_id, source: 'ctrader', pending_orders: [{ id, symbol, volume, side, type, price, stop_loss, take_profit, state, raw }...] }`
 
 ### Django proxy endpoints (now implemented)
 These backend routes proxy to the FastAPI microservice, so the frontend never calls the microservice directly.
@@ -154,11 +172,11 @@ REST (prefix: `/ctrader`)
   - POST `/ctrader/deals/history` → deals by time range
   - POST `/ctrader/deals/sync_data` → aggregated sync for a position (MT5 parity)
 
-WebSocket `/ws/{account_id}/{client_id}`
+WebSocket (internal) `/ws/{account_id}/{client_id}`
 - Inbound control
   - `subscribe_price` / `unsubscribe_price` {symbol}
   - `subscribe_candles` / `unsubscribe_candles` {symbol, timeframe}
-- Outbound messages
+- Outbound messages (published to RabbitMQ; Django fans out to frontend via Channels)
   - `account_info` {data}
   - `open_positions` {data}
   - `closed_position` {data}
@@ -168,10 +186,11 @@ WebSocket `/ws/{account_id}/{client_id}`
 ---
 
 ## Architecture Overview
-- FastAPI app with modules: connector (ProtoOA), session manager, websocket manager, onboarding (OAuth), messaging (RabbitMQ optional).
+- FastAPI app with modules: connector (ProtoOA), session manager, websocket manager, onboarding (OAuth), messaging (RabbitMQ enabled).
 - One connector per `account_id` (long-lived session); registry of active subscriptions.
+- Microservice publishes to RabbitMQ; Django subscribes and fans out to Channels (same pattern as MT5).
 - Containerized (Docker); healthchecks, metrics, structured logs; configurable via `.env`.
-- Python backend client mirrors MT5 client (WS + REST; listeners, caches, reconnection).
+- Python backend client mirrors MT5 client (WS + REST; listeners, caches, reconnection) and/or RabbitMQ consumers.
 
 ---
 
@@ -186,7 +205,7 @@ ctrader-fastapi-integrated/
     auth.py               # OAuth2 onboarding, token refresh
     models.py             # Pydantic request/response models
     messaging/
-      publisher.py        # optional RabbitMQ publishers
+      publisher.py        # RabbitMQ publishers
       pollers.py          # optional polling orchestration
     proto/                # generated ProtoOA stubs (pinned)
   tests/
@@ -228,6 +247,7 @@ Exit Criteria:
 Progress notes:
 - Implemented token exchange against `https://openapi.ctrader.com/apps/token` (GET with params).
 - Replaced earlier TCP attempt with proper WebSocket to `wss://{demo|live}.ctraderapi.com:5036` for JSON channel.
+- Token refresh-on-connect implemented in Connect endpoint; background refresh daemon and retry-on-401 pending.
 - Error handling surfaces `ProtoOAErrorRes` details; onboarding cache uses 15-minute TTL.
 
 Deliverables:
@@ -326,13 +346,17 @@ Exit Criteria:
 ### Phase 6 — Positions, Orders, Trading Events
 - [ ] Snapshot endpoints: `/ctrader/positions/open`, `/details`, `/by_order`
 - [ ] Subscribe trading events; cache positions/orders; WS `open_positions`, `closed_position`
-- [ ] Normalize JSON to MT5 parity (types/fields)
+- [x] Normalize JSON to MT5 parity (types/fields); include pending orders in stream — initial snapshots on connect
+- [ ] Equity strategy: prefer SubscribeSpots for held symbols (+ conversion chain) and compute PnL locally; fallback to `ProtoOAGetPositionUnrealizedPnLReq` every 2–3s
+- [x] Publish normalized payloads to RabbitMQ topics (`account.{account_id}.*`) — snapshots on connect
 
 Deliverables:
-- Deterministic open_positions response
+- Deterministic open_positions response; live updates without polling
 
 Exit Criteria:
 - Downstream consumers work unchanged
+
+Note: Phase 6 is being prioritized ahead of Phases 3–5 to deliver live account/positions streaming first.
 
 ---
 
@@ -390,7 +414,7 @@ Exit Criteria:
 ---
 
 ### Phase 11 — Python Backend Client (`ctrader_api_client.py`)
-- [ ] WS manage_connection with auto-reconnect & re-subscribe
+- [ ] WS manage_connection with auto-reconnect & re-subscribe (internal WS) or RabbitMQ consumer
 - [ ] Listener registries (price/candles/account/positions/closed)
 - [ ] Caches: last_account_info, last_open_positions, last_prices
 - [ ] REST wrappers: connect, account, price, symbol, candles, positions, trade ops, deals
@@ -445,3 +469,5 @@ Exit Criteria:
 - 2025-08-19: Added FIX-ready architecture, environment placeholders, and abstraction tasks
 - 2025-08-19: Documented Django proxy endpoints and FRONTEND_ORIGIN env; added operational steps
 - 2025-08-19: Wired Django proxies for connect/close/instance delete and documented them
+- 2025-08-19: Clarified internal-only WS (frontend via Django), enabled RabbitMQ fan-out between microservice and backend, documented equity strategy (SubscribeSpots + conversion chain, fallback UnrealizedPnL @2–3s), noted token refresh-on-connect, and reprioritized Phase 6 ahead of Phases 3–5
+- 2025-08-19: Implemented RabbitMQ publishing in the microservice (aio-pika). On connect, service publishes `account_info`, `open_positions`, and `pending_orders` snapshots to `account.{account_id}.*`. Added startup/shutdown hooks and env `AMQP_EVENTS_EXCHANGE` (default `mt5.events`).

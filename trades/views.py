@@ -20,6 +20,7 @@ from accounts.views import FetchAccountDetailsView
 
 # DRF permissions
 from rest_framework.permissions import IsAuthenticated, IsAdminUser  # Added IsAdminUser
+from rest_framework.decorators import action  # Added missing import for action
 from .helpers import fetch_symbol_info_for_platform, fetch_live_price_for_platform
 
 # Import risk management functions (assumed refactored for Django)
@@ -58,7 +59,8 @@ from rest_framework.generics import GenericAPIView
 
 # from .services import update_trade_stop_loss_globally # This is now part of grouped imports
 from rest_framework.exceptions import APIException, PermissionDenied, ValidationError
-from rest_framework.decorators import action  # For custom actions
+# New: TradingService for platform-agnostic symbol info
+from connectors.trading_service import TradingService
 
 # ----- Trade / Order Execution --------------------------------------------
 
@@ -172,7 +174,14 @@ class CloseTradeView(APIView):
 
         client_reason = (request.data or {}).get("close_reason")
         client_subreason = (request.data or {}).get("close_subreason")
-        result = close_trade_globally(request.user, valid_trade_id, client_close_reason=client_reason, client_close_subreason=client_subreason)
+        try:
+            result = close_trade_globally(request.user, valid_trade_id, client_close_reason=client_reason, client_close_subreason=client_subreason)
+        except Exception as e:
+            # Surface broker/validation errors as 400 for client clarity
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        # If the helper returned an error key, convert to 400
+        if isinstance(result, dict) and result.get("error"):
+            return Response(result, status=status.HTTP_400_BAD_REQUEST)
         return Response(result, status=status.HTTP_200_OK)
 
 
@@ -184,12 +193,15 @@ class TradeSymbolInfoView(APIView):
         # 1️⃣ Ensure the account belongs to the user
         account = get_object_or_404(Account, id=account_id, user=request.user)
 
-        # 2️⃣ Call the helper
-        symbol_info = fetch_symbol_info_for_platform(account, symbol)
-        if "error" in symbol_info:
-            return Response(
-                {"detail": symbol_info["error"]}, status=status.HTTP_400_BAD_REQUEST
-            )
+        # 2️⃣ Fetch via TradingService to keep callers platform-agnostic
+        ts = TradingService(account)
+        try:
+            symbol_info = ts.get_symbol_info_sync(symbol)
+        except Exception as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        if isinstance(symbol_info, dict) and symbol_info.get("error"):
+            return Response({"detail": symbol_info["error"]}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response(symbol_info, status=status.HTTP_200_OK)
 
@@ -226,166 +238,116 @@ class OpenPositionsLiveView(APIView):
         account = get_object_or_404(Account, id=account_id, user=request.user)
 
         if account.platform == "MT5":
+            # Use TradingService sync snapshot only
             try:
-                mt5_account = account.mt5_account
-            except MT5Account.DoesNotExist:
-                return Response(
-                    {"error": "No linked MT5 account found."},
-                    status=status.HTTP_404_NOT_FOUND,
-                )
+                from connectors.trading_service import TradingService
+                ts = TradingService(account)
+                acc = ts.get_account_info_sync()
+                positions = ts.get_open_positions_sync()
+                logger.info("trades.open_positions path=ts mode=sync account_id=%s", account_id)
+                # Map standardized PositionInfo to dict expected by existing response shape
+                live_positions = []
+                for p in positions or []:
+                    try:
+                        live_positions.append({
+                            "ticket": getattr(p, "position_id", None),
+                            "symbol": getattr(p, "symbol", None),
+                            "direction": getattr(p, "direction", None),
+                            "volume": getattr(p, "volume", None),
+                            "price_open": getattr(p, "open_price", None),
+                            "price_current": getattr(p, "current_price", None),
+                            "stop_loss": getattr(p, "stop_loss", None),
+                            "profit_target": getattr(p, "take_profit", None),
+                            "profit": getattr(p, "profit", None),
+                            "swap": getattr(p, "swap", None),
+                            "commission": getattr(p, "commission", None),
+                        })
+                    except Exception:
+                        pass
+            except Exception:
+                logger.exception("TradingService snapshot failed for open positions on account %s.", account_id)
+                return Response({"error": "Open positions unavailable via TradingService."}, status=status.HTTP_502_BAD_GATEWAY)
 
-            # Use the async_to_sync wrapper for the service call
-            client_data = get_account_details(account_id, request.user)
-
-            if "error" in client_data:
-                return Response(
-                    {"error": client_data["error"]}, status=status.HTTP_400_BAD_REQUEST
-                )
-
-            # Fetch DB trades synchronously
+            # Merge with DB like before
             db_trades = Trade.objects.filter(account=account, trade_status="open")
-            db_trades_dict = {
-                trade.position_id: trade for trade in db_trades if trade.position_id
-            }
-
-            live_positions = client_data.get("open_positions", [])
+            db_trades_dict = {trade.position_id: trade for trade in db_trades if trade.position_id}
 
             final_positions = []
             for pos in live_positions:
                 if not isinstance(pos, dict):
-                    continue  # Skip if pos is not a dictionary
+                    continue
                 ticket = pos.get("ticket")
                 db_trade = db_trades_dict.get(ticket)
-
                 if db_trade:
-                    # Merge: Start with serialized DB trade, then update with live data
                     trade_data = TradeSerializer(db_trade).data
-                    trade_data.update(
-                        {
-                            "profit": pos.get(
-                                "profit"
-                            ),  # Ensure the 'profit' key is present for the serializer's source
-                            "swap": pos.get("swap"),
-                            "stop_loss": pos.get("sl"),
-                            "profit_target": pos.get("tp"),
-                            "source": "platform_synced_with_db",
-                        }
-                    )
+                    trade_data.update({
+                        "profit": pos.get("profit"),
+                        "swap": pos.get("swap"),
+                        "stop_loss": pos.get("stop_loss") or pos.get("sl"),
+                        "profit_target": pos.get("profit_target") or pos.get("tp"),
+                        "source": "platform_synced_with_db",
+                    })
                     final_positions.append(trade_data)
                 else:
-                    # Platform-only trade
                     pos["source"] = "platform_only"
                     final_positions.append(pos)
 
-            return Response(
-                {"db_trades": [], "open_positions": final_positions},
-                status=status.HTTP_200_OK,
-            )
+            return Response({"db_trades": [], "open_positions": final_positions}, status=status.HTTP_200_OK)
 
         elif account.platform == "cTrader":
-            # Initialize with DB trades
+            # Use TradingService snapshot for cTrader as well to ensure lots-based volumes
+            try:
+                from connectors.trading_service import TradingService
+                ts = TradingService(account)
+                positions = ts.get_open_positions_sync()
+                logger.info("trades.open_positions path=ts mode=sync platform=cTrader account_id=%s", account_id)
+                live_positions = []
+                for p in positions or []:
+                    try:
+                        live_positions.append({
+                            "ticket": getattr(p, "position_id", None),
+                            "symbol": getattr(p, "symbol", None),
+                            "direction": getattr(p, "direction", None),
+                            "volume": getattr(p, "volume", None),  # already in lots
+                            "price_open": getattr(p, "open_price", None),
+                            "price_current": getattr(p, "current_price", None),
+                            "stop_loss": getattr(p, "stop_loss", None),
+                            "profit_target": getattr(p, "take_profit", None),
+                            "profit": getattr(p, "profit", None),
+                            "swap": getattr(p, "swap", None),
+                            "commission": getattr(p, "commission", None),
+                        })
+                    except Exception:
+                        pass
+            except Exception:
+                logger.exception("TradingService snapshot failed for open positions on account %s.", account_id)
+                return Response({"error": "Open positions unavailable via TradingService."}, status=status.HTTP_502_BAD_GATEWAY)
+
+            # Merge with DB like MT5 path
             db_trades = Trade.objects.filter(account=account, trade_status="open")
-            serialized_db_trades = TradeSerializer(db_trades, many=True).data
-            final_open_positions = []
-            db_trade_order_ids = set()
-            for trade_data in serialized_db_trades:
-                trade_data["source"] = "database"
-                trade_data.pop("reason", None)
-                if trade_data.get("order_id") is not None:
-                    db_trade_order_ids.add(trade_data["order_id"])
-                final_open_positions.append(trade_data)
+            db_trades_dict = {trade.position_id: trade for trade in db_trades if trade.position_id}
 
-            try:
-                ctrader_account = CTraderAccount.objects.get(account=account)
-            except CTraderAccount.DoesNotExist:
-                return Response(
-                    {"open_positions": final_open_positions}, status=status.HTTP_200_OK
-                )
+            final_positions = []
+            for pos in live_positions:
+                if not isinstance(pos, dict):
+                    continue
+                ticket = pos.get("ticket")
+                db_trade = db_trades_dict.get(ticket)
+                if db_trade:
+                    trade_data = TradeSerializer(db_trade).data
+                    trade_data.update({
+                        "profit": pos.get("profit"),
+                        "swap": pos.get("swap"),
+                        "stop_loss": pos.get("stop_loss") or pos.get("sl"),
+                        "profit_target": pos.get("profit_target") or pos.get("tp"),
+                        "source": "platform_synced_with_db",
+                    })
+                    final_positions.append(trade_data)
+                else:
+                    pos["source"] = "platform_only"
+                    final_positions.append(pos)
 
-            payload = {
-                "access_token": ctrader_account.access_token,
-                "ctid_trader_account_id": ctrader_account.ctid_trader_account_id,
-            }
-            base_url = settings.CTRADER_API_BASE_URL
-            positions_url = f"{base_url}/ctrader/positions"
-
-            try:
-                pos_resp = requests.post(positions_url, json=payload, timeout=10)
-                pos_resp.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
-                pos_data_response = pos_resp.json()
-                if "error" in pos_data_response:
-                    logger.error(
-                        f"cTrader positions endpoint error for account {account_id}: {pos_data_response['error']}"
-                    )
-                    return Response(
-                        {"open_positions": final_open_positions},
-                        status=status.HTTP_200_OK,
-                    )
-                platform_positions_raw = pos_data_response.get("positions", [])
-            except requests.RequestException as e:
-                logger.error(
-                    f"Error calling cTrader positions endpoint for account {account_id}: {str(e)}"
-                )
-                return Response(
-                    {"open_positions": final_open_positions}, status=status.HTTP_200_OK
-                )
-
-            # Process cTrader positions
-            for pos in platform_positions_raw:
-                try:
-                    ticket = int(pos.get("positionId"))
-                except (ValueError, TypeError):
-                    ticket = None
-
-                if ticket is not None and ticket not in db_trade_order_ids:
-                    trade_data_ctrader = pos.get("tradeData", {})
-                    try:
-                        volume = float(trade_data_ctrader.get("volume", "0")) / 100
-                    except (ValueError, TypeError):
-                        volume = 0.0
-                    direction = trade_data_ctrader.get("tradeSide", "").upper()
-                    try:
-                        price_open = float(pos.get("price_open", pos.get("price", 0)))
-                    except (ValueError, TypeError):
-                        price_open = 0.0
-                    try:
-                        profit = float(pos.get("unrealized_pnl", 0))
-                    except (ValueError, TypeError):
-                        profit = 0.0
-                    timestamp_raw = trade_data_ctrader.get("openTimestamp") or pos.get(
-                        "utcLastUpdateTimestamp"
-                    )
-                    try:
-                        time_val = int(float(timestamp_raw) / 1000)
-                    except (ValueError, TypeError):
-                        time_val = 0
-                    symbol_str = pos.get("symbol")
-                    if not symbol_str:
-                        symbol_id = trade_data_ctrader.get("symbolId")
-                        symbol_str = f"Unknown-{symbol_id}" if symbol_id else "Unknown"
-
-                    pos_data = {
-                        "trade_id": None,
-                        "order_id": ticket,
-                        "ticket": ticket,
-                        "symbol": symbol_str,
-                        "volume": volume,
-                        "price_open": price_open,
-                        "profit": profit,
-                        "time": time_val,
-                        "direction": direction,
-                        "stop_loss": pos.get("stopLoss"),  # Add stop loss from cTrader
-                        "profit_target": pos.get(
-                            "takeProfit"
-                        ),  # Add take profit from cTrader
-                        "swap": pos.get("swap"),  # Assuming cTrader API provides this
-                        "commission": pos.get(
-                            "commission"
-                        ),  # Assuming cTrader API provides this
-                        # Add other relevant fields from cTrader position if needed
-                        "source": "platform_only",
-                    }
-                    final_open_positions.append(pos_data)
+            return Response({"db_trades": [], "open_positions": final_positions}, status=status.HTTP_200_OK)
         else:
             # Unsupported platform, just return DB trades from our database
             db_trades = Trade.objects.filter(account=account, trade_status="open")
@@ -401,226 +363,129 @@ class OpenPositionsLiveView(APIView):
 
 class AllOpenPositionsLiveView(APIView):
     """
-    Retrieves live open positions from the appropriate trading platform.
+    Retrieves live open positions across the user's accounts.
+    Uses TradingService for platform-agnostic access. Falls back to cTrader microservice only when needed.
     """
 
-    authentication_classes = [TokenAuthentication, SessionAuthentication]
     authentication_classes = [TokenAuthentication, SessionAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         user_accounts = Account.objects.filter(user=request.user)
         final_all_open_positions = []
-        db_trade_order_ids = set()
+        db_trade_index = {}
+
+        # Optional account filter: UUID or name
         account_id = self.request.query_params.get("account", None)
         if account_id:
             try:
-                account_id = uuid.UUID(account_id, version=4)
-                user_accounts = user_accounts.filter(id=account_id)
+                acct_uuid = uuid.UUID(account_id, version=4)
+                user_accounts = user_accounts.filter(id=acct_uuid)
             except Exception:
-                user_accounts = user_accounts.filter(name__iexact=str(account_id)) 
+                user_accounts = user_accounts.filter(name__iexact=str(account_id))
 
-        # 1. Fetch all open trades from the database for the user
+        # 1) Seed with DB trades
         db_trades = Trade.objects.filter(account__in=user_accounts, trade_status="open")
-        from .serializers import TradeSerializer  # Ensure TradeSerializer is imported
-
+        from .serializers import TradeSerializer
         serialized_db_trades = TradeSerializer(db_trades, many=True).data
-
-        for trade_data in serialized_db_trades:
+        for i, trade_data in enumerate(serialized_db_trades):
             trade_data["source"] = "database"
-            trade_data.pop("reason", None)  # Remove 'reason' field if it exists
-            if trade_data.get("order_id") is not None:
-                db_trade_order_ids.add(trade_data["order_id"])
+            trade_data.pop("reason", None)
             final_all_open_positions.append(trade_data)
+            key = (trade_data.get("account"), trade_data.get("order_id"))
+            if key[0] and key[1] is not None:
+                db_trade_index[key] = i
 
-        # 2. Fetch live positions from platforms for each account
+        # 2) Merge platform snapshots per account
         for account in user_accounts:
-            platform_positions_raw = []
-            if account.platform == "MT5":
-                try:
-                    mt5_account = account.mt5_account
-                except MT5Account.DoesNotExist:
-                    continue  # Skip to next account
+            positions = None
+            try:
+                from connectors.trading_service import TradingService
+                ts = TradingService(account)
+                positions = ts.get_open_positions_sync()
+                logger.info("trades.all_open_positions path=ts mode=sync account_id=%s", account.id)
+            except Exception:
+                logger.exception("TradingService positions snapshot failed for account %s", account.id)
 
-                client = MT5APIClient(
-                    base_url=settings.MT5_API_BASE_URL,
-                    account_id=mt5_account.account_number,
-                    password=mt5_account.encrypted_password,
-                    broker_server=mt5_account.broker_server,
-                    internal_account_id=str(account.id),
-                )
-
-                mt5_positions_result = client.get_open_positions()
-                if "error" in mt5_positions_result:
-                    logger.error(
-                        f"MT5 get_open_positions error for account {account.id}: {mt5_positions_result['error']}"
-                    )
-                    continue
-
-                platform_positions_raw = mt5_positions_result.get("open_positions", [])
-
-                # Create a dictionary of DB trades by their order_id for quick lookup
-                # This is done outside the loop for efficiency if processing multiple accounts,
-                # but for clarity, we can re-filter or assume db_trades_dict is pre-populated
-                # with all user's trades if this view aggregates all accounts.
-                # For this specific view (AllOpenPositionsLiveView), db_trades_dict is built from all user's trades.
-
-                db_trades_user_dict = {
-                    t_data["order_id"]: t_data
-                    for t_data in serialized_db_trades
-                    if t_data.get("order_id") is not None
-                    and t_data.get("account") == str(account.id)
-                }
-
-                for mt5_pos_live in platform_positions_raw:  # Renamed
-                    ticket = mt5_pos_live.get("ticket")
-
-                    live_pos_data = {
-                        "ticket": ticket,
-                        "symbol": mt5_pos_live.get("symbol"),
-                        "volume": mt5_pos_live.get("volume"),
-                        "price_open": mt5_pos_live.get("price_open"),
-                        "current_pl": mt5_pos_live.get("profit"),
-                        "swap": mt5_pos_live.get("swap"),
-                        "commission": mt5_pos_live.get("commission"),
-                        "stop_loss": mt5_pos_live.get("sl"),
-                        "profit_target": mt5_pos_live.get("tp"),
-                        "time": mt5_pos_live.get("time"),
-                        "direction": (
-                            "BUY" if mt5_pos_live.get("direction") == "BUY" else "SELL"
-                        ),
-                        "comment": mt5_pos_live.get("comment"),
-                        "magic": mt5_pos_live.get("magic"),
-                        "account_id": str(account.id),
-                        "source": "platform_live",
-                    }
-
-                    # Check if this live position matches a DB trade already in final_all_open_positions
-                    # and update it, or add as new if it's platform_only.
-
-                    found_and_updated = False
-                    for i, existing_pos in enumerate(final_all_open_positions):
-                        if existing_pos.get("order_id") == ticket and existing_pos.get(
-                            "account"
-                        ) == str(
-                            account.id
-                        ):  # Match by ticket and account
-                            # This DB trade corresponds to the live MT5 position. Update it.
-                            # Start with existing_pos (DB data), then update/override with live_pos_data
-                            merged_data = {**existing_pos, **live_pos_data}
-                            merged_data["trade_id"] = existing_pos.get(
-                                "id"
-                            )  # our internal UUID
-                            merged_data["order_id"] = ticket
-                            merged_data["source"] = "platform_synced_with_db"
-                            merged_data["current_pl"] = mt5_pos_live.get("profit")
-                            merged_data["stop_loss"] = mt5_pos_live.get("sl")
-                            merged_data["profit_target"] = mt5_pos_live.get("tp")
-                            final_all_open_positions[i] = merged_data
-                            found_and_updated = True
-                            break
-
-                    if not found_and_updated:
-                        # This live position was not found in the initial list of DB trades,
-                        # so it's a platform-only position for this account.
-                        live_pos_data["trade_id"] = None
-                        live_pos_data["order_id"] = ticket
-                        live_pos_data["source"] = "platform_only"
-                        final_all_open_positions.append(live_pos_data)
-
-            elif account.platform == "cTrader":
+            # Temporary cTrader fallback
+            if positions is None and (account.platform or "").lower() == "ctrader":
                 try:
                     ctrader_account = CTraderAccount.objects.get(account=account)
                 except CTraderAccount.DoesNotExist:
                     continue
-
                 payload = {
                     "access_token": ctrader_account.access_token,
                     "ctid_trader_account_id": ctrader_account.ctid_trader_account_id,
                 }
                 base_url = settings.CTRADER_API_BASE_URL
-                positions_url = f"{base_url}/ctrader/positions"
-
+                positions_url = f"{base_url.rstrip('/')}/ctrader/positions/open"
                 try:
                     pos_resp = requests.post(positions_url, json=payload, timeout=10)
                     pos_resp.raise_for_status()
                     pos_data_response = pos_resp.json()
                     if "error" in pos_data_response:
                         logger.error(
-                            f"cTrader positions endpoint error for account {account.id}: {pos_data_response['error']}"
+                            "cTrader positions endpoint error for account %s: %s",
+                            account.id,
+                            pos_data_response.get("error"),
                         )
                         continue
-                    platform_positions_raw = pos_data_response.get("positions", [])
-                except requests.RequestException as e:
-                    logger.error(
-                        f"Error calling cTrader positions endpoint for account {account.id}: {str(e)}"
-                    )
-                    continue
-
-                for pos in platform_positions_raw:
-                    try:
-                        ticket = int(pos.get("positionId"))
-                    except (ValueError, TypeError):
-                        ticket = None
-
-                    if ticket is not None and ticket not in db_trade_order_ids:
-                        trade_data_ctrader = pos.get("tradeData", {})
-                        try:
-                            volume = float(trade_data_ctrader.get("volume", "0")) / 100
-                        except (ValueError, TypeError):
-                            volume = 0.0
-                        direction = trade_data_ctrader.get("tradeSide", "").upper()
-                        try:
-                            price_open = float(
-                                pos.get("price_open", pos.get("price", 0))
-                            )
-                        except (ValueError, TypeError):
-                            price_open = 0.0
-                        try:
-                            profit = float(pos.get("unrealized_pnl", 0))
-                        except (ValueError, TypeError):
-                            profit = 0.0
-                        timestamp_raw = trade_data_ctrader.get(
-                            "openTimestamp"
-                        ) or pos.get("utcLastUpdateTimestamp")
-                        try:
-                            time_val = int(float(timestamp_raw) / 1000)
-                        except (ValueError, TypeError):
-                            time_val = 0
-                        symbol_str = pos.get("symbol")
-                        if not symbol_str:
-                            symbol_id = trade_data_ctrader.get("symbolId")
-                            symbol_str = (
-                                f"Unknown-{symbol_id}" if symbol_id else "Unknown"
-                            )
-
-                        pos_data = {
-                            "trade_id": None,
-                            "order_id": ticket,
-                            "ticket": ticket,
-                            "symbol": symbol_str,
-                            "volume": volume,
-                            "price_open": price_open,
-                            "profit": profit,
-                            "time": time_val,
-                            "direction": direction,
-                            "stop_loss": pos.get(
-                                "stopLoss"
-                            ),  # Add stop loss from cTrader
-                            "profit_target": pos.get(
-                                "takeProfit"
-                            ),  # Add take profit from cTrader
+                    # Normalize into lightweight objects with expected attributes
+                    positions = []
+                    for pos in pos_data_response.get("positions", []):
+                        positions.append(type("Pos", (), {
+                            "position_id": pos.get("id") or pos.get("positionId"),
+                            "symbol": pos.get("symbol"),
+                            "direction": pos.get("side"),
+                            "volume": pos.get("volume"),
+                            "open_price": pos.get("open_price"),
+                            "current_price": pos.get("current_price") or pos.get("market_price"),
+                            "stop_loss": pos.get("stop_loss"),
+                            "take_profit": pos.get("take_profit"),
+                            "profit": pos.get("profit"),
                             "swap": pos.get("swap"),
                             "commission": pos.get("commission"),
-                            "account_id": str(account.id),  # Add account_id for context
-                            "source": "platform_only",
-                        }
-                        final_all_open_positions.append(pos_data)
-            # No 'else' needed here as we just skip unsupported platforms for aggregation
+                        })())
+                except requests.RequestException:
+                    logger.exception("Error calling cTrader positions endpoint for account %s", account.id)
+                    continue
 
-        return Response(
-            {"open_positions": final_all_open_positions}, status=status.HTTP_200_OK
-        )
+            if not positions:
+                continue
+
+            for p in positions:
+                ticket = getattr(p, "position_id", None)
+                acct_id_str = str(account.id)
+                key = (acct_id_str, ticket)
+                pos_dict = {
+                    "trade_id": None,
+                    "order_id": ticket,
+                    "ticket": ticket,
+                    "symbol": getattr(p, "symbol", None),
+                    "volume": getattr(p, "volume", None),
+                    "price_open": getattr(p, "open_price", None),
+                    "profit": getattr(p, "profit", None),
+                    "time": 0,
+                    "direction": getattr(p, "direction", None),
+                    "stop_loss": getattr(p, "stop_loss", None),
+                    "profit_target": getattr(p, "take_profit", None),
+                    "swap": getattr(p, "swap", None),
+                    "commission": getattr(p, "commission", None),
+                    "account_id": acct_id_str,
+                    "account": acct_id_str,
+                    "source": "platform_only",
+                }
+
+                if key in db_trade_index:
+                    idx = db_trade_index[key]
+                    merged = {**final_all_open_positions[idx], **pos_dict}
+                    merged["trade_id"] = final_all_open_positions[idx].get("id")
+                    merged["source"] = "platform_synced_with_db"
+                    final_all_open_positions[idx] = merged
+                else:
+                    final_all_open_positions.append(pos_dict)
+
+        return Response({"open_positions": final_all_open_positions}, status=status.HTTP_200_OK)
 
 
 class PendingOrdersView(APIView):
@@ -628,18 +493,12 @@ class PendingOrdersView(APIView):
     GET /trades/pending-orders/{account_id}/
     Returns all pending (limit/stop) orders for the given account from the trading platform.
     """
-
     permission_classes = [IsAuthenticated]
 
     def get(self, request, account_id):
-        # 1️⃣ Verify ownership
         account = get_object_or_404(Account, id=account_id, user=request.user)
-
-        # 2️⃣ Fetch pending orders from the service
         pending_orders_data = get_pending_orders(account)
-        return Response(
-            {"pending_orders": pending_orders_data}, status=status.HTTP_200_OK
-        )
+        return Response({"pending_orders": pending_orders_data}, status=status.HTTP_200_OK)
 
 
 class AllPendingOrdersView(APIView):
@@ -647,21 +506,18 @@ class AllPendingOrdersView(APIView):
     GET /trades/all-pending-orders/
     Returns all pending (limit/stop) orders for all of the user's accounts from the trading platforms.
     """
-
     authentication_classes = [TokenAuthentication, SessionAuthentication]
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         accounts = Account.objects.filter(user=request.user)
         account_id = self.request.query_params.get("account_id", None)
-
         if account_id:
             try:
                 account_id = uuid.UUID(account_id, version=4)
                 accounts = Account.objects.filter(id=account_id, user=request.user)
             except Exception:
                 accounts = Account.objects.filter(name__iexact=str(account_id), user=request.user)
-            
         pending_orders = []
         for account in accounts:
             pending_orders.extend(get_pending_orders(account))
@@ -673,7 +529,6 @@ class CancelPendingOrderView(APIView):
     DELETE /trades/pending-orders/<uuid:order_id>/cancel/
     Cancels a pending order.
     """
-
     authentication_classes = [TokenAuthentication, JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
@@ -699,13 +554,10 @@ class UpdateStopLossAPIView(APIView):
         return Response(result, status=status.HTTP_200_OK)
 
 
-# ----- Partial Close Trade -----
 class PartialCloseTradeView(APIView):
     permission_classes = [IsAuthenticated]
 
-    def post(
-        self, request, trade_id_str: str
-    ):  # Renamed trade_id to trade_id_str for clarity
+    def post(self, request, trade_id_str: str):
         try:
             valid_trade_id = uuid.UUID(trade_id_str)
         except ValueError:
@@ -720,7 +572,6 @@ class PartialCloseTradeView(APIView):
         return Response(result, status=status.HTTP_200_OK)
 
 
-# ----- Watchlist Views -----
 class SynchronizeAccountTradesView(APIView):
     """
     Triggers the synchronization of trades for a specific account.
@@ -731,11 +582,15 @@ class SynchronizeAccountTradesView(APIView):
         try:
             account = Account.objects.get(id=account_id, user=request.user)
         except Account.DoesNotExist:
-            return Response({"error": "Account not found or you do not have permission to access it."}, status=status.HTTP_404_NOT_FOUND)
-
+            return Response(
+                {"error": "Account not found or you do not have permission to access it."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
         synchronize_account_trades.delay(account_id=account.id)
-        
-        return Response({"message": f"Synchronization task for account {account.id} has been queued."}, status=status.HTTP_202_ACCEPTED)
+        return Response(
+            {"message": f"Synchronization task for account {account.id} has been queued."},
+            status=status.HTTP_202_ACCEPTED,
+        )
 
 
 class WatchlistViewSet(viewsets.ModelViewSet):
@@ -745,7 +600,6 @@ class WatchlistViewSet(viewsets.ModelViewSet):
     - Admin users can mark watchlist items as global.
     - The list endpoint returns watchlists for the logged-in user plus global ones.
     """
-
     serializer_class = WatchlistSerializer
     permission_classes = [IsAuthenticated]
 
@@ -755,7 +609,6 @@ class WatchlistViewSet(viewsets.ModelViewSet):
         for the currently authenticated user plus global watchlists.
         """
         user = self.request.user
-        # Q objects are used to create complex queries, here for OR condition
         return Watchlist.objects.filter(Q(user=user) | Q(is_global=True)).distinct()
 
     def perform_create(self, serializer):
@@ -764,11 +617,7 @@ class WatchlistViewSet(viewsets.ModelViewSet):
         The serializer's create method handles setting the user or making it global.
         """
         serializer.save(
-            user=(
-                self.request.user
-                if not serializer.validated_data.get("is_global")
-                else None
-            )
+            user=(self.request.user if not serializer.validated_data.get("is_global") else None)
         )
 
     def get_permissions(self):
@@ -778,12 +627,8 @@ class WatchlistViewSet(viewsets.ModelViewSet):
         Regular users can only modify their own non-global watchlists.
         """
         if self.action in ["update", "partial_update", "destroy"]:
-            # For modifying or deleting, if the item is global, only admin can.
-            # If not global, user must own it.
-            # This check will be more robustly handled by get_object or in perform_destroy/update
-            pass  # Further checks in perform_update/destroy
+            pass
         elif self.action == "create":
-            # Serializer handles permission for creating global items
             pass
         return super().get_permissions()
 
@@ -792,22 +637,12 @@ class WatchlistViewSet(viewsets.ModelViewSet):
         if instance.is_global and not self.request.user.is_staff:
             raise PermissionDenied("Only admins can modify global watchlist items.")
         if not instance.is_global and instance.user != self.request.user:
-            raise PermissionDenied(
-                "You do not have permission to modify this watchlist item."
-            )
+            raise PermissionDenied("You do not have permission to modify this watchlist item.")
 
-        # Check if trying to make an item global
-        is_becoming_global = serializer.validated_data.get(
-            "is_global", instance.is_global
-        )
-        if (
-            is_becoming_global
-            and not instance.is_global
-            and not self.request.user.is_staff
-        ):
+        is_becoming_global = serializer.validated_data.get("is_global", instance.is_global)
+        if is_becoming_global and not instance.is_global and not self.request.user.is_staff:
             raise PermissionDenied("Only admins can make watchlist items global.")
 
-        # If an admin is making it global, user should be set to None
         if is_becoming_global and self.request.user.is_staff:
             serializer.save(user=None)
         else:
@@ -820,46 +655,24 @@ class WatchlistViewSet(viewsets.ModelViewSet):
         if instance.is_global and not self.request.user.is_staff:
             raise PermissionDenied("Only admins can delete global watchlist items.")
         if not instance.is_global and instance.user != self.request.user:
-            # This check is also implicitly handled by get_object for detail views if queryset is filtered by user
-            # However, explicit check here is good for clarity and safety.
-            raise PermissionDenied(
-                "You do not have permission to delete this watchlist item."
-            )
+            raise PermissionDenied("You do not have permission to delete this watchlist item.")
         instance.delete()
 
-    # Potentially a custom action for admin to make an item global if not done via standard update
     @action(detail=True, methods=["post"], permission_classes=[IsAdminUser])
     def make_global(self, request, pk=None):
         watchlist_item = self.get_object()
         if not watchlist_item.is_global:
             watchlist_item.is_global = True
-            watchlist_item.user = None  # Global items are not user-specific
+            watchlist_item.user = None
             watchlist_item.save(update_fields=["is_global", "user"])
-            return Response(
-                {"status": "watchlist item set to global"}, status=status.HTTP_200_OK
-            )
-        return Response(
-            {"status": "watchlist item is already global"},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+            return Response({"status": "watchlist item set to global"}, status=status.HTTP_200_OK)
+        return Response({"status": "watchlist item is already global"}, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=True, methods=["post"], permission_classes=[IsAdminUser])
     def remove_global(self, request, pk=None):
         watchlist_item = self.get_object()
         if watchlist_item.is_global:
-            # When removing global, it doesn't automatically assign to a user.
-            # It might be better to just delete it or let admin re-assign.
-            # For now, let's assume removing global means it's no longer global.
-            # It will still be an orphan if no user is set.
-            # Admin might need to assign it to a user or delete it.
             watchlist_item.is_global = False
-            # watchlist_item.user = request.user # Or some other logic
             watchlist_item.save(update_fields=["is_global"])
-            return Response(
-                {"status": "watchlist item removed from global"},
-                status=status.HTTP_200_OK,
-            )
-        return Response(
-            {"status": "watchlist item is not global"},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
+            return Response({"status": "watchlist item removed from global"}, status=status.HTTP_200_OK)
+        return Response({"status": "watchlist item is not global"}, status=status.HTTP_400_BAD_REQUEST)

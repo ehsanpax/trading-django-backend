@@ -4,6 +4,7 @@ from rest_framework_simplejwt.tokens import AccessToken
 from django.contrib.auth.models import AnonymousUser
 from channels.db import database_sync_to_async
 from django.contrib.auth import get_user_model
+from urllib.parse import parse_qs
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
@@ -24,12 +25,20 @@ class TokenAuthMiddleware:
     async def __call__(self, scope, receive, send):
         logger.info(f"WebSocket connection attempt with path: {scope.get('path')}")
         query_string = scope.get("query_string", b"").decode("utf-8")
-        if "token" in query_string:
+        params = parse_qs(query_string or "")
+        token_values = params.get("token", [])
+        if token_values:
+            token_key = token_values[0]
+            user = await get_user(token_key)
+            scope["user"] = user
             try:
-                token_key = query_string.split("=")[1]
-                scope["user"] = await get_user(token_key)
-            except IndexError:
-                scope["user"] = AnonymousUser()
+                uid = getattr(user, 'id', None)
+                logger.info(f"WS auth resolved user_id={uid} path={scope.get('path')}")
+            except Exception:
+                pass
+        else:
+            scope["user"] = AnonymousUser()
+            logger.info(f"WS auth missing token, using AnonymousUser path={scope.get('path')}")
         return await self.inner(scope, receive, send)
 
 def TokenAuthMiddlewareStack(inner):

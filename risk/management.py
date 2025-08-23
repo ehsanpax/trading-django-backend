@@ -111,7 +111,22 @@ def calculate_position_size(account_id, symbol, account_equity, risk_percent, st
     print(contract_size)
     print(risk_amount, pip_value)
     lot_size = risk_amount / (stop_loss_distance * pip_value)
-    lot_size = round(lot_size, 2)
+    # Quantize lot size to broker's lot step (nearest step). Fallback to 0.01 if missing/invalid.
+    try:
+        raw_step = symbol_info.get("lot_step", symbol_info.get("lotStep", 0.01))
+        step = float(raw_step if raw_step is not None else 0.01)
+    except Exception:
+        step = 0.01
+    if step <= 0:
+        step = 0.01
+    # Round to nearest step
+    lot_size = round(lot_size / step) * step
+    # Normalize to step precision to avoid floats like 0.30000000004
+    try:
+        step_decimals = -Decimal(str(step)).as_tuple().exponent
+    except Exception:
+        step_decimals = 2
+    lot_size = round(lot_size, step_decimals)
     print(lot_size)
     digits = symbol_info.get("digits")
     print("digits:",  digits)
@@ -159,11 +174,14 @@ def validate_trade_request(account_id: str, user, symbol: str, trade_direction: 
         print("CALCULATION RESULT: ", calculation_result)
     except Exception as e:
         return {"error": str(e)}
+    # If calculation failed (e.g., market price fetch error), propagate a clean error response
+    if isinstance(calculation_result, dict) and calculation_result.get("error"):
+        return {"error": calculation_result["error"]}
     take_profit_price=float(take_profit_price)
     #stop_loss_price=float(stop_loss_price)
-    tp_rounded = round(take_profit_price, calculation_result["decimals"])
+    tp_rounded = round(take_profit_price, calculation_result.get("decimals", 2))
     #sl_rounded = round(stop_loss_price, calculation_result["decimals"])
-    print("DECIMLALS: ", calculation_result["decimals"])
+    print("DECIMLALS: ", calculation_result.get("decimals"))
     print("TP ROUNDED: ", tp_rounded)
     print("TAKE TP: ", take_profit_price)
     return {

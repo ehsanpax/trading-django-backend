@@ -77,6 +77,7 @@ class ExecuteTradeInputSerializer(serializers.Serializer):
     order_type           = serializers.ChoiceField(choices=["MARKET","LIMIT","STOP"], default="MARKET")
     limit_price          = serializers.DecimalField(max_digits=15, decimal_places=5, required=False)
     stop_loss_distance   = serializers.IntegerField()
+    tp_distance          = serializers.IntegerField(required=False)
     take_profit          = serializers.DecimalField(max_digits=15, decimal_places=5)
     risk_percent         = serializers.DecimalField(max_digits=5, decimal_places=2)
     partial_profit       = serializers.BooleanField(default=False)

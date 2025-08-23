@@ -67,7 +67,7 @@ class CandleViewset(APIView):
                 return JsonResponse({"error": "Invalid count format"}, status=400)
 
         price_service = PriceService()
-        result = price_service.get_mt5_historical_data(
+        result = price_service.get_historical_data(
             account_id=account_id,
             symbol=symbol,
             timeframe=resolution,
@@ -144,7 +144,7 @@ class ChartViewset(APIView):
         fetch_count = count + warm_up_period if count else None
 
         price_service = PriceService()
-        ohlcv_data = price_service.get_mt5_historical_data(
+        ohlcv_data = price_service.get_historical_data(
             account_id=account_id,
             symbol=symbol,
             timeframe=resolution,

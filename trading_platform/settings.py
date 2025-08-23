@@ -359,3 +359,7 @@ if not INTERNAL_SHARED_SECRET:
     # Generate a stable-on-boot random secret if none provided (dev only). For prod, set env var.
     import secrets
     INTERNAL_SHARED_SECRET = secrets.token_urlsafe(32)
+
+# Feature flags
+REALTIME_TS_ONLY = env.bool("REALTIME_TS_ONLY", default=False)
+EXECUTE_VIA_TS = env.bool("EXECUTE_VIA_TS", default=False)

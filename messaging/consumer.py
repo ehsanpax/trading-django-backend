@@ -17,7 +17,7 @@ from asgiref.sync import async_to_sync
 # Enqueue sync tasks
 from trades.tasks import synchronize_account_trades
 # Resolve broker login -> internal Account
-from accounts.models import MT5Account
+from accounts.models import MT5Account, CTraderAccount
 
 logger = logging.getLogger(__name__)
 
@@ -76,25 +76,59 @@ def _resolve_internal_account_id(envelope: dict) -> str | None:
         logger.debug(f"Resolved internal_account_id from account_id field: {acc_id}")
         return str(acc_id)
 
-    # Fall back to broker_login (MT5 account number) or numeric account_id
-    login_candidate = envelope.get("broker_login") or acc_id
-    if login_candidate is None:
-        logger.debug("No broker_login/account_id present in envelope; cannot resolve internal account id")
-        return None
-    try:
-        login_num = int(login_candidate)
-    except (TypeError, ValueError):
-        # Not a numeric login; cannot resolve
-        logger.debug(f"broker_login/account_id not numeric: {login_candidate}")
-        return None
+    # Fall back using platform-specific numeric identifiers.
+    # Gather candidates from common fields used by MT5 and cTrader producers.
+    payload = envelope.get("payload") or {}
+    candidates = [
+        envelope.get("internal_account_id"),
+        envelope.get("broker_login"),
+        acc_id,
+        envelope.get("ctid_trader_account_id"),
+        envelope.get("ctrader_account_id"),
+        payload.get("account_id"),
+        payload.get("ctid_trader_account_id"),
+        payload.get("ctrader_account_id"),
+    ]
 
-    try:
-        mt5 = MT5Account.objects.select_related("account").get(account_number=login_num)
-        logger.debug(f"Mapped broker_login {login_num} -> internal_account_id {mt5.account_id}")
-        return str(mt5.account_id)  # UUID of linked Account
-    except MT5Account.DoesNotExist:
-        logger.warning(f"Could not map broker_login {login_num} to an internal account")
-        return None
+    # Try mapping in order: MT5 numeric login -> MT5Account; cTrader numeric CTID -> CTraderAccount;
+    # cTrader string account_number -> CTraderAccount.account_number
+    for cand in candidates:
+        if not cand:
+            continue
+        # First, if cand is UUID-like but slipped through, return directly
+        if _is_uuid(cand):
+            return str(cand)
+        # Try numeric path
+        try:
+            login_num = int(cand)
+            # MT5 mapping
+            try:
+                mt5 = MT5Account.objects.select_related("account").get(account_number=login_num)
+                logger.debug(f"Mapped MT5 broker_login {login_num} -> internal_account_id {mt5.account_id}")
+                return str(mt5.account_id)
+            except MT5Account.DoesNotExist:
+                pass
+            # cTrader CTID mapping
+            try:
+                ct = CTraderAccount.objects.select_related("account").get(ctid_trader_account_id=login_num)
+                logger.debug(f"Mapped cTrader CTID {login_num} -> internal_account_id {ct.account_id}")
+                return str(ct.account_id)
+            except CTraderAccount.DoesNotExist:
+                pass
+        except (TypeError, ValueError):
+            # Non-numeric: attempt cTrader account_number (string)
+            try:
+                ct = CTraderAccount.objects.select_related("account").get(account_number=str(cand))
+                logger.debug(f"Mapped cTrader account_number {cand} -> internal_account_id {ct.account_id}")
+                return str(ct.account_id)
+            except CTraderAccount.DoesNotExist:
+                continue
+
+    logger.warning(
+        "Could not resolve internal account from envelope keys: account_id=%s broker_login=%s ctid=%s",
+        envelope.get("account_id"), envelope.get("broker_login"), envelope.get("ctid_trader_account_id")
+    )
+    return None
 
 
 def _send_to_group(group: str, message: dict):
@@ -144,36 +178,56 @@ def handle_event(body: bytes, routing_key: str | None = None):
                 logger.exception(
                     f"Failed to enqueue sync for account {internal_account_id}: {e}"
                 )
-        elif etype == "positions.snapshot":
+        elif etype in ("positions.snapshot", "open_positions"):
+            # Normalize: expect list under 'open_positions' or 'positions'
+            open_positions = payload.get("open_positions")
+            if open_positions is None:
+                open_positions = payload.get("positions", [])
             logger.debug(
-                f"positions.snapshot received [rk={routing_key}] internal_account_id={internal_account_id} "
-                f"({len(payload.get('open_positions', []))} positions)"
+                f"positions/open_positions received [rk={routing_key}] internal_account_id={internal_account_id} "
+                f"({len(open_positions)} positions)"
             )
             if internal_account_id:
                 group = f"account_{internal_account_id}"
-                logger.debug(f"Forwarding positions.snapshot to group={group}")
+                logger.debug(f"Forwarding open_positions to group={group}")
                 _send_to_group(group, {
                     "type": "open_positions_update",
-                    "open_positions": payload.get("open_positions", []),
+                    "open_positions": open_positions,
                 })
             else:
                 logger.warning(
-                    f"positions.snapshot missing resolvable account [rk={routing_key}]. Envelope keys: account_id={envelope.get('account_id')}, broker_login={envelope.get('broker_login')}, internal_account_id={envelope.get('internal_account_id')}"
+                    f"open_positions missing resolvable account [rk={routing_key}]. Envelope keys: account_id={envelope.get('account_id')}, broker_login={envelope.get('broker_login')}, internal_account_id={envelope.get('internal_account_id')}"
                 )
-        elif etype == "account.info":
+        elif etype in ("account.info", "account_info"):
             logger.debug(
-                f"account.info received [rk={routing_key}] internal_account_id={internal_account_id}"
+                f"account info received [rk={routing_key}] internal_account_id={internal_account_id}"
             )
             if internal_account_id:
                 group = f"account_{internal_account_id}"
-                logger.debug(f"Forwarding account.info to group={group}")
+                logger.debug(f"Forwarding account_info to group={group}")
                 _send_to_group(group, {
                     "type": "account_info_update",
                     "account_info": payload,
                 })
             else:
                 logger.warning(
-                    f"account.info missing resolvable account [rk={routing_key}]. Envelope keys: account_id={envelope.get('account_id')}, broker_login={envelope.get('broker_login')}, internal_account_id={envelope.get('internal_account_id')}"
+                    f"account_info missing resolvable account [rk={routing_key}]. Envelope keys: account_id={envelope.get('account_id')}, broker_login={envelope.get('broker_login')}, internal_account_id={envelope.get('internal_account_id')}"
+                )
+        elif etype == "pending_orders":
+            pending = payload.get("pending_orders") or payload.get("orders", [])
+            logger.debug(
+                f"pending_orders received [rk={routing_key}] internal_account_id={internal_account_id} ({len(pending)} orders)"
+            )
+            if internal_account_id:
+                group = f"account_{internal_account_id}"
+                logger.debug(f"Forwarding pending_orders to group={group}")
+                _send_to_group(group, {
+                    "type": "pending_orders_update",
+                    "pending_orders": pending,
+                })
+            else:
+                logger.warning(
+                    f"pending_orders missing resolvable account [rk={routing_key}]. Envelope keys: account_id={envelope.get('account_id')}, broker_login={envelope.get('broker_login')}, internal_account_id={envelope.get('internal_account_id')}"
                 )
         elif etype == "price.tick":
             symbol = (payload.get("symbol") or "").upper()
@@ -192,15 +246,36 @@ def handle_event(body: bytes, routing_key: str | None = None):
                 logger.warning(
                     f"price.tick missing data or account [rk={routing_key}]. symbol={symbol}, account_id={envelope.get('account_id')}, broker_login={envelope.get('broker_login')}, internal_account_id={internal_account_id}"
                 )
-        elif etype == "candle.update":
-            symbol = (payload.get("symbol") or "").upper()
-            timeframe = str(payload.get("timeframe") or "")
+        elif etype in ("candle.update", "candles.update", "candle_update"):
+            # Be flexible with payload shapes
+            symbol = (payload.get("symbol") or envelope.get("symbol") or "").upper()
+            tf_val = payload.get("timeframe") or payload.get("tf") or payload.get("period") or ""
+            timeframe = str(tf_val)
             candle = payload.get("candle") or {}
+            if not candle:
+                # Try to treat the entire payload as the candle if OHLC keys exist
+                o = payload.get("open") or payload.get("o")
+                h = payload.get("high") or payload.get("h")
+                l = payload.get("low") or payload.get("l")
+                c = payload.get("close") or payload.get("c")
+                v = payload.get("tick_volume") or payload.get("volume") or payload.get("v")
+                t = payload.get("time") or payload.get("timestamp")
+                if any(x is not None for x in (o, h, l, c)):
+                    candle = {
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "open": o,
+                        "high": h,
+                        "low": l,
+                        "close": c,
+                        "tick_volume": v,
+                        "time": t,
+                    }
             logger.debug(
                 f"candle.update {symbol}@{timeframe} [rk={routing_key}] internal_account_id={internal_account_id}"
             )
-            if internal_account_id and symbol and timeframe:
-                group = f"candles_{internal_account_id}_{symbol}_{timeframe}"
+            if internal_account_id and symbol and timeframe and candle:
+                group = f"candles_{internal_account_id}_{symbol}_{str(timeframe).upper()}"
                 logger.debug(f"Forwarding candle.update to group={group}")
                 _send_to_group(group, {
                     # This maps to PriceConsumer.candle_update

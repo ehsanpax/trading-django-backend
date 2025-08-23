@@ -1,8 +1,7 @@
 # accounts/services.py
 from django.shortcuts import get_object_or_404
-from accounts.models import Account, MT5Account, CTraderAccount
-from trading_platform.mt5_api_client import connection_manager, MT5APIClient
-from connectors.ctrader_client import CTraderClient
+from accounts.models import Account, CTraderAccount
+from connectors.factory import is_platform_supported
 from django.conf import settings
 import requests
 import asyncio
@@ -10,116 +9,65 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Adapter helpers to normalize TradingService DTOs or dicts
+
+def _get(obj, key, default=None):
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _extract_account_fields(acc):
+    return {
+        "balance": _get(acc, "balance"),
+        "equity": _get(acc, "equity"),
+        "margin": _get(acc, "margin"),
+    }
+
+
+def _position_to_dict(p):
+    return {
+        "ticket": _get(p, "position_id") or _get(p, "ticket") or _get(p, "id"),
+        "symbol": _get(p, "symbol"),
+        "direction": _get(p, "direction") or _get(p, "side"),
+        "volume": _get(p, "volume") or _get(p, "lots") or _get(p, "qty"),
+        "open_price": _get(p, "open_price") or _get(p, "price_open") or _get(p, "entry_price"),
+        "current_price": _get(p, "current_price") or _get(p, "price_current") or _get(p, "market_price"),
+        "stop_loss": _get(p, "stop_loss") or _get(p, "sl"),
+        "take_profit": _get(p, "take_profit") or _get(p, "tp"),
+        "profit": _get(p, "profit") or _get(p, "unrealized_pnl") or _get(p, "pnl"),
+        "swap": _get(p, "swap"),
+        "commission": _get(p, "commission") or _get(p, "fees"),
+    }
+
 async def get_account_details_async(account_id, user):
     """
     Asynchronously retrieves account details for the given account_id and user.
     This is the core async function.
     """
     account = await Account.objects.aget(id=account_id, user=user)
-    
-    if account.platform == "MT5":
-        try:
-            mt5_account = await MT5Account.objects.aget(account=account)
-        except MT5Account.DoesNotExist:
-            return {"error": "No linked MT5 account found."}
 
-        client = await connection_manager.get_client(
-            base_url=settings.MT5_API_BASE_URL,
-            account_id=mt5_account.account_number,
-            password=mt5_account.encrypted_password,
-            broker_server=mt5_account.broker_server,
-            internal_account_id=str(account.id)
-        )
-        
-        # Wait for the initial data to be received from the WebSocket, with a timeout.
-        logger.info(f"Service for account {account_id}: Waiting for initial data from MT5APIClient...")
+    # Try TradingService only for supported platforms (avoid noisy errors for unsupported ones)
+    platform = (account.platform or "").strip()
+    if is_platform_supported(platform):
         try:
-            await asyncio.wait_for(client.initial_data_received.wait(), timeout=10.0)
-            logger.info(f"Service for account {account_id}: Initial data received. Proceeding.")
-        except asyncio.TimeoutError:
-            logger.warning(f"Service for account {account_id}: Timed out waiting for initial data. Proceeding with cached data if available.")
-        
-        account_info = client.get_account_info()
-        positions_data = client.get_open_positions()
-        
-        return {
-            "balance": account_info.get("balance"),
-            "equity": account_info.get("equity"),
-            "margin": account_info.get("margin"),
-            "open_positions": positions_data.get("open_positions", [])
-        }
-    elif account.platform == "cTrader":
-        try:
-            ctrader_account = CTraderAccount.objects.get(account=account)
-        except CTraderAccount.DoesNotExist:
-            return {"error": "No linked cTrader account found."}
-    
-        payload = {
-            "access_token": ctrader_account.access_token,
-            "ctid_trader_account_id": ctrader_account.ctid_trader_account_id,
-        }
-        base_url = settings.CTRADER_API_BASE_URL  # e.g., "http://localhost:8080"
-        
-        # Call the new equity endpoint
-        equity_url = f"{base_url}/ctrader/account/equity"
-        try:
-            equity_resp = requests.post(equity_url, json=payload, timeout=10)
-        except requests.RequestException as e:
-            return {"error": f"Error calling cTrader equity endpoint: {str(e)}"}
-    
-        if equity_resp.status_code != 200:
-            return {"error": f"cTrader equity endpoint returned status: {equity_resp.status_code}"}
-    
-        equity_data = equity_resp.json()
-        if "error" in equity_data:
-            return {"error": equity_data["error"]}
-    
-        # Optionally, if you still need open_positions you can add another request here.
-        # For this version, we simply return the equity information.
-        return {
-            "balance": equity_data.get("balance"),
-            "equity": equity_data.get("equity"),
-            "total_unrealized_pnl": equity_data.get("total_unrealized_pnl"),
-        }
-    
-    else:
-        return {"error": "Unsupported trading platform."}
-
-def _get_account_details_via_rest(account_id, user):
-    """Synchronous, event-loop-safe account details resolver using REST fallbacks."""
-    account = get_object_or_404(Account, id=account_id, user=user)
-
-    if account.platform == "MT5":
-        try:
-            mt5_account = MT5Account.objects.get(account=account)
-        except MT5Account.DoesNotExist:
-            return {"error": "No linked MT5 account found."}
-
-        client = MT5APIClient(
-            base_url=settings.MT5_API_BASE_URL,
-            account_id=mt5_account.account_number,
-            password=mt5_account.encrypted_password,
-            broker_server=mt5_account.broker_server,
-            internal_account_id=str(account.id),
-        )
-        try:
-            info = client.get_account_info_rest()
-        except Exception as e:
-            logger.error(f"MT5 get_account_info_rest error: {e}", exc_info=True)
-            return {"error": str(e)}
-        try:
-            positions = client.get_all_open_positions_rest()
+            from connectors.trading_service import TradingService
+            ts = TradingService(account)
+            acc = await ts.get_account_info()
+            positions = await ts.get_open_positions()
+            logger.info("accounts.details path=ts mode=async account_id=%s", account_id)
+            return {
+                **_extract_account_fields(acc),
+                "open_positions": [_position_to_dict(p) for p in (positions or [])],
+            }
         except Exception:
-            positions = {"open_positions": []}
+            logger.exception(
+                "TradingService snapshot failed for account %s.",
+                account_id,
+            )
 
-        return {
-            "balance": info.get("balance"),
-            "equity": info.get("equity"),
-            "margin": info.get("margin"),
-            "open_positions": positions.get("open_positions", []),
-        }
-
-    elif account.platform == "cTrader":
+    # Temporary: retain cTrader fallback until connector is implemented
+    if (account.platform or "").lower() == "ctrader":
         try:
             ctrader_account = CTraderAccount.objects.get(account=account)
         except CTraderAccount.DoesNotExist:
@@ -130,7 +78,66 @@ def _get_account_details_via_rest(account_id, user):
             "ctid_trader_account_id": ctrader_account.ctid_trader_account_id,
         }
         base_url = settings.CTRADER_API_BASE_URL
-        equity_url = f"{base_url}/ctrader/account/equity"
+        equity_url = f"{base_url.rstrip('/')}/ctrader/account_info"
+        try:
+            equity_resp = requests.post(equity_url, json=payload, timeout=10)
+        except requests.RequestException as e:
+            return {"error": f"Error calling cTrader equity endpoint: {str(e)}"}
+
+        if equity_resp.status_code != 200:
+            return {"error": f"cTrader equity endpoint returned status: {equity_resp.status_code}"}
+
+        equity_data = equity_resp.json()
+        if "error" in equity_data:
+            return {"error": equity_data["error"]}
+
+        logger.info("accounts.details path=legacy platform=cTrader mode=async account_id=%s", account_id)
+        return {
+            "balance": equity_data.get("balance"),
+            "equity": equity_data.get("equity"),
+            "total_unrealized_pnl": equity_data.get("total_unrealized_pnl"),
+        }
+
+    # No legacy fallbacks for MT5 anymore
+    return {"error": "Account details unavailable via TradingService."}
+
+
+def _get_account_details_via_rest(account_id, user):
+    """Synchronous, event-loop-safe account details resolver using TradingService or cTrader fallback."""
+    account = get_object_or_404(Account, id=account_id, user=user)
+
+    # TradingService sync wrappers only if platform is supported
+    platform = (account.platform or "").strip()
+    if is_platform_supported(platform):
+        try:
+            from connectors.trading_service import TradingService
+            ts = TradingService(account)
+            acc = ts.get_account_info_sync()
+            positions = ts.get_open_positions_sync()
+            logger.info("accounts.details path=ts mode=sync account_id=%s", account_id)
+            return {
+                **_extract_account_fields(acc),
+                "open_positions": [_position_to_dict(p) for p in (positions or [])],
+            }
+        except Exception:
+            logger.exception(
+                "TradingService sync snapshot failed for account %s.",
+                account_id,
+            )
+
+    # Temporary: retain cTrader fallback until connector is implemented
+    if (account.platform or "").lower() == "ctrader":
+        try:
+            ctrader_account = CTraderAccount.objects.get(account=account)
+        except CTraderAccount.DoesNotExist:
+            return {"error": "No linked cTrader account found."}
+
+        payload = {
+            "access_token": ctrader_account.access_token,
+            "ctid_trader_account_id": ctrader_account.ctid_trader_account_id,
+        }
+        base_url = settings.CTRADER_API_BASE_URL
+        equity_url = f"{base_url.rstrip('/')}/ctrader/account_info"
         try:
             equity_resp = requests.post(equity_url, json=payload, timeout=10)
             if equity_resp.status_code != 200:
@@ -142,14 +149,15 @@ def _get_account_details_via_rest(account_id, user):
         if "error" in equity_data:
             return {"error": equity_data["error"]}
 
+        logger.info("accounts.details path=legacy platform=cTrader mode=sync account_id=%s", account_id)
         return {
             "balance": equity_data.get("balance"),
             "equity": equity_data.get("equity"),
             "total_unrealized_pnl": equity_data.get("total_unrealized_pnl"),
         }
 
-    else:
-        return {"error": f"Unsupported trading platform: {account.platform}"}
+    # No legacy fallbacks for MT5 anymore
+    return {"error": "Account details unavailable via TradingService."}
 
 
 def get_account_details(account_id, user):
@@ -157,10 +165,6 @@ def get_account_details(account_id, user):
     Synchronous facade that is safe in threads with running event loops.
     Uses REST fallbacks to avoid AsyncToSync conflicts.
     """
-    try:
-        # If a loop is running in this thread, avoid async bridges
-        asyncio.get_running_loop()
-        return _get_account_details_via_rest(account_id, user)
-    except RuntimeError:
-        # No running loop here; still prefer REST to avoid blocking on websockets
-        return _get_account_details_via_rest(account_id, user)
+    # Always use the REST-based resolver (internally tries TradingService sync wrappers
+    # and falls back to legacy paths as needed). Avoid probing event loop to reduce noise.
+    return _get_account_details_via_rest(account_id, user)

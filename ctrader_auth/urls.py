@@ -12,7 +12,6 @@ from .views import (
     CTraderConnectProxyAPIView,
     CTraderCloseProxyAPIView,
     CTraderInstanceDeleteProxyAPIView,
-    CTraderPortfolioSSEProxyView,  # Added SSE proxy
 )
 
 urlpatterns = [
@@ -30,6 +29,4 @@ urlpatterns = [
     path("connect/", CTraderConnectProxyAPIView.as_view(), name="ctrader-connect-proxy"),
     path("close/", CTraderCloseProxyAPIView.as_view(), name="ctrader-close-proxy"),
     path("instance/<str:account_id>", CTraderInstanceDeleteProxyAPIView.as_view(), name="ctrader-instance-delete-proxy"),
-    # Streaming (SSE) portfolio updates
-    path("stream/portfolio", CTraderPortfolioSSEProxyView.as_view(), name="ctrader-portfolio-stream-proxy"),
 ]
