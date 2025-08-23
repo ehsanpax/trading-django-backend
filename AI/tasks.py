@@ -56,7 +56,9 @@ def execute_session_schedule(self, schedule_id):
             json=data,
             timeout=None,
         )
-
+        task_record.status = SessionScheduleTaskStatusChoices.SUCCESS.value
+        task_record.result = request.content
+        task_record.save()
         return result_message
     except SessionSchedule.DoesNotExist:
         # Handle the case where the schedule is not found
