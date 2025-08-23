@@ -21,7 +21,10 @@ import websockets, aiohttp
 from datetime import datetime, timedelta
 from indicators.services import IndicatorService
 from monitoring.services import monitoring_service
+<<<<<<< Updated upstream
 from channels.layers import get_channel_layer
+=======
+>>>>>>> Stashed changes
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +52,10 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
         self._group_symbol = (self.symbol or "").upper()
 
         await self.accept()
+<<<<<<< Updated upstream
         #logger.info(f"Price WS connected account={self.account_id} symbol={self.symbol}")
+=======
+>>>>>>> Stashed changes
 
         monitoring_service.register_connection(
             self.channel_name,
@@ -140,6 +146,7 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
             return
 
     async def disconnect(self, close_code):
+<<<<<<< Updated upstream
         # Leave Channels groups
         try:
             channel_layer = get_channel_layer()
@@ -168,12 +175,24 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
                     logger.debug(f"mt5_subscriptions_status failed: {e}")
             except Exception as e:
                 logger.debug(f"MT5 headless unsubscribe on disconnect failed: {e}")
+=======
+        monitoring_service.unregister_connection(self.channel_name)
+        #logger.info(f"🔻 WebSocket disconnected for Account: {self.account_id} - {self.symbol}")
+        if self.platform == "MT5" and self.mt5_client:
+            self.mt5_client.unregister_price_listener(self.symbol, self.send_price_update)
+            if self.timeframe: # If we were subscribed to candles, unregister
+                self.mt5_client.unregister_candle_listener(self.symbol, self.timeframe, self.send_candle_update)
+>>>>>>> Stashed changes
         elif self.price_task:
             self.price_task.cancel()
         logger.info(f"Price WS disconnected account={self.account_id} symbol={self.symbol}")
 
     async def receive_json(self, content):
         monitoring_service.update_client_message(self.channel_name, content)
+<<<<<<< Updated upstream
+=======
+        #logger.info(f"Received message from client for account {self.account_id} - {self.symbol}: {json.dumps(content)}")
+>>>>>>> Stashed changes
         action = content.get("type") or content.get("action")
         logger.info(f"Client message action={action} account={self.account_id} symbol={self.symbol} payload={content}")
 
@@ -361,11 +380,14 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
         }
         await self.send_json(payload)
         monitoring_service.update_server_message(self.channel_name, payload)
+<<<<<<< Updated upstream
 
         try:
             self._last_tick_ts = price_data.get("time") or price_data.get("timestamp")
         except Exception:
             pass
+=======
+>>>>>>> Stashed changes
 
     async def send_candle_update(self, candle_data):
         """Callback function to handle candle updates, calculating indicators on actual close."""

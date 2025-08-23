@@ -16,6 +16,7 @@ class SMIIndicator:
     VERSION = 1
     PANE_TYPE = 'pane'
     OUTPUTS = ["smi", "signal"]
+<<<<<<< Updated upstream
     # Visual metadata
     VISUAL_SCHEMA = {
         "series": {
@@ -45,6 +46,8 @@ class SMIIndicator:
         },
         "guides": {"zero": {"value": 0, "color": "#808080", "visible": True}}
     }
+=======
+>>>>>>> Stashed changes
     PARAMS_SCHEMA = {
         "k_length": {
             "type": "integer",

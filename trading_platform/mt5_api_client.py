@@ -302,7 +302,11 @@ class MT5APIClient:
         try:
             headers = {'Content-Type': 'application/json'}
             url = f"{self.base_url}{endpoint}"
+<<<<<<< Updated upstream
             #logger.info(f"MT5APIClient: Making POST request to {url}")
+=======
+            logger.info(f"MT5APIClient: Making POST request to {url}")
+>>>>>>> Stashed changes
             response = requests.post(
                 url,
                 json=json_data,

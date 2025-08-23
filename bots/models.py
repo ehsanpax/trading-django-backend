@@ -93,6 +93,7 @@ class BacktestConfig(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=255, blank=True, null=True, help_text="User-defined name for this backtest config")
+<<<<<<< Updated upstream
     # Make version optional so configs can be reused across versions
     bot_version = models.ForeignKey('bots.BotVersion', on_delete=models.CASCADE, related_name="backtest_configs", null=True, blank=True)
     # Direct reference to Bot for easier filtering in admin and queries (bot-scoped configs)
@@ -100,6 +101,9 @@ class BacktestConfig(models.Model):
     # New: owner-scoped (user-level) configs
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='backtest_configs', null=True, blank=True)
 
+=======
+    bot_version = models.ForeignKey(BotVersion, on_delete=models.CASCADE, related_name="backtest_configs")
+>>>>>>> Stashed changes
     timeframe = models.CharField(
         max_length=10,
         choices=TIMEframe_CHOICES,
@@ -228,6 +232,7 @@ class LiveRun(models.Model):
     instrument_symbol = models.CharField(max_length=50, help_text="The trading instrument symbol for this live run") # Added field
     # --- New: Explicit account targeted by this LiveRun ---
     account = models.ForeignKey(Account, on_delete=models.PROTECT, related_name="live_runs", null=True, blank=True)
+<<<<<<< Updated upstream
     # Add timeframe selection for live run (aligns with migration 0008)
     timeframe = models.CharField(
         max_length=10,
@@ -250,6 +255,8 @@ class LiveRun(models.Model):
         default='CANDLE',
         help_text="Whether to evaluate strategy on candle close or each tick."
     )
+=======
+>>>>>>> Stashed changes
     started_at = models.DateTimeField(auto_now_add=True)
     stopped_at = models.DateTimeField(null=True, blank=True)
     # Consider more granular status: pending, running, stopping, stopped, error

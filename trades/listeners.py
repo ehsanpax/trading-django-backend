@@ -1,4 +1,5 @@
 from decimal import Decimal
+<<<<<<< Updated upstream
 from trading.models import Trade, Order
 from asgiref.sync import sync_to_async
 
@@ -9,6 +10,15 @@ class PositionUpdateListener:
         """
         Listener function to be called on every position update.
         Also updates runup/drawdown.
+=======
+from trading.models import Trade
+
+class PositionUpdateListener:
+    @staticmethod
+    def on_position_update(trade_id, current_pnl):
+        """
+        Listener function to be called on every position update.
+>>>>>>> Stashed changes
         """
         try:
             trade = Trade.objects.get(id=trade_id)
@@ -25,6 +35,7 @@ class PositionUpdateListener:
             trade.save(update_fields=['max_runup', 'max_drawdown'])
 
         except Trade.DoesNotExist:
+<<<<<<< Updated upstream
             # Trade may have been deleted
             pass
 
@@ -70,4 +81,15 @@ class PositionUpdateListener:
         """
         Process new positions to check for filled pending orders.
         """
+=======
+            # Handle the case where the trade does not exist
+            pass
+
+    @staticmethod
+    def process_new_positions(account, new_positions):
+        """
+        Process new positions to check for filled pending orders.
+        """
+        # This is a placeholder for the actual implementation
+>>>>>>> Stashed changes
         pass

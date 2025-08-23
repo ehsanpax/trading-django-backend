@@ -12,6 +12,7 @@ class DailyLevelsIndicator:
     """
     NAME = "DailyLevels"
     VERSION = 1
+<<<<<<< Updated upstream
     PANE_TYPE = 'overlay'
     OUTPUTS = ["high_of_day", "low_of_day", "day_open", "prev_day_high", "prev_day_low"]
     # Visual metadata
@@ -33,6 +34,9 @@ class DailyLevelsIndicator:
             "prev_day_low": {"color": "#f08080", "lineStyle": "dashed", "lineWidth": 1, "visible": True}
         }
     }
+=======
+    OUTPUTS = ["high_of_day", "low_of_day", "day_open", "prev_day_high", "prev_day_low"]
+>>>>>>> Stashed changes
     PARAMS_SCHEMA = {
         "show_high": {"type": "boolean", "default": True, "ui_only": True, "display_name": "Show Day's High"},
         "show_low": {"type": "boolean", "default": True, "ui_only": True, "display_name": "Show Day's Low"},

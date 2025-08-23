@@ -22,9 +22,15 @@ class BotVersionAdmin(admin.ModelAdmin):
 
 @admin.register(BacktestConfig)
 class BacktestConfigAdmin(admin.ModelAdmin):
+<<<<<<< Updated upstream
     list_display = ('label', 'bot', 'execution_config', 'created_at')
     list_filter = ('bot__name',)
     search_fields = ('label', 'bot__name')
+=======
+    list_display = ('label', 'bot_version', 'execution_config', 'created_at')
+    list_filter = ('bot_version__bot__name',)
+    search_fields = ('label', 'bot_version__bot__name')
+>>>>>>> Stashed changes
     readonly_fields = ('id', 'created_at')
 
 @admin.register(BacktestRun)

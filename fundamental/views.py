@@ -8,11 +8,10 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.authentication import TokenAuthentication
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.generics import ListAPIView
-from .serializers import EconomicCalendarSerializer, NewsSerializer
-from django.utils.dateparse import parse_date, parse_datetime
-import logging
-
-logger = logging.getLogger(__name__)
+from .serializers import EconomicCalendarSerializer, NewsSerializer, COTReportSerializer
+from django.utils.dateparse import parse_date
+from .mapping import MAPPING
+from logging import logger
 
 
 class EconomicCalendarAPIView(APIView):
@@ -57,6 +56,7 @@ class EconomicCalendarAPIView(APIView):
                 logger.error(f"Missing key in item: {e}")
                 continue
 
+
         return Response(
             {"message": "Data processed successfully."}, status=status.HTTP_200_OK
         )
@@ -77,26 +77,21 @@ class EconomicCalendarEventListAPIView(APIView):
         impact = self.request.query_params.get("impact")
         event = self.request.query_params.get("event")
 
-        if date_from and date_to:
-            try:
-                date_from = datetime.strptime(date_from, "%Y-%m-%d %H:%M:%S")
-                date_from = timezone.make_aware(
-                    date_from, timezone.get_current_timezone()
-                )
-                date_to = datetime.strptime(date_to, "%Y-%m-%d %H:%M:%S")
-                date_to = timezone.make_aware(date_to, timezone.get_current_timezone())
-                queryset = queryset.filter(
-                    event_time__gte=date_from, event_time__lte=date_to
-                )
-            except ValueError:
-                pass
+        if date_from:
+            dt_from = parse_datetime(date_from)
+            if dt_from:
+                queryset = queryset.filter(event_time__gte=dt_from)
+        if date_to:
+            dt_to = parse_datetime(date_to)
+            if dt_to:
+                queryset = queryset.filter(event_time__lte=dt_to)
 
         if currency:
-            currencies = currency.split(",")
+            currencies = currency.split(',')
             queryset = queryset.filter(currency__currency__in=currencies)
 
         if impact:
-            impacts = impact.split(",")
+            impacts = impact.split(',')
             queryset = queryset.filter(impact__in=impacts)
 
         if event:

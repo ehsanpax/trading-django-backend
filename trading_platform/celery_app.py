@@ -32,10 +32,13 @@ app.conf.beat_schedule = {
         "schedule": crontab(
             minute=0, hour="*/1"
         ),  # Run every hour at the beginning of the hour
+<<<<<<< Updated upstream
     },
     "reconcile-live-runs": {
         "task": "bots.reconciler.reconcile_live_runs",
         "schedule": 30.0,  # every 30 seconds
+=======
+>>>>>>> Stashed changes
     },
 }
 

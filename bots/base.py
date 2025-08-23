@@ -116,14 +116,22 @@ class BaseStrategy:
 
 # --- Action Helper Functions ---
 
+<<<<<<< Updated upstream
 def make_open_trade(side: Literal["BUY", "SELL"], qty: float, sl: Optional[float] = None, tp: Optional[float] = None, tag: Optional[str] = None, risk_percent: Optional[float] = None) -> Dict[str, Any]:
+=======
+def make_open_trade(side: Literal["BUY", "SELL"], qty: float, sl: Optional[float] = None, tp: Optional[float] = None, tag: Optional[str] = None) -> Dict[str, Any]:
+>>>>>>> Stashed changes
     """Creates and validates an OPEN_TRADE action."""
     if qty <= 0:
         raise ValueError("Quantity for opening a trade must be positive.")
     if side not in ["BUY", "SELL"]:
         raise ValueError("Side must be 'BUY' or 'SELL'.")
+<<<<<<< Updated upstream
     
     action = {
+=======
+    return {
+>>>>>>> Stashed changes
         "action": "OPEN_TRADE",
         "side": side,
         "qty": qty,
@@ -131,10 +139,13 @@ def make_open_trade(side: Literal["BUY", "SELL"], qty: float, sl: Optional[float
         "tp": tp,
         "tag": tag,
     }
+<<<<<<< Updated upstream
     if risk_percent is not None:
         action["risk_percent"] = risk_percent
         
     return action
+=======
+>>>>>>> Stashed changes
 
 def make_close_position(side: Literal["BUY", "SELL", "ANY"] = "ANY", qty: Literal["ALL"] | float = "ALL", tag: Optional[str] = None) -> Dict[str, Any]:
     """Creates and validates a CLOSE_POSITION action."""

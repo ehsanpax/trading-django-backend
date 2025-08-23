@@ -16,6 +16,7 @@ class CMFIndicator:
     VERSION = 1
     PANE_TYPE = 'pane'
     OUTPUTS = ["cmf"]
+<<<<<<< Updated upstream
     # Visual metadata
     VISUAL_SCHEMA = {
         "series": {
@@ -37,6 +38,8 @@ class CMFIndicator:
         },
         "guides": {"zero": {"value": 0, "color": "#808080", "visible": True}}
     }
+=======
+>>>>>>> Stashed changes
     PARAMS_SCHEMA = {
         "length": {
             "type": "integer",

@@ -17,6 +17,7 @@ class ATRIndicator:
     PANE_TYPE = 'pane'
     SCALE_TYPE = 'linear'
     OUTPUTS = ["atr"]
+<<<<<<< Updated upstream
     # Visual metadata for frontend UI
     VISUAL_SCHEMA = {
         "series": {
@@ -34,6 +35,8 @@ class ATRIndicator:
             "atr": {"color": "#9467bd", "lineStyle": "solid", "lineWidth": 1, "plotType": "line", "visible": True}
         }
     }
+=======
+>>>>>>> Stashed changes
     PARAMS_SCHEMA = {
         "length": {
             "type": "integer",

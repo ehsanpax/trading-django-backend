@@ -6,7 +6,10 @@ from decimal import Decimal
 from bots.base import BaseStrategy, make_open_trade, make_close_position, make_reduce_position
 from core.interfaces import IndicatorRequest
 import logging
+<<<<<<< Updated upstream
 from typing import Optional, Callable
+=======
+>>>>>>> Stashed changes
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +69,7 @@ class SectionedStrategy(BaseStrategy):
         self.indicator_column_names = list(dict.fromkeys(self.indicator_column_names))
         # --- End Fix ---
 
+<<<<<<< Updated upstream
         # Tracing controls (opt-in). Frontend/API can toggle later.
         self._trace_enabled: bool = bool(strategy_params.get('trace_enabled', False))
         self._trace_callback: Optional[Callable[[Dict[str, Any]], None]] = None
@@ -104,6 +108,8 @@ class SectionedStrategy(BaseStrategy):
         except Exception:
             logger.debug('Trace callback failed', exc_info=True)
 
+=======
+>>>>>>> Stashed changes
     def required_indicators(self) -> List[IndicatorRequest]:
         """
         Scans the entry, exit, and risk conditions in the spec to determine which indicators are needed.
@@ -192,6 +198,7 @@ class SectionedStrategy(BaseStrategy):
         and emits actions. This method is pure and does not perform any fills.
         """
         actions = []
+<<<<<<< Updated upstream
         # Emit a minimal inputs snapshot (price only) for context
         try:
             self._emit_trace('engine', 'inputs', {
@@ -199,6 +206,8 @@ class SectionedStrategy(BaseStrategy):
             }, df_current_window)
         except Exception:
             pass
+=======
+>>>>>>> Stashed changes
         
         def _create_trade_action(direction: str):
             risk_params = self.spec.risk
@@ -257,11 +266,16 @@ class SectionedStrategy(BaseStrategy):
             else:
                 qty = risk_params.get("fixed_lot_size", 1.0) # Fallback to fixed size
 
+<<<<<<< Updated upstream
             return make_open_trade(side=direction, qty=qty, sl=sl, tp=tp, tag=f"Entry {direction}", risk_percent=risk_pct)
+=======
+            return make_open_trade(side=direction, qty=qty, sl=sl, tp=tp, tag=f"Entry {direction}")
+>>>>>>> Stashed changes
 
         # --- Evaluate Entry Conditions ---
         if self.spec.entry_long:
             try:
+<<<<<<< Updated upstream
                 long_ok = self._evaluate_condition(self.spec.entry_long, df_current_window)
                 self._emit_trace('entry', 'condition_eval', {'side': 'LONG', 'result': bool(long_ok)}, df_current_window)
                 if long_ok:
@@ -269,11 +283,16 @@ class SectionedStrategy(BaseStrategy):
                     if act:
                         actions.append(act)
                         self._emit_trace('entry', 'order_intent', {'side': 'BUY', 'qty': act.get('qty')}, df_current_window)
+=======
+                if self._evaluate_condition(self.spec.entry_long, df_current_window):
+                    actions.append(_create_trade_action("BUY"))
+>>>>>>> Stashed changes
             except Exception as e:
                 logger.error(f"Error evaluating long entry condition: {e}", exc_info=True)
 
         if self.spec.entry_short:
             try:
+<<<<<<< Updated upstream
                 short_ok = self._evaluate_condition(self.spec.entry_short, df_current_window)
                 self._emit_trace('entry', 'condition_eval', {'side': 'SHORT', 'result': bool(short_ok)}, df_current_window)
                 if short_ok:
@@ -281,27 +300,41 @@ class SectionedStrategy(BaseStrategy):
                     if act:
                         actions.append(act)
                         self._emit_trace('entry', 'order_intent', {'side': 'SELL', 'qty': act.get('qty')}, df_current_window)
+=======
+                if self._evaluate_condition(self.spec.entry_short, df_current_window):
+                    actions.append(_create_trade_action("SELL"))
+>>>>>>> Stashed changes
             except Exception as e:
                 logger.error(f"Error evaluating short entry condition: {e}", exc_info=True)
 
         # --- Evaluate Exit Conditions ---
         if self.spec.exit_long:
             try:
+<<<<<<< Updated upstream
                 exit_long = self._evaluate_condition(self.spec.exit_long, df_current_window)
                 self._emit_trace('exit', 'condition_eval', {'side': 'LONG', 'result': bool(exit_long)}, df_current_window)
                 if exit_long:
                     actions.append(make_close_position(side="BUY", qty="ALL", tag="Exit Long"))
                     self._emit_trace('exit', 'order_intent', {'side': 'BUY', 'qty': 'ALL'}, df_current_window)
+=======
+                if self._evaluate_condition(self.spec.exit_long, df_current_window):
+                    actions.append(make_close_position(side="BUY", qty="ALL", tag="Exit Long"))
+>>>>>>> Stashed changes
             except Exception as e:
                 logger.error(f"Error evaluating long exit condition: {e}", exc_info=True)
         
         if self.spec.exit_short:
             try:
+<<<<<<< Updated upstream
                 exit_short = self._evaluate_condition(self.spec.exit_short, df_current_window)
                 self._emit_trace('exit', 'condition_eval', {'side': 'SHORT', 'result': bool(exit_short)}, df_current_window)
                 if exit_short:
                     actions.append(make_close_position(side="SELL", qty="ALL", tag="Exit Short"))
                     self._emit_trace('exit', 'order_intent', {'side': 'SELL', 'qty': 'ALL'}, df_current_window)
+=======
+                if self._evaluate_condition(self.spec.exit_short, df_current_window):
+                    actions.append(make_close_position(side="SELL", qty="ALL", tag="Exit Short"))
+>>>>>>> Stashed changes
             except Exception as e:
                 logger.error(f"Error evaluating short exit condition: {e}", exc_info=True)
             
