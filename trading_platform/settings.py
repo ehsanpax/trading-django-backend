@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 from datetime import timedelta
 import environ
+from corsheaders.defaults import default_headers  # Added for CORS custom headers
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -39,7 +40,7 @@ DEBUG = env.bool("DEBUG", default=False)
 
 ALLOWED_HOSTS = env.list("ALLOWED_HOSTS", default=["*"])
 
-
+BACKEND_URL = env.str("BACKEND_URL", default="http://localhost:8000")
 # Application definition
 
 INSTALLED_APPS = [
@@ -53,6 +54,8 @@ INSTALLED_APPS = [
     # Third-party apps
     "rest_framework",
     "rest_framework.authtoken",
+    "django_celery_results",
+    "django_celery_beat",
     # Your apps
     "trading",
     "accounts",
@@ -74,11 +77,17 @@ INSTALLED_APPS = [
     "ta",  # Technical Analysis app
     "AI",  # AI Prompts app
     "charts",
-    "fundamental"
+    "fundamental",
+    "monitoring",
+    "user",
+    "core",
+    "task_logs",
+    "messaging",  # New app for RabbitMQ consumer/producer
 ]
 
 
 MIDDLEWARE = [
+    "corsheaders.middleware.CorsMiddleware",  # Moved to top as recommended
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -87,12 +96,20 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
-    "corsheaders.middleware.CorsMiddleware",
-    "django.middleware.common.CommonMiddleware",
 ]
 
 CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
+# Allow custom headers used by the frontend
+CORS_ALLOW_HEADERS = list(default_headers) + [
+    "x-request-id",
+    "idempotency-key",
+]
+# Expose response headers so the frontend can read them
+CORS_EXPOSE_HEADERS = [
+    "X-Request-ID",
+    "Idempotency-Key",
+]
 
 ROOT_URLCONF = "trading_platform.urls"
 
@@ -115,12 +132,23 @@ TEMPLATES = [
 WSGI_APPLICATION = "trading_platform.wsgi.application"
 ASGI_APPLICATION = "trading_platform.routing.application"
 
-# Channels
+# Channels (tuned for backpressure mitigation)
 CHANNEL_LAYERS = {
     "default": {
         "BACKEND": "channels_redis.core.RedisChannelLayer",
         "CONFIG": {
-            "hosts": [("redis", 6379)],
+            # Use a dedicated Redis DB for Channels to avoid contention with Celery
+            "hosts": [env.str("CHANNEL_REDIS_URL", default="redis://redis:6379/1")],
+            # Global default capacity per channel
+            "capacity": env.int("CHANNEL_CAPACITY", default=2000),
+            # Pattern-specific capacities (hot groups)
+            "channel_capacity": {
+                "prices_*": env.int("CHANNEL_CAPACITY_PRICES", default=2000),
+                "candles_*": env.int("CHANNEL_CAPACITY_CANDLES", default=5000),
+            },
+            # Expiry for individual channels and groups
+            "expiry": env.int("CHANNEL_EXPIRY_SEC", default=10),
+            "group_expiry": env.int("CHANNEL_GROUP_EXPIRY_SEC", default=120),
         },
     },
 }
@@ -208,6 +236,10 @@ LOGGING = {
             "format": "[%(asctime)s] %(levelname)s %(name)s: %(message)s",
             "datefmt": "%Y-%m-%d %H:%M:%S",
         },
+        "task_formatter": {
+            "format": "[%(asctime)s] [%(levelname)s] [%(name)s] [%(process)d] %(message)s",
+            "datefmt": "%Y-%m-%d %H:%M:%S",
+        },
     },
     "handlers": {
         "console": {
@@ -219,6 +251,11 @@ LOGGING = {
             "filename": LOG_DIR / "application.log",
             "formatter": "standard",
         },
+        "db_log": {
+            "level": "INFO",
+            "class": "task_logs.handlers.DatabaseLogHandler",
+            "formatter": "task_formatter",
+        },
     },
     "loggers": {
         "": {  # root logger
@@ -227,6 +264,11 @@ LOGGING = {
         },
         "django": {
             "handlers": ["console", "file"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "bots": {
+            "handlers": ["console", "file", "db_log"],
             "level": "INFO",
             "propagate": False,
         },
@@ -280,3 +322,40 @@ DATA_ROOT.mkdir(exist_ok=True)  # Ensure the directory exists
 
 OANDA_ACCESS_TOKEN = env("OANDA_ACCESS_TOKEN")
 OANDA_ENVIRONMENT = env("OANDA_ENVIRONMENT")
+
+
+CELERY_RESULT_BACKEND = "django-db"
+
+# Concurrency controls (locks/cooldowns)
+# If REDIS_URL not provided, the utils will fallback to CELERY_BROKER_URL or no-op.
+REDIS_URL = env.str("REDIS_URL", default=os.getenv("REDIS_URL", ""))
+EXEC_LOCK_TTL_MS = env.int("EXEC_LOCK_TTL_MS", default=5000)  # 5s default
+MIN_ENTRY_COOLDOWN_SEC = env.int("MIN_ENTRY_COOLDOWN_SEC", default=0)  # per-run default; strategy may override
+
+# --- AI Strategy Generation Service settings ---
+AI_STRATEGY_API_URL = env.str("AI_STRATEGY_API_URL", default="https://endlessly-central-gelding.ngrok-free.app/webhook/6b891469-8e13-40be-80ed-767932094cff")
+AI_STRATEGY_API_KEY = env.str("AI_STRATEGY_API_KEY", default="")
+AI_STRATEGY_TIMEOUT_SEC = env.int("AI_STRATEGY_TIMEOUT_SEC", default=15)
+AI_STRATEGY_MAX_PROMPT_CHARS = env.int("AI_STRATEGY_MAX_PROMPT_CHARS", default=4000)
+AI_STRATEGY_CACHE_TTL_SEC = env.int("AI_STRATEGY_CACHE_TTL_SEC", default=600)
+AI_STRATEGY_RETRY_MAX_ATTEMPTS = env.int("AI_STRATEGY_RETRY_MAX_ATTEMPTS", default=2)
+AI_STRATEGY_CIRCUIT_FAIL_MAX = env.int("AI_STRATEGY_CIRCUIT_FAIL_MAX", default=5)
+AI_STRATEGY_CIRCUIT_RESET_SEC = env.int("AI_STRATEGY_CIRCUIT_RESET_SEC", default=60)
+
+# DRF throttle rate for the strategy generation endpoint (ScopedRateThrottle scope: 'strategy_gen')
+REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"] = {
+    **REST_FRAMEWORK.get("DEFAULT_THROTTLE_RATES", {}),
+    "strategy_gen": env.str("THROTTLE_RATE_STRATEGY_GEN", default="20/min"),
+}
+
+# --- Bots tracing/explainability feature flags ---
+BOTS_TRACE_ENABLED_DEFAULT = env.bool("BOTS_TRACE_ENABLED_DEFAULT", default=True)
+BOTS_TRACE_MAX_ROWS = env.int("BOTS_TRACE_MAX_ROWS", default=250_000)
+BOTS_TRACE_BATCH_SIZE = env.int("BOTS_TRACE_BATCH_SIZE", default=1000)
+BOTS_TRACE_SAMPLING = env.int("BOTS_TRACE_SAMPLING", default=1)
+
+INTERNAL_SHARED_SECRET = env.str("INTERNAL_SHARED_SECRET", default=os.getenv("APP_INTERNAL_SHARED_SECRET", ""))
+if not INTERNAL_SHARED_SECRET:
+    # Generate a stable-on-boot random secret if none provided (dev only). For prod, set env var.
+    import secrets
+    INTERNAL_SHARED_SECRET = secrets.token_urlsafe(32)

@@ -44,6 +44,7 @@ from .services import (  # Grouped imports for services
     get_pending_orders,
     cancel_pending_order,
 )
+from .tasks import synchronize_account_trades
 from .serializers import (
     OrderSerializer,
     ExecuteTradeInputSerializer,
@@ -169,7 +170,9 @@ class CloseTradeView(APIView):
         except ValueError:
             raise ValidationError("Invalid trade ID format.")
 
-        result = close_trade_globally(request.user, valid_trade_id)
+        client_reason = (request.data or {}).get("close_reason")
+        client_subreason = (request.data or {}).get("close_subreason")
+        result = close_trade_globally(request.user, valid_trade_id, client_close_reason=client_reason, client_close_subreason=client_subreason)
         return Response(result, status=status.HTTP_200_OK)
 
 
@@ -280,6 +283,18 @@ class OpenPositionsLiveView(APIView):
             )
 
         elif account.platform == "cTrader":
+            # Initialize with DB trades
+            db_trades = Trade.objects.filter(account=account, trade_status="open")
+            serialized_db_trades = TradeSerializer(db_trades, many=True).data
+            final_open_positions = []
+            db_trade_order_ids = set()
+            for trade_data in serialized_db_trades:
+                trade_data["source"] = "database"
+                trade_data.pop("reason", None)
+                if trade_data.get("order_id") is not None:
+                    db_trade_order_ids.add(trade_data["order_id"])
+                final_open_positions.append(trade_data)
+
             try:
                 ctrader_account = CTraderAccount.objects.get(account=account)
             except CTraderAccount.DoesNotExist:
@@ -372,9 +387,11 @@ class OpenPositionsLiveView(APIView):
                     }
                     final_open_positions.append(pos_data)
         else:
-            # Unsupported platform, just return DB trades
+            # Unsupported platform, just return DB trades from our database
+            db_trades = Trade.objects.filter(account=account, trade_status="open")
+            serializer = TradeSerializer(db_trades, many=True)
             return Response(
-                {"open_positions": final_open_positions}, status=status.HTTP_200_OK
+                {"open_positions": serializer.data}, status=status.HTTP_200_OK
             )
 
         return Response(
@@ -397,7 +414,11 @@ class AllOpenPositionsLiveView(APIView):
         db_trade_order_ids = set()
         account_id = self.request.query_params.get("account", None)
         if account_id:
-            user_accounts = user_accounts.filter(Q(id=account_id) | Q(simple_id=True))
+            try:
+                account_id = uuid.UUID(account_id, version=4)
+                user_accounts = user_accounts.filter(id=account_id)
+            except Exception:
+                user_accounts = user_accounts.filter(name__iexact=str(account_id)) 
 
         # 1. Fetch all open trades from the database for the user
         db_trades = Trade.objects.filter(account__in=user_accounts, trade_status="open")
@@ -632,37 +653,19 @@ class AllPendingOrdersView(APIView):
 
     def get(self, request):
         accounts = Account.objects.filter(user=request.user)
-        all_pending_orders = []
-        account_id = self.request.query_params.get("account", None)
+        account_id = self.request.query_params.get("account_id", None)
+
         if account_id:
-            accounts = accounts.filter(Q(id=account_id) | Q(simple_id=True))
-
-        for account in accounts:
             try:
-                pending_orders_data = get_pending_orders(account)
-                # Add account info to each order for better context on the frontend
-                for order in pending_orders_data:
-                    order["account_id"] = str(account.id)
-                    order["account_name"] = account.name
-                all_pending_orders.extend(pending_orders_data)
-            except APIException as e:
-                # Log the error and continue to the next account
-                logger.error(
-                    f"Could not fetch pending orders for account {account.id}: {e}"
-                )
-                continue
-            except NotImplementedError:
-                # Skip platforms that are not implemented
-                continue
-            except Exception as e:
-                logger.error(
-                    f"Unexpected error fetching pending orders for account {account.id}: {e}"
-                )
-                continue
-
-        return Response(
-            {"pending_orders": all_pending_orders}, status=status.HTTP_200_OK
-        )
+                account_id = uuid.UUID(account_id, version=4)
+                accounts = Account.objects.filter(id=account_id, user=request.user)
+            except Exception:
+                accounts = Account.objects.filter(name__iexact=str(account_id), user=request.user)
+            
+        pending_orders = []
+        for account in accounts:
+            pending_orders.extend(get_pending_orders(account))
+        return Response({"pending_orders": pending_orders}, status=status.HTTP_200_OK)
 
 
 class CancelPendingOrderView(APIView):
@@ -674,7 +677,7 @@ class CancelPendingOrderView(APIView):
     authentication_classes = [TokenAuthentication, JWTAuthentication]
     permission_classes = [IsAuthenticated]
 
-    def delete(self, request, order_id: uuid.UUID):
+    def delete(self, request, order_id: str):
         result = cancel_pending_order(user=request.user, order_id=order_id)
         return Response(result, status=status.HTTP_200_OK)
 
@@ -718,6 +721,23 @@ class PartialCloseTradeView(APIView):
 
 
 # ----- Watchlist Views -----
+class SynchronizeAccountTradesView(APIView):
+    """
+    Triggers the synchronization of trades for a specific account.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, account_id):
+        try:
+            account = Account.objects.get(id=account_id, user=request.user)
+        except Account.DoesNotExist:
+            return Response({"error": "Account not found or you do not have permission to access it."}, status=status.HTTP_404_NOT_FOUND)
+
+        synchronize_account_trades.delay(account_id=account.id)
+        
+        return Response({"message": f"Synchronization task for account {account.id} has been queued."}, status=status.HTTP_202_ACCEPTED)
+
+
 class WatchlistViewSet(viewsets.ModelViewSet):
     """
     API endpoint that allows watchlists to be viewed or edited.

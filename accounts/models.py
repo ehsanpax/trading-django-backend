@@ -70,11 +70,15 @@ class CTraderAccount(models.Model):
         related_name="ctrader_accounts",
     )
     ctid_trader_account_id = models.BigIntegerField(null=True, blank=True)
+    # New: owning cTrader user id (Spotware user id)
+    ctid_user_id = models.BigIntegerField(null=True, blank=True)
     account_number = models.CharField(
         max_length=255, unique=True, null=True, blank=True
     )
     access_token = models.CharField(max_length=255, null=True, blank=True)
     refresh_token = models.CharField(max_length=255, null=True, blank=True)
+    # New: access token expiry timestamp
+    token_expires_at = models.DateTimeField(null=True, blank=True)
     is_sandbox = models.BooleanField(default=False)
     currency = models.CharField(max_length=50, null=True, blank=True)
     broker = models.CharField(max_length=255, null=True, blank=True)

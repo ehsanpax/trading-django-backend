@@ -3,6 +3,7 @@ from pathlib import Path # For constructing path to strategy templates
 from django.conf import settings # To get BASE_DIR
 import dataclasses # For inspecting dataclass fields
 from datetime import datetime # Added for timestamp conversion
+from django.db import models
 
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
@@ -10,7 +11,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.shortcuts import get_object_or_404
 from django.core.exceptions import ValidationError as DjangoValidationError
-
+from rest_framework.authtoken.models import Token
 from .models import Bot, BotVersion, BacktestConfig, BacktestRun, LiveRun
 from .serializers import (
     BotSerializer, BotVersionSerializer, BacktestConfigSerializer,
@@ -20,16 +21,25 @@ from .serializers import (
     BacktestIndicatorDataSerializer, BacktestTradeMarkerSerializer,
     StrategyMetadataSerializer, IndicatorMetadataSerializer # New metadata serializers
 )
+from .serializers import BacktestDecisionTraceSerializer
 from .models import BacktestOhlcvData, BacktestIndicatorData
 from . import services
+from .compiler import GraphCompiler
 from accounts.models import Account
-from bots.services import StrategyManager # Import StrategyManager
+from bots.services import StrategyManager
+from core.registry import indicator_registry, operator_registry, action_registry
+from analysis.utils.data_processor import load_m1_data_from_parquet, resample_data
+import pandas as pd
+from decimal import Decimal
 
 # Add logger to views
 import logging
 logger = logging.getLogger(__name__)
 from rest_framework.exceptions import PermissionDenied
 import json # Added for debug export
+from rest_framework.throttling import ScopedRateThrottle
+from bots.ai_strategy import generate_strategy_config, ProviderError, ValidationError as ProviderValidationError
+import uuid
 
 def validate_ohlcv_bars(bars, logger=None, label="OHLCV"):
     prev_time = None
@@ -76,11 +86,29 @@ class IndicatorMetadataAPIView(APIView):
     def get(self, request, *args, **kwargs):
         try:
             metadata = StrategyManager.get_available_indicators_metadata()
-            serializer = IndicatorMetadataSerializer(metadata, many=True)
-            return Response(serializer.data, status=status.HTTP_200_OK)
+            return Response(metadata, status=status.HTTP_200_OK)
         except Exception as e:
             logger.error(f"Error fetching indicator metadata: {e}", exc_info=True)
             return Response({"error": "Could not retrieve indicator metadata."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class NodeMetadataAPIView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request, *args, **kwargs):
+        indicators_meta = StrategyManager.get_available_indicators_metadata()
+        nodes = {
+            "indicators": indicators_meta,
+            "operators": [
+                {"name": name, "params": op.PARAMS_SCHEMA}
+                for name, op in operator_registry.get_all_operators().items()
+            ],
+            "actions": [
+                {"name": name, "params": ac.PARAMS_SCHEMA}
+                for name, ac in action_registry.get_all_actions().items()
+            ],
+        }
+        return Response(nodes, status=status.HTTP_200_OK)
 
 
 class BotViewSet(viewsets.ModelViewSet):
@@ -133,6 +161,7 @@ class BotVersionViewSet(viewsets.ModelViewSet):
 
                 bot_version = services.create_bot_version(
                     bot=bot,
+                    version_name=data.get('version_name'),
                     strategy_name=data['strategy_name'],
                     strategy_params=data['strategy_params'],
                     indicator_configs=data['indicator_configs'],
@@ -150,6 +179,63 @@ class BotVersionViewSet(viewsets.ModelViewSet):
                 return Response({"detail": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+    @action(detail=False, methods=['post'], url_path='from-graph')
+    def create_from_graph(self, request, *args, **kwargs):
+        # Simplified serializer for graph-based creation
+        bot_id = request.data.get('bot_id')
+        version_name = request.data.get('version_name')
+        strategy_graph = request.data.get('strategy_graph')
+        notes = request.data.get('notes')
+
+        if not bot_id or not strategy_graph:
+            return Response({"detail": "bot_id and strategy_graph are required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            bot = get_object_or_404(Bot, id=bot_id)
+            if not (request.user.is_staff or request.user.is_superuser or bot.created_by == request.user):
+                return Response({"detail": "You do not have permission to create a version for this bot."},
+                                status=status.HTTP_403_FORBIDDEN)
+
+            # Validate the graph with the compiler
+            compiler = GraphCompiler(strategy_graph)
+            compiler.validate()
+
+            bot_version = BotVersion.objects.create(
+                bot=bot,
+                version_name=version_name,
+                strategy_graph=strategy_graph,
+                notes=notes,
+                # Set other fields to default/empty if they don't apply
+                strategy_name="graph_based_strategy",
+                strategy_params={},
+                indicator_configs=[]
+            )
+            response_serializer = BotVersionSerializer(bot_version)
+            return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+        except Bot.DoesNotExist:
+            return Response({"detail": "Bot not found."}, status=status.HTTP_404_NOT_FOUND)
+        except ValueError as ve:
+            return Response({"detail": f"Invalid strategy graph: {ve}"}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            logger.error(f"Error creating BotVersion from graph: {e}", exc_info=True)
+            return Response({"detail": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=True, methods=['get'], url_path='strategy-graph')
+    def strategy_graph(self, request, pk=None):
+        bot_version = self.get_object()
+        graph_data = {}
+        if bot_version.strategy_graph:
+            graph_data = bot_version.strategy_graph
+        # Fallback for older versions that might use strategy_params
+        elif bot_version.strategy_params:
+            graph_data = bot_version.strategy_params
+        
+        response_data = {
+            'version_name': bot_version.version_name,
+            'strategy_graph': graph_data
+        }
+        return Response(response_data, status=status.HTTP_200_OK)
+
 
 class BacktestConfigViewSet(viewsets.ModelViewSet):
     queryset = BacktestConfig.objects.all()
@@ -158,42 +244,176 @@ class BacktestConfigViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        qs = BacktestConfig.objects.select_related('bot_version__bot').all()
+        qs = BacktestConfig.objects.select_related('bot_version__bot', 'bot', 'owner').all()
         if not (user.is_staff or user.is_superuser):
-            qs = qs.filter(bot_version__bot__created_by=user)
-
+            qs = qs.filter(
+                models.Q(bot_version__bot__created_by=user) |
+                models.Q(bot__created_by=user) |
+                models.Q(owner=user)
+            )
         bot_version_id = self.request.query_params.get('bot_version_id')
+        bot_id = self.request.query_params.get('bot_id')
+        scope = self.request.query_params.get('scope')
         if bot_version_id:
-            qs = qs.filter(bot_version_id=bot_version_id)
+            ver_bot_id = BotVersion.objects.filter(id=bot_version_id).values_list('bot_id', flat=True).first()
+            q = models.Q(bot_version_id=bot_version_id)
+            if ver_bot_id:
+                q |= models.Q(bot_id=ver_bot_id)
+            q |= models.Q(owner=user)
+            qs = qs.filter(q)
+        if bot_id:
+            qs = qs.filter(models.Q(bot_id=bot_id) | models.Q(owner=user))
+        if scope == 'version':
+            qs = qs.filter(bot_version__isnull=False)
+        elif scope == 'bot':
+            qs = qs.filter(bot__isnull=False)
+        elif scope == 'user':
+            qs = qs.filter(owner__isnull=False)
         return qs
 
     def perform_create(self, serializer):
-        bot_version = serializer.validated_data.get('bot_version')
         user = self.request.user
-        if not (user.is_staff or user.is_superuser or bot_version.bot.created_by == user):
-            raise PermissionDenied("You do not have permission for this bot version.")
+        bv = serializer.validated_data.get('bot_version')
+        bot = serializer.validated_data.get('bot')
+        owner = serializer.validated_data.get('owner') or serializer.validated_data.get('owner_id')
+        if not (user.is_staff or user.is_superuser):
+            if bv and bv.bot.created_by_id != user.id:
+                raise PermissionDenied("You do not have permission for this bot version.")
+            if bot and bot.created_by_id != user.id:
+                raise PermissionDenied("You do not have permission for this bot.")
+            if owner and getattr(owner, 'id', owner) != user.id:
+                raise PermissionDenied("You cannot assign configs to another user.")
         serializer.save()
 
 
-class BacktestRunViewSet(viewsets.ReadOnlyModelViewSet):
+class BacktestRunViewSet(viewsets.ModelViewSet):
     queryset = BacktestRun.objects.all()
     serializer_class = BacktestRunSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
         user = self.request.user
-        qs = BacktestRun.objects.select_related('config__bot_version__bot').all()
+        qs = BacktestRun.objects.select_related('config__bot_version__bot', 'config__bot', 'config__owner', 'bot_version__bot').all()
         if not (user.is_staff or user.is_superuser):
-            qs = qs.filter(config__bot_version__bot__created_by=user)
-
+            qs = qs.filter(
+                models.Q(bot_version__bot__created_by=user) |
+                models.Q(config__bot__created_by=user) |
+                models.Q(config__owner=user)
+            )
         config_id = self.request.query_params.get('config_id')
         if config_id:
             qs = qs.filter(config_id=config_id)
         bot_version_id = self.request.query_params.get('bot_version_id')
         if bot_version_id:
-            qs = qs.filter(config__bot_version_id=bot_version_id)
+            qs = qs.filter(bot_version_id=bot_version_id)
+        bot_id = self.request.query_params.get('bot_id')
+        if bot_id:
+            qs = qs.filter(models.Q(bot_version__bot_id=bot_id) | models.Q(config__bot_id=bot_id))
         return qs
 
+    @action(detail=True, methods=['get'], url_path='trace')
+    def trace(self, request, pk=None):
+        run = self.get_object()
+        user = request.user
+        if not (user.is_staff or user.is_superuser or (run.bot_version and run.bot_version.bot.created_by == user) or (run.config.bot and run.config.bot.created_by == user) or (run.config.owner == user)):
+            return Response({"detail": "You do not have permission to access traces for this run."}, status=status.HTTP_403_FORBIDDEN)
+
+        # Filters
+        bar_index = request.query_params.get('bar_index')
+        ts = request.query_params.get('ts')
+        section = request.query_params.get('section')
+        kind = request.query_params.get('kind')
+        limit = int(request.query_params.get('limit') or 200)
+        offset = int(request.query_params.get('offset') or 0)
+
+        qs = run.decision_traces.all()
+        if bar_index is not None:
+            try:
+                qs = qs.filter(bar_index=int(bar_index))
+            except ValueError:
+                return Response({"detail": "bar_index must be an integer"}, status=status.HTTP_400_BAD_REQUEST)
+        if ts is not None:
+            # Support both epoch seconds and ISO8601
+            try:
+                import datetime
+                if ts.isdigit():
+                    ts_dt = datetime.datetime.utcfromtimestamp(int(ts))
+                else:
+                    ts_dt = datetime.datetime.fromisoformat(ts)
+                qs = qs.filter(ts=ts_dt)
+            except Exception:
+                return Response({"detail": "Invalid ts; use epoch seconds or ISO8601."}, status=status.HTTP_400_BAD_REQUEST)
+        if section:
+            qs = qs.filter(section=section)
+        if kind:
+            qs = qs.filter(kind=kind)
+
+        total = qs.count()
+        items = qs.order_by('bar_index', 'idx', 'id')[offset:offset+limit]
+        from .serializers import BacktestDecisionTraceSerializer
+        data = BacktestDecisionTraceSerializer(items, many=True).data
+        return Response({"items": data, "count": total}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get'], url_path='explain')
+    def explain(self, request, pk=None):
+        run = self.get_object()
+        user = request.user
+        if not (user.is_staff or user.is_superuser or (run.bot_version and run.bot_version.bot.created_by == user) or (run.config.bot and run.config.bot.created_by == user) or (run.config.owner == user)):
+            return Response({"detail": "You do not have permission to access explanations for this run."}, status=status.HTTP_403_FORBIDDEN)
+
+        bar_index = request.query_params.get('bar_index')
+        ts = request.query_params.get('ts')
+        include = request.query_params.get('include')
+        include_set = set((include or '').split(',')) if include else set()
+
+        qs = run.decision_traces.all()
+        target_qs = None
+        try:
+            if bar_index is not None:
+                target_qs = qs.filter(bar_index=int(bar_index))
+            elif ts is not None:
+                import datetime
+                if ts.isdigit():
+                    ts_dt = datetime.datetime.utcfromtimestamp(int(ts))
+                else:
+                    ts_dt = datetime.datetime.fromisoformat(ts)
+                target_qs = qs.filter(ts=ts_dt)
+            else:
+                return Response({"detail": "Provide bar_index or ts"}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            return Response({"detail": "Invalid bar_index or ts"}, status=status.HTTP_400_BAD_REQUEST)
+
+        atoms = list(target_qs.order_by('idx', 'id').values('section', 'kind', 'payload'))
+        # Group by section
+        grouped: Dict[str, list] = {}
+        for a in atoms:
+            sec = a.get('section') or 'engine'
+            grouped.setdefault(sec, []).append(a)
+
+        # Simple heuristic summary
+        summary = {"action": "no_entry", "reason": ""}
+        fills = grouped.get('fill', [])
+        if any(x.get('kind') == 'entry' for x in fills):
+            summary = {"action": "entry", "reason": "fill:entry"}
+        elif any(x.get('kind') == 'exit' for x in fills):
+            summary = {"action": "exit", "reason": "fill:exit"}
+        else:
+            # check blocks
+            if any(x.get('kind') == 'blocked' for x in grouped.get('filter', [])):
+                summary = {"action": "no_entry", "reason": f"Filter blocked: {grouped['filter'][0]['payload'].get('reason')}"}
+            elif any(x.get('kind') == 'blocked' for x in grouped.get('risk', [])):
+                summary = {"action": "no_entry", "reason": f"Risk blocked: {grouped['risk'][0]['payload'].get('reason')}"}
+
+        response = {
+            "bar_index": int(bar_index) if bar_index is not None else None,
+            "symbol": run.instrument_symbol,
+            "timeframe": run.config.timeframe,
+            "summary": summary,
+            "path": grouped,
+            "state": {"position": None, "balance": None},  # can be enriched later
+        }
+        return Response(response, status=status.HTTP_200_OK)
+        
 class LiveRunViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = LiveRun.objects.all()
     serializer_class = LiveRunSerializer
@@ -216,34 +436,41 @@ class LaunchBacktestAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, *args, **kwargs):
-        serializer = LaunchBacktestSerializer(data=request.data)
+        serializer = LaunchBacktestSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
             data = serializer.validated_data
             try:
                 config = get_object_or_404(BacktestConfig, id=data['config_id'])
-                if not (request.user.is_staff or request.user.is_superuser or config.bot_version.bot.created_by == request.user):
-                    return Response({"detail": "You do not have permission for this backtest configuration."},
-                                    status=status.HTTP_403_FORBIDDEN)
+                bot_version = get_object_or_404(BotVersion, id=data['bot_version_id'])
+                user = request.user
+                if not (user.is_staff or user.is_superuser):
+                    owns_cfg = (
+                        (config.bot_version and config.bot_version.bot.created_by_id == user.id) or
+                        (config.bot and config.bot.created_by_id == user.id) or
+                        (config.owner_id == user.id)
+                    )
+                    if not owns_cfg or bot_version.bot.created_by_id != user.id:
+                        return Response({"detail": "You do not have permission to use this backtest configuration or version."},
+                                        status=status.HTTP_403_FORBIDDEN)
 
-                # Create the BacktestRun instance first
                 backtest_run = BacktestRun.objects.create(
                     config=config,
+                    bot_version=bot_version,
                     instrument_symbol=data['instrument_symbol'],
                     data_window_start=data['data_window_start'],
                     data_window_end=data['data_window_end'],
                     status='PENDING'
                 )
 
-                # Then, launch the backtest with the new backtest_run_id
-                services.launch_backtest(backtest_run_id=backtest_run.id)
-                
+                services.launch_backtest(
+                    backtest_run_id=backtest_run.id,
+                    random_seed=data.get('random_seed')
+                )
                 response_serializer = BacktestRunSerializer(backtest_run)
                 return Response(response_serializer.data, status=status.HTTP_202_ACCEPTED)
-            except BacktestConfig.DoesNotExist as e:
-                 return Response({"detail": str(e)}, status=status.HTTP_404_NOT_FOUND)
             except DjangoValidationError as ve:
-                logger.error(f"Validation error launching backtest: {ve.message_dict if hasattr(ve, 'message_dict') else str(ve)}", exc_info=True)
-                return Response({"detail": ve.message_dict if hasattr(ve, 'message_dict') else str(ve)}, status=status.HTTP_400_BAD_REQUEST)
+                logger.error(f"Validation error launching backtest: {ve}", exc_info=True)
+                return Response({"detail": str(ve)}, status=status.HTTP_400_BAD_REQUEST)
             except Exception as e:
                 logger.error(f"Error launching backtest: {e}", exc_info=True)
                 return Response({"detail": "An error occurred while launching the backtest."},
@@ -254,38 +481,37 @@ class StartLiveRunAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, *args, **kwargs):
-        serializer = CreateLiveRunSerializer(data=request.data) # Use CreateLiveRunSerializer
+        serializer = CreateLiveRunSerializer(data=request.data)
         if serializer.is_valid():
             data = serializer.validated_data
             try:
                 bot_version = get_object_or_404(BotVersion, id=data['bot_version_id'])
                 if not (request.user.is_staff or request.user.is_superuser or bot_version.bot.created_by == request.user):
-                     return Response({"detail": "You do not have permission to start a live run for this bot version."},
-                                    status=status.HTTP_403_FORBIDDEN)
+                    return Response({"detail": "You do not have permission to start a live run for this bot version."}, status=status.HTTP_403_FORBIDDEN)
 
-                # First, create the LiveRun object
+                account = get_object_or_404(Account, id=data['account_id'], user=request.user)
+
                 live_run = LiveRun.objects.create(
                     bot_version=bot_version,
                     instrument_symbol=data['instrument_symbol'],
-                    status='PENDING' # Set initial status
+                    account=account,
+                    timeframe=data.get('timeframe') or 'M1',
+                    decision_mode=data.get('decision_mode') or 'CANDLE',
+                    status='PENDING'
                 )
 
-                # Then, trigger the service function with the created LiveRun's ID
                 services.start_bot_live_run(live_run_id=live_run.id)
-                
-                # Re-fetch the run to get its updated status (e.g., PENDING)
                 live_run.refresh_from_db()
                 response_serializer = LiveRunSerializer(live_run)
                 return Response(response_serializer.data, status=status.HTTP_202_ACCEPTED)
             except BotVersion.DoesNotExist as e:
-                 return Response({"detail": str(e)}, status=status.HTTP_404_NOT_FOUND)
+                return Response({"detail": str(e)}, status=status.HTTP_404_NOT_FOUND)
             except DjangoValidationError as ve:
                 logger.error(f"Validation error starting live run: {ve.message_dict if hasattr(ve, 'message_dict') else str(ve)}", exc_info=True)
                 return Response({"detail": ve.message_dict if hasattr(ve, 'message_dict') else str(ve)}, status=status.HTTP_400_BAD_REQUEST)
             except Exception as e:
                 logger.error(f"Error starting live run: {e}", exc_info=True)
-                return Response({"detail": "An error occurred while starting the live run."},
-                                status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                return Response({"detail": "An error occurred while starting the live run."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 class StopLiveRunAPIView(APIView):
@@ -315,82 +541,104 @@ class BacktestChartDataAPIView(APIView):
         logger.info(f"Fetching chart data for BacktestRun ID: {backtest_run_id}")
         backtest_run = get_object_or_404(BacktestRun, id=backtest_run_id)
 
-        # Permission check: Ensure the user can access this backtest run's data
         user = request.user
         if not (user.is_staff or user.is_superuser or backtest_run.config.bot_version.bot.created_by == user):
             raise PermissionDenied("You do not have permission to access chart data for this backtest run.")
 
         try:
-            # 1. Fetch OHLCV data
-            # Order by timestamp initially from the database
+            # Fetch OHLCV data from the database
             ohlcv_queryset = BacktestOhlcvData.objects.filter(backtest_run=backtest_run).order_by('timestamp')
-
-            # Process OHLCV data for Lightweight Charts (LWC)
-            # LWC requires: [{ time: seconds, open, high, low, close }]
-            # And strict ascending order by 'time' with no duplicates.
-
-            # Using a dictionary to handle potential duplicates after flooring to seconds
-            # We'll keep the 'last' encountered bar for a given second if duplicates exist after conversion.
-            ohlcv_data_lwc_map = {}
-            for o in ohlcv_queryset:
-                # Convert timestamp to Unix seconds (integer).
-                # Use int() to ensure it's a whole number of seconds, as required by LWC.
-                time_in_seconds = int(o.timestamp.timestamp())
-
-                # Store the bar. If a duplicate time_in_seconds occurs, this will overwrite
-                # the previous one, effectively keeping the last bar for that second.
-                ohlcv_data_lwc_map[time_in_seconds] = {
-                    "time": time_in_seconds,
-                    "open": float(o.open), # Ensure numeric types (float or int)
+            ohlcv_data_lwc = [
+                {
+                    "time": int(o.timestamp.timestamp()),
+                    "open": float(o.open),
                     "high": float(o.high),
                     "low": float(o.low),
                     "close": float(o.close),
-                    # "volume": float(o.volume) if hasattr(o, 'volume') else 0.0, # Include if volume is in your model
                 }
+                for o in ohlcv_queryset
+            ]
 
-            # Convert map values to a list and sort explicitly by time.
-            # This ensures strict ascending order and that no duplicates remain,
-            # as map keys are unique.
-            ohlcv_data_lwc = sorted(ohlcv_data_lwc_map.values(), key=lambda k: k['time'])
-
-            # Optional: Add a backend validation check to log any remaining issues
-            for i in range(1, len(ohlcv_data_lwc)):
-                if ohlcv_data_lwc[i]['time'] <= ohlcv_data_lwc[i-1]['time']:
-                    logger.error(
-                        f"Backend OHLCV data sorting issue: Index {i}, Time {ohlcv_data_lwc[i]['time']}, "
-                        f"Prev Time {ohlcv_data_lwc[i-1]['time']}. This should not happen after map & sort."
-                    )
-
-            logger.info(f"Prepared {len(ohlcv_data_lwc)} OHLCV bars for frontend.")
-
-
-            # 2. Fetch Indicator data and group by indicator_name
+            # Fetch Indicator data from the database
             indicator_queryset = BacktestIndicatorData.objects.filter(backtest_run=backtest_run).order_by('indicator_name', 'timestamp')
 
-            indicator_data_grouped = {}
+            # Group indicator series by (base indicator + params), aggregate outputs under each group
+            indicators_registry_map = indicator_registry.get_all_indicators()
+            registered_names_by_len = sorted(indicators_registry_map.keys(), key=len, reverse=True)
+
+            grouped_indicators: dict[str, dict] = {}
+
             for record in indicator_queryset:
-                # Lightweight Charts also expects seconds for time series
-                point = {"time": int(record.timestamp.timestamp()), "value": float(record.value)}
-                if record.indicator_name not in indicator_data_grouped:
-                    indicator_data_grouped[record.indicator_name] = [point]
+                full_name = record.indicator_name  # e.g. "dmi_plus_di_length_14" or "stochastic_rsi_stoch_rsi_k_length_14"
+
+                # 1) Detect base indicator name using the longest registered prefix
+                base_name = None
+                remainder = None
+                for reg_name in registered_names_by_len:
+                    prefix = f"{reg_name}_"
+                    if full_name.startswith(prefix):
+                        base_name = reg_name
+                        remainder = full_name[len(prefix):]
+                        break
+                if base_name is None:
+                    # Fallback: take the first token as base
+                    parts = full_name.split('_')
+                    base_name = parts[0]
+                    remainder = full_name[len(base_name) + 1:] if len(parts) > 1 else ''
+
+                # 2) Resolve indicator class and metadata
+                try:
+                    indicator_cls = indicator_registry.get_indicator(base_name)
+                    pane_type = getattr(indicator_cls, 'PANE_TYPE', 'OVERLAY')
+                    possible_outputs = getattr(indicator_cls, 'OUTPUTS', []) or []
+                except Exception:
+                    indicator_cls = None
+                    pane_type = 'OVERLAY'
+                    possible_outputs = []
+
+                # 3) Detect output name from remainder using OUTPUTS list (handles underscores in output names)
+                output_name = None
+                params_part = ''
+                if remainder:
+                    for out in sorted(possible_outputs, key=len, reverse=True):
+                        if remainder == out or remainder.startswith(out + '_'):
+                            output_name = out
+                            params_part = remainder[len(out):]
+                            if params_part.startswith('_'):
+                                params_part = params_part[1:]
+                            break
+                    if output_name is None:
+                        # Fallback to the first token
+                        tok = remainder.split('_')[0]
+                        output_name = tok
+                        params_part = remainder[len(tok):]
+                        if params_part.startswith('_'):
+                            params_part = params_part[1:]
                 else:
-                    indicator_data_grouped[record.indicator_name].append(point)
+                    # No remainder: treat as single-output where output equals base
+                    output_name = base_name
+                    params_part = ''
 
-            # Ensure each indicator series is also sorted by time and de-duplicated (optional but good practice)
-            for key in indicator_data_grouped:
-                # Use a dict for de-duplication within each indicator series, keeping the last value for a given second
-                series_map = {p['time']: p for p in indicator_data_grouped[key]}
-                indicator_data_grouped[key] = sorted(series_map.values(), key=lambda k: k['time'])
+                # 4) Build a stable group key: base + params (exclude output)
+                group_key = f"{base_name}_{params_part}" if params_part else base_name
 
+                # 5) Add data point
+                point = {"time": int(record.timestamp.timestamp()), "value": float(record.value)}
+                grp = grouped_indicators.setdefault(group_key, {"pane_type": pane_type, "outputs": {}})
+                grp["outputs"].setdefault(output_name, []).append(point)
 
-            # 3. Fetch and serialize Trade Markers from simulated_trades_log
+            # 6) Sort each output series by time
+            for grp in grouped_indicators.values():
+                for out_name, series_points in grp["outputs"].items():
+                    series_points.sort(key=lambda k: k['time'])
+
+            indicator_data_grouped = grouped_indicators
+
+            # Fetch and serialize Trade Markers from the backtest run's JSON log
             raw_trades_log = backtest_run.simulated_trades_log or []
-
-            # Pre-process markers to ensure timestamps are in seconds and numeric values are floats
             processed_trade_markers = []
             for t in raw_trades_log:
                 try:
-                    # Convert ISO format string to datetime object, handle 'Z' for UTC, then to Unix timestamp in seconds
                     entry_dt = datetime.fromisoformat(t['entry_timestamp'].replace('Z', '+00:00'))
                     entry_time_s = int(entry_dt.timestamp())
 
@@ -404,41 +652,390 @@ class BacktestChartDataAPIView(APIView):
                         "entry_price": float(t['entry_price']),
                         "direction": t['direction'],
                         "exit_timestamp": exit_time_s,
-                        "exit_price": float(t['exit_price']) if t.get('exit_price') is not None else None,
-                        "pnl": float(t['pnl']) if t.get('pnl') is not None else None,
-                        # Add other fields if needed by BacktestTradeMarkerSerializer
+                        "exit_price": float(t.get('exit_price')),
+                        "pnl": float(t.get('pnl')),
                     })
                 except (ValueError, KeyError, TypeError) as e:
                     logger.error(f"Error processing trade marker: {t} - {e}", exc_info=True)
-                    continue # Skip malformed markers
+                    continue
 
             trade_markers_serialized = BacktestTradeMarkerSerializer(processed_trade_markers, many=True).data
 
-            # Prepare data for the main chart_data response
+            # Prepare the final response data
             chart_data = {
-                "ohlcv_data": ohlcv_data_lwc, # Using LWC-compatible data
+                "ohlcv_data": ohlcv_data_lwc,
                 "indicator_data": indicator_data_grouped,
                 "trade_markers": trade_markers_serialized,
-                "backtest_run_id": str(backtest_run.id), # Convert UUID to string for JSON serialization
+                "backtest_run_id": str(backtest_run.id),
                 "instrument_symbol": backtest_run.instrument_symbol,
+                "original_timeframe": backtest_run.config.timeframe,
                 "data_window_start": backtest_run.data_window_start.isoformat(),
                 "data_window_end": backtest_run.data_window_end.isoformat()
             }
-
-            # --- DEBUG EXPORT ---
-            # Use the string representation of the UUID for the filename
-            debug_file_path = Path(settings.BASE_DIR) / 'analysis_data' / f'backtest_chart_data_{str(backtest_run.id)}.json'
-            try:
-                debug_file_path.parent.mkdir(parents=True, exist_ok=True) # Ensure directory exists
-                with open(debug_file_path, 'w') as f:
-                    json.dump(chart_data, f, indent=4)
-                logger.info(f"Debug: Exported chart data to {debug_file_path}")
-            except Exception as e:
-                logger.error(f"Debug: Failed to export chart data to file {debug_file_path}: {e}", exc_info=True)
-            # --- END DEBUG EXPORT ---
 
             return Response(chart_data, status=status.HTTP_200_OK)
 
         except Exception as e:
             logger.error(f"Error fetching chart data for BacktestRun {backtest_run_id}: {e}", exc_info=True)
             return Response({"error": f"Could not retrieve chart data: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+class StrategyConfigGenerateAPIView(APIView):
+    permission_classes = [permissions.AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'strategy_gen'
+
+    def post(self, request, *args, **kwargs):
+        from .serializers import StrategyConfigGenerateRequestSerializer, StrategyConfigGenerateResponseSerializer
+
+        serializer = StrategyConfigGenerateRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        # Optional ownership/permission check: only enforce if user is authenticated and bot_version looks like a UUID
+        bot_version_id = data.get('bot_version')
+        if request.user.is_authenticated and bot_version_id:
+            try:
+                uuid.UUID(str(bot_version_id))
+                try:
+                    bv = BotVersion.objects.select_related('bot').get(id=bot_version_id)
+                    user = request.user
+                    if not (user.is_staff or user.is_superuser or bv.bot.created_by == user):
+                        return Response({"detail": "You do not have permission for this bot version."}, status=status.HTTP_403_FORBIDDEN)
+                except BotVersion.DoesNotExist:
+                    # Allow non-existent if external versions are used; comment out to enforce existence
+                    pass
+            except Exception:
+                # Non-UUID identifiers allowed
+                pass
+
+        idem_key = request.headers.get('Idempotency-Key') or request.META.get('HTTP_IDEMPOTENCY_KEY')
+        req_id = request.headers.get('X-Request-ID') or str(uuid.uuid4())
+        # Extract user token from Authorization header (Bearer <JWT>) if present
+        auth_header = request.META.get('HTTP_AUTHORIZATION', '')
+        user_token = None
+        if isinstance(auth_header, str) and auth_header.startswith('Bearer '):
+            user_token = auth_header.split(' ', 1)[1].strip()
+
+        try:
+            result = generate_strategy_config(
+                bot_version=bot_version_id,
+                prompt=data['prompt'],
+                user_id=(request.user.id if request.user.is_authenticated else 'anonymous'),
+                idempotency_key=idem_key,
+                options=data.get('options') or {},
+                user_token=user_token,
+            )
+        except ProviderValidationError as e:
+            payload = getattr(e, 'payload', None)
+            # Log validation details for debugging
+            try:
+                payload_snippet = json.dumps(payload)[:1000] if isinstance(payload, dict) else str(payload)[:1000]
+            except Exception:
+                payload_snippet = str(payload)[:1000]
+            logger.warning(f"[AI] validation error req_id={req_id} idem_key={idem_key} payload={payload_snippet}")
+            if isinstance(payload, dict):
+                return Response(payload, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+            return Response({"detail": str(e)}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+        except ProviderError as e:
+            msg = str(e)
+            logger.error(f"[AI] provider error req_id={req_id} idem_key={idem_key} msg={msg}")
+            if msg == 'timeout':
+                return Response({"detail": "Provider timeout"}, status=status.HTTP_504_GATEWAY_TIMEOUT)
+            if msg == 'circuit_open':
+                return Response({"detail": "Service temporarily unavailable"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+            return Response({"detail": "Upstream provider error"}, status=status.HTTP_502_BAD_GATEWAY)
+        except Exception as e:
+            logger.exception(f"strategy-config generate failed: {e}")
+            return Response({"detail": "Internal error"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        resp = StrategyConfigGenerateResponseSerializer(result).data
+        response = Response(resp, status=status.HTTP_200_OK)
+        response["X-Request-ID"] = req_id
+        if idem_key:
+            response["Idempotency-Key"] = idem_key
+        return response
+
+class NodeSchemaAPIView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request, *args, **kwargs):
+        def to_jsonschema_param(prop_schema: dict) -> dict:
+            if not isinstance(prop_schema, dict):
+                return {}
+            type_map = {
+                'int': 'integer', 'integer': 'integer',
+                'float': 'number', 'number': 'number',
+                'str': 'string', 'string': 'string',
+                'bool': 'boolean', 'boolean': 'boolean',
+                'object': 'object', 'array': 'array',
+            }
+            js: dict = {}
+            ptype = prop_schema.get('type')
+            if ptype:
+                js['type'] = type_map.get(ptype, ptype)
+            # enums / options
+            if isinstance(prop_schema.get('enum'), list):
+                js['enum'] = prop_schema['enum']
+            elif isinstance(prop_schema.get('options'), list):
+                js['enum'] = prop_schema['options']
+            # numeric/string constraints
+            if 'min' in prop_schema and js.get('type') in ('number', 'integer'):
+                js['minimum'] = prop_schema['min']
+            if 'max' in prop_schema and js.get('type') in ('number', 'integer'):
+                js['maximum'] = prop_schema['max']
+            if 'min_length' in prop_schema and js.get('type') == 'string':
+                js['minLength'] = prop_schema['min_length']
+            if 'max_length' in prop_schema and js.get('type') == 'string':
+                js['maxLength'] = prop_schema['max_length']
+            if 'pattern' in prop_schema and js.get('type') == 'string':
+                js['pattern'] = prop_schema['pattern']
+            if 'description' in prop_schema:
+                js['description'] = prop_schema['description']
+            if 'default' in prop_schema:
+                js['default'] = prop_schema['default']
+            return js
+
+        def build_params_object_schema(params_schema: dict) -> dict:
+            props = {}
+            required = []
+            for pname, pspec in (params_schema or {}).items():
+                props[pname] = to_jsonschema_param(pspec)
+                # Treat params without defaults and not explicitly optional as required
+                if not (isinstance(pspec, dict) and (pspec.get('optional') or 'default' in pspec)):
+                    required.append(pname)
+            schema = {"type": "object", "properties": props, "additionalProperties": False}
+            if required:
+                schema['required'] = required
+            return schema
+
+        # Build indicator rules
+        indicators_map = indicator_registry.get_all_indicators()
+        indicator_names = sorted(list(indicators_map.keys()))
+        indicator_allOf = []
+        for name, cls in indicators_map.items():
+            params_schema = getattr(cls, 'PARAMS_SCHEMA', {}) or {}
+            outputs = getattr(cls, 'OUTPUTS', []) or []
+            pane_type = getattr(cls, 'PANE_TYPE', None)
+            visual_schema = getattr(cls, 'VISUAL_SCHEMA', None)
+            visual_defaults = getattr(cls, 'VISUAL_DEFAULTS', None)
+            then_schema = {
+                "properties": {
+                    "name": {"const": name},
+                    "params": build_params_object_schema(params_schema),
+                },
+                "required": ["name", "params"],
+                # Non-standard extensions to help agents
+                "x-outputs": outputs,
+                "x-pane_type": pane_type,
+                "x-visual_schema": visual_schema,
+                "x-visual_defaults": visual_defaults,
+            }
+            indicator_allOf.append({
+                "if": {"properties": {"name": {"const": name}}, "required": ["name"]},
+                "then": then_schema,
+            })
+
+        # Build operator rules
+        operators_map = operator_registry.get_all_operators()
+        operator_names = sorted(list(operators_map.keys()))
+        operator_allOf = []
+        for name, cls in operators_map.items():
+            params_schema = getattr(cls, 'PARAMS_SCHEMA', {}) or {}
+            operator_allOf.append({
+                "if": {"properties": {"name": {"const": name}}, "required": ["name"]},
+                "then": {
+                    "properties": {
+                        "name": {"const": name},
+                        "params": build_params_object_schema(params_schema),
+                    },
+                    "required": ["name", "params"],
+                },
+            })
+
+        # Build action rules
+        actions_map = action_registry.get_all_actions()
+        action_names = sorted(list(actions_map.keys()))
+        action_allOf = []
+        for name, cls in actions_map.items():
+            params_schema = getattr(cls, 'PARAMS_SCHEMA', {}) or {}
+            action_allOf.append({
+                "if": {"properties": {"name": {"const": name}}, "required": ["name"]},
+                "then": {
+                    "properties": {
+                        "name": {"const": name},
+                        "params": build_params_object_schema(params_schema),
+                    },
+                    "required": ["name", "params"],
+                },
+            })
+
+        # --- New: Risk and Filters JSON Schemas ---
+        # Risk schema supported by SectionedStrategy and engine gates
+        risk_schema = {
+            "type": "object",
+            "properties": {
+                "risk_pct": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1,
+                    "default": 0.01,
+                    "description": "Fraction of account equity to risk per trade (e.g., 0.01 = 1%)."
+                },
+                "default_rr": {
+                    "type": "number",
+                    "minimum": 0,
+                    "default": 2.0,
+                    "description": "Default reward-to-risk multiple used to derive TP when tp is not provided."
+                },
+                "fixed_lot_size": {
+                    "type": "number",
+                    "minimum": 0,
+                    "default": 1.0,
+                    "description": "Fallback fixed position size when dynamic sizing cannot be computed."
+                },
+                "max_open_positions": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Maximum concurrent open positions allowed by the engine gate."
+                },
+                "daily_loss_pct": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 100,
+                    "description": "Max daily drawdown percentage after which entries are blocked (engine gate)."
+                },
+                "sl": {
+                    "type": "object",
+                    "description": "Stop-loss configuration.",
+                    "properties": {
+                        "type": {"type": "string", "enum": ["atr", "pct"], "default": "atr"},
+                        "mult": {"type": "number", "default": 1.5, "description": "Multiplier applied to ATR for SL distance (when type=atr)."},
+                        "length": {"type": "integer", "default": 14, "description": "ATR length (when type=atr)."},
+                        "value": {"type": "number", "default": 0.01, "description": "Percent SL (e.g., 0.01 = 1%) when type=pct."}
+                    },
+                    "additionalProperties": False
+                },
+                "take_profit_pips": {
+                    "type": "number",
+                    "description": "Absolute TP distance in pips from entry (SectionedStrategy convenience). If omitted, TP can be derived from default_rr and SL."
+                }
+            },
+            "additionalProperties": True
+        }
+
+        # Filters schema supported by evaluate_filters
+        filters_schema = {
+            "type": "object",
+            "properties": {
+                "allowed_days_of_week": {
+                    "type": "array",
+                    "items": {"type": "integer", "minimum": 0, "maximum": 6},
+                    "description": "Allowed trading days (0=Mon .. 6=Sun)."
+                },
+                "allowed_sessions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "start": {
+                                "type": "string",
+                                "pattern": "^([01]?\\d|2[0-3]):[0-5]\\d$",
+                                "description": "Session start time in HH:MM (24h, UTC)."
+                            },
+                            "end": {
+                                "type": "string",
+                                "pattern": "^([01]?\\d|2[0-3]):[0-5]\\d$",
+                                "description": "Session end time in HH:MM (24h, UTC)."
+                            }
+                        },
+                        "required": ["start", "end"],
+                        "additionalProperties": False
+                    },
+                    "description": "Time windows during which entries are allowed."
+                }
+            },
+            "additionalProperties": True
+        }
+
+        schema = {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$id": f"{getattr(settings, 'BACKEND_URL', '')}/api/bots/nodes/schema/",
+            "title": "No-Code Strategy Nodes Schema",
+            "type": "object",
+            "properties": {
+                "indicators": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "enum": indicator_names},
+                            "params": {"type": "object"},
+                        },
+                        "required": ["name", "params"],
+                        "allOf": indicator_allOf,
+                        "additionalProperties": False,
+                    },
+                },
+                "operators": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "enum": operator_names},
+                            "params": {"type": "object"},
+                        },
+                        "required": ["name", "params"],
+                        "allOf": operator_allOf,
+                        "additionalProperties": False,
+                    },
+                },
+                "actions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "enum": action_names},
+                            "params": {"type": "object"},
+                        },
+                        "required": ["name", "params"],
+                        "allOf": action_allOf,
+                        "additionalProperties": False,
+                    },
+                },
+                # New: add risk and filters sections
+                "risk": risk_schema,
+                "filters": filters_schema,
+            },
+            "required": ["indicators", "operators", "actions"],
+            "additionalProperties": False,
+            # Also include a non-standard catalog to help agents render docs without evaluating schema
+            "x-catalog": {
+                "indicators": [
+                    {
+                        "name": n,
+                        "outputs": getattr(indicators_map[n], 'OUTPUTS', []) or [],
+                        "pane_type": getattr(indicators_map[n], 'PANE_TYPE', None),
+                        "visual_schema": getattr(indicators_map[n], 'VISUAL_SCHEMA', None),
+                        "visual_defaults": getattr(indicators_map[n], 'VISUAL_DEFAULTS', None),
+                    }
+                    for n in indicator_names
+                ],
+                "operators": [{"name": n} for n in operator_names],
+                "actions": [{"name": n} for n in action_names],
+                # New: include hints for risk/filters
+                "risk": {
+                    "defaults": {"risk_pct": 0.01, "default_rr": 2.0, "sl": {"type": "atr", "mult": 1.5, "length": 14}},
+                    "notes": [
+                        "default_rr is used to derive TP from SL when tp is missing (also respected in backtests).",
+                        "take_profit_pips provides a fixed TP distance alternative."
+                    ]
+                },
+                "filters": {
+                    "notes": [
+                        "allowed_days_of_week uses 0=Mon..6=Sun",
+                        "allowed_sessions times are interpreted in UTC"
+                    ]
+                },
+            },
+        }
+        return Response(schema, status=status.HTTP_200_OK)

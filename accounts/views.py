@@ -26,6 +26,7 @@ from django.utils.decorators import method_decorator
 import traceback
 from accounts.services import get_account_details
 from trading_platform.mt5_api_client import MT5APIClient
+from django.http import Http404
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CTRADER_TOKEN_STORAGE = os.path.join(BASE_DIR, "ctrader_tokens.json")
@@ -213,3 +214,113 @@ class ProfitTakingProfileViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         # HiddenField already ensures `user=request.user`, so just save
         serializer.save()
+
+# --- Internal endpoints for cTrader token management ---
+class InternalCTraderTokensView(APIView):
+    """
+    Internal API used by the cTrader microservice to fetch and update tokens
+    for a specific CTraderAccount (broker_connection_id).
+
+    Auth: requires header 'X-Internal-Secret' matching settings.INTERNAL_SHARED_SECRET
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def _check_secret(self, request):
+        shared_secret = getattr(settings, "INTERNAL_SHARED_SECRET", None) or getattr(settings, "APP_INTERNAL_SHARED_SECRET", None)
+        provided = request.headers.get("X-Internal-Secret") or request.META.get("HTTP_X_INTERNAL_SECRET")
+        if not shared_secret or not provided or provided != shared_secret:
+            raise PermissionDenied("Forbidden")
+
+    def _resolve_broker_id(self, ctrader_account_id: str):
+        """Accept either numeric CTraderAccount.id or UUID Account.id. Return CTraderAccount instance."""
+        from .models import CTraderAccount, Account
+        # Try numeric CTraderAccount.id first
+        try:
+            int_id = int(ctrader_account_id)
+            return CTraderAccount.objects.get(id=int_id)
+        except (ValueError, CTraderAccount.DoesNotExist):
+            pass
+        # Try UUID Account.id
+        try:
+            from uuid import UUID
+            uuid_obj = UUID(str(ctrader_account_id))
+            return CTraderAccount.objects.get(account__id=uuid_obj)
+        except Exception:
+            raise Http404("CTrader account not found")
+
+    def get(self, request, ctrader_account_id: str):
+        self._check_secret(request)
+        acct = self._resolve_broker_id(ctrader_account_id)
+        payload = {
+            "broker_connection_id": acct.id,
+            "access_token": acct.access_token or "",
+            "refresh_token": acct.refresh_token or "",
+            "ctid_trader_account_id": acct.ctid_trader_account_id,
+            "ctid_user_id": acct.ctid_user_id,
+            "token_expires_at": int(acct.token_expires_at.timestamp()) if acct.token_expires_at else None,
+            "environment": ("LIVE" if acct.live else "DEMO") if acct.live is not None else None,
+            "user_id": acct.user_id,
+            "account_uuid": str(acct.account_id),
+        }
+        return Response(payload, status=status.HTTP_200_OK)
+
+    def put(self, request, ctrader_account_id: str):
+        self._check_secret(request)
+        acct = self._resolve_broker_id(ctrader_account_id)
+        data = request.data or {}
+
+        changed = False
+        if "access_token" in data:
+            acct.access_token = data.get("access_token")
+            changed = True
+        if "refresh_token" in data:
+            acct.refresh_token = data.get("refresh_token")
+            changed = True
+        ctid_val = data.get("ctid_trader_account_id", data.get("ctrader_account_id"))
+        if ctid_val is not None:
+            try:
+                acct.ctid_trader_account_id = int(ctid_val)
+            except (TypeError, ValueError):
+                return Response({"detail": "ctid_trader_account_id must be int"}, status=status.HTTP_400_BAD_REQUEST)
+            changed = True
+        if "ctid_user_id" in data and data.get("ctid_user_id") is not None:
+            try:
+                acct.ctid_user_id = int(data.get("ctid_user_id"))
+            except (TypeError, ValueError):
+                return Response({"detail": "ctid_user_id must be int"}, status=status.HTTP_400_BAD_REQUEST)
+            changed = True
+        if "token_expires_at" in data and data.get("token_expires_at") is not None:
+            from datetime import datetime, timezone
+            try:
+                epoch = int(data.get("token_expires_at"))
+                acct.token_expires_at = datetime.fromtimestamp(epoch, tz=timezone.utc)
+            except (TypeError, ValueError, OSError):
+                return Response({"detail": "token_expires_at must be epoch seconds"}, status=status.HTTP_400_BAD_REQUEST)
+            changed = True
+        if "environment" in data:
+            env = str(data.get("environment", "")).upper()
+            if env in ("LIVE", "DEMO"):
+                acct.live = True if env == "LIVE" else False
+                changed = True
+            else:
+                return Response({"detail": "environment must be LIVE or DEMO"}, status=status.HTTP_400_BAD_REQUEST)
+        if "account_number" in data:
+            acct.account_number = data.get("account_number") or None
+            changed = True
+
+        if changed:
+            acct.save()
+
+        return Response({
+            "message": "Updated",
+            "broker_connection_id": acct.id,
+            "stored_fields": {
+                "access_token": bool(acct.access_token),
+                "refresh_token": bool(acct.refresh_token),
+                "ctid_trader_account_id": acct.ctid_trader_account_id,
+                "ctid_user_id": acct.ctid_user_id,
+                "token_expires_at": int(acct.token_expires_at.timestamp()) if acct.token_expires_at else None,
+                "environment": "LIVE" if acct.live else "DEMO" if acct.live is not None else None,
+                "account_number": acct.account_number,
+            }
+        }, status=status.HTTP_200_OK)

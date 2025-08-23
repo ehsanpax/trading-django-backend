@@ -18,11 +18,20 @@ admin.site.register(CTraderAccount)
 
 @admin.register(Trade)
 class TradeAdmin(admin.ModelAdmin):
-    list_display = ('id', 'order_id', 'account', 'instrument', 'direction', 'lot_size', 'created_at', 'closed_at', 'actual_profit_loss')
-    list_filter = ('direction', 'instrument', 'account', 'created_at', 'closed_at')
-    search_fields = ('id__uuid__iexact', 'order_id__iexact', 'instrument__iexact', 'account__id__uuid__iexact', 'account__name__icontains') # Corrected account search
+    list_display = (
+        'id', 'order_id', 'account', 'instrument', 'direction', 'lot_size',
+        'trade_status', 'close_reason', 'close_subreason',
+        'actual_profit_loss', 'created_at', 'closed_at'
+    )
+    list_filter = (
+        'direction', 'instrument', 'account', 'trade_status', 'close_reason',
+        'created_at', 'closed_at'
+    )
+    search_fields = (
+        'id__uuid__iexact', 'order_id__iexact', 'instrument__iexact',
+        'account__id__uuid__iexact', 'account__name__icontains'
+    ) # Corrected account search
     readonly_fields = ('id', 'order_id', 'created_at') # 'updated_at' does not exist on Trade model
-    # Add other fields as necessary
     autocomplete_fields = ['account']
 
 @admin.register(Account) # This Account is from accounts.models due to import in trading/models.py
@@ -35,10 +44,10 @@ class AccountAdmin(admin.ModelAdmin):
 
 @admin.register(InstrumentSpecification)
 class InstrumentSpecificationAdmin(admin.ModelAdmin):
-    list_display = ('symbol', 'description', 'source_platform', 'contract_size', 'tick_size', 'tick_value', 'last_updated')
+    list_display = ('symbol', 'description', 'source_platform', 'contract_size')
     list_filter = ('source_platform', 'base_currency', 'quote_currency')
     search_fields = ('symbol', 'description', 'base_currency', 'quote_currency')
-    readonly_fields = ('symbol', 'created_at', 'last_updated')
+    readonly_fields = ('symbol',)
     fieldsets = (
         (None, {
             'fields': ('symbol', 'description', 'source_platform')
@@ -50,9 +59,6 @@ class InstrumentSpecificationAdmin(admin.ModelAdmin):
             'fields': ('min_volume', 'max_volume', 'volume_step')
         }),
         ('Price Details', {
-            'fields': ('tick_size', 'tick_value', 'digits')
-        }),
-        ('Timestamps', {
-            'fields': ('created_at', 'last_updated')
+            'fields': ('digits',)
         }),
     )

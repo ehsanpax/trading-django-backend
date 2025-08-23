@@ -1,9 +1,8 @@
 # accounts/services.py
 from django.shortcuts import get_object_or_404
 from accounts.models import Account, MT5Account, CTraderAccount
-from trading_platform.mt5_api_client import connection_manager
+from trading_platform.mt5_api_client import connection_manager, MT5APIClient
 from connectors.ctrader_client import CTraderClient
-from asgiref.sync import async_to_sync
 from django.conf import settings
 import requests
 import asyncio
@@ -86,10 +85,82 @@ async def get_account_details_async(account_id, user):
     else:
         return {"error": "Unsupported trading platform."}
 
-@async_to_sync
-async def get_account_details(account_id, user):
+def _get_account_details_via_rest(account_id, user):
+    """Synchronous, event-loop-safe account details resolver using REST fallbacks."""
+    account = get_object_or_404(Account, id=account_id, user=user)
+
+    if account.platform == "MT5":
+        try:
+            mt5_account = MT5Account.objects.get(account=account)
+        except MT5Account.DoesNotExist:
+            return {"error": "No linked MT5 account found."}
+
+        client = MT5APIClient(
+            base_url=settings.MT5_API_BASE_URL,
+            account_id=mt5_account.account_number,
+            password=mt5_account.encrypted_password,
+            broker_server=mt5_account.broker_server,
+            internal_account_id=str(account.id),
+        )
+        try:
+            info = client.get_account_info_rest()
+        except Exception as e:
+            logger.error(f"MT5 get_account_info_rest error: {e}", exc_info=True)
+            return {"error": str(e)}
+        try:
+            positions = client.get_all_open_positions_rest()
+        except Exception:
+            positions = {"open_positions": []}
+
+        return {
+            "balance": info.get("balance"),
+            "equity": info.get("equity"),
+            "margin": info.get("margin"),
+            "open_positions": positions.get("open_positions", []),
+        }
+
+    elif account.platform == "cTrader":
+        try:
+            ctrader_account = CTraderAccount.objects.get(account=account)
+        except CTraderAccount.DoesNotExist:
+            return {"error": "No linked cTrader account found."}
+
+        payload = {
+            "access_token": ctrader_account.access_token,
+            "ctid_trader_account_id": ctrader_account.ctid_trader_account_id,
+        }
+        base_url = settings.CTRADER_API_BASE_URL
+        equity_url = f"{base_url}/ctrader/account/equity"
+        try:
+            equity_resp = requests.post(equity_url, json=payload, timeout=10)
+            if equity_resp.status_code != 200:
+                return {"error": f"cTrader equity endpoint returned status: {equity_resp.status_code}"}
+            equity_data = equity_resp.json()
+        except requests.RequestException as e:
+            return {"error": f"Error calling cTrader equity endpoint: {str(e)}"}
+
+        if "error" in equity_data:
+            return {"error": equity_data["error"]}
+
+        return {
+            "balance": equity_data.get("balance"),
+            "equity": equity_data.get("equity"),
+            "total_unrealized_pnl": equity_data.get("total_unrealized_pnl"),
+        }
+
+    else:
+        return {"error": f"Unsupported trading platform: {account.platform}"}
+
+
+def get_account_details(account_id, user):
     """
-    Synchronously retrieves account details.
-    This is a wrapper for compatibility with synchronous views.
+    Synchronous facade that is safe in threads with running event loops.
+    Uses REST fallbacks to avoid AsyncToSync conflicts.
     """
-    return await get_account_details_async(account_id, user)
+    try:
+        # If a loop is running in this thread, avoid async bridges
+        asyncio.get_running_loop()
+        return _get_account_details_via_rest(account_id, user)
+    except RuntimeError:
+        # No running loop here; still prefer REST to avoid blocking on websockets
+        return _get_account_details_via_rest(account_id, user)

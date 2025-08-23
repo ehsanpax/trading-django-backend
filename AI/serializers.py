@@ -1,18 +1,27 @@
 from rest_framework import serializers
-from .models import Prompt, Execution, ChatSession, SessionExecution
+from .models import Prompt, Execution, ChatSession, SessionExecution, SessionSchedule
 from trade_journal.models import TradeJournal
 from django.db import models
 from trading.models import Trade, Order
-from trading.serializers import TradeSerializer, OrderSerializer
+from trades.serializers import TradeSerializer, OrderSerializer
+from .choices import WeekDayChoices, ChatSessionTypeChoices
+import datetime
 
 
 class PromptSerializer(serializers.ModelSerializer):
+    id = serializers.UUIDField(read_only=True)
+
     class Meta:
         model = Prompt
-        fields = ["id", "name", "prompt", "version", "user", "is_globally_shared"]
-        read_only_fields = [
-            "user"
-        ]  # User is set by the view, not directly by the client
+        exclude = ["user", "active", "is_globally_shared"]
+
+    def create(self, validated_data):
+        user = self.context["request"].user
+        name = validated_data.pop("name")
+        prompt, _ = Prompt.objects.update_or_create(
+            user=user, name=name, defaults=validated_data
+        )
+        return prompt
 
 
 class SessionExecutionSerializer(serializers.Serializer):
@@ -29,12 +38,17 @@ class SessionExecutionSerializer(serializers.Serializer):
     )
     session_data = serializers.JSONField(default=dict, required=False)
     total_cost = serializers.FloatField(required=False, allow_null=True)
+    session_type = serializers.ChoiceField(
+        choices=ChatSessionTypeChoices.choices,
+        default=ChatSessionTypeChoices.CHAT.value,
+    )
 
     def save(self, **kwargs):
         user = self.context["request"].user
         chat_session, updated = ChatSession.objects.update_or_create(
             external_session_id=self.validated_data.get("external_session_id"),
             user=user,
+            session_type=self.validated_data.get("session_type"),
             defaults=dict(
                 user_first_message=self.validated_data.get("user_first_message"),
                 session_data=self.validated_data.get("session_data"),
@@ -89,3 +103,57 @@ class TradeJournalSerializer(serializers.ModelSerializer):
     class Meta:
         model = TradeJournal
         fields = "__all__"
+
+
+class SessionScheduleSerializer(serializers.ModelSerializer):
+    session_id = serializers.CharField()
+    session = serializers.PrimaryKeyRelatedField(
+        queryset=ChatSession.objects.all(),
+        allow_null=True,
+        required=False,
+    )
+    external_session_id = serializers.CharField(
+        source="session.external_session_id", read_only=True
+    )
+    excluded_days = serializers.CharField(
+        allow_blank=True, allow_null=True, required=False
+    )
+
+    class Meta:
+        model = SessionSchedule
+        fields = "__all__"
+        read_only_fields = ["created_at"]
+
+    def validate_excluded_days(self, value):
+        new_value = []
+        if value:
+            days = value.split(",")
+            for day in days:
+                day = day.strip()
+                if day not in WeekDayChoices.values:
+                    raise serializers.ValidationError(
+                        f"Invalid day: {day}. Must be one of {', '.join(WeekDayChoices.values)}."
+                    )
+                if day not in new_value:
+                    new_value.append(day)
+        return new_value
+
+    def create(self, validated_data):
+        session_id = validated_data.pop("session_id")
+        name = validated_data.pop("name")
+        session = ChatSession.objects.filter(external_session_id=session_id).first()
+        if validated_data["start_at"]:
+            validated_data["start_at"] = validated_data["start_at"].replace(
+                tzinfo=datetime.timezone.utc
+            )
+        if validated_data["end_at"]:
+            validated_data["end_at"] = validated_data["end_at"].replace(
+                tzinfo=datetime.timezone.utc
+            )
+
+        schedule, created = SessionSchedule.objects.update_or_create(
+            session=session,
+            name=name,
+            defaults=validated_data,
+        )
+        return schedule

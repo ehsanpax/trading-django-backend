@@ -22,6 +22,7 @@ from trades.services import close_trade_globally, TradeService
 from trades.serializers import ExecuteTradeOutputSerializer
 from rest_framework.exceptions import APIException, PermissionDenied, ValidationError
 from trading.models import Trade  # Import Trade model for DoesNotExist exception
+import uuid
 
 
 class ExecuteAITradeView(APIView):
@@ -36,10 +37,18 @@ class ExecuteAITradeView(APIView):
         serializer = AITradeRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         payload = serializer.validated_data
-
+        account_id = payload.get("account_id")
         print("Validated Payload ExecuteAITradeView:", payload)
+        account = None
+        if account_id:
+            try:
+                account_id = uuid.UUID(account_id, version=4)
+                account = Account.objects.filter(id=account_id, user=request.user).first()
+            except Exception:
+                account = Account.objects.filter(name__iexact=str(account_id), user=request.user).first()
 
-        # account = select_next_account() # Removed: account_id now comes from payload
+        account_id = str(account.id) if account else None
+        payload["account_id"] = account_id
         trade_payload = {}
         trade_payload["account_id"] = str(payload.get("account_id"))
         trade_payload["symbol"] = payload.get("symbol")
@@ -56,11 +65,7 @@ class ExecuteAITradeView(APIView):
 
         direction = payload.get("direction", "BUY").upper()
         symbol = payload.get("symbol")
-        account_id = payload.get("account_id")
 
-        account = Account.objects.filter(
-            Q(Q(id=account_id) | Q(simple_id=account_id)) & Q(user=request.user)
-        ).first()
         if not account:
             return Response(
                 {
@@ -155,11 +160,17 @@ class ExecuteAITradeView(APIView):
             "projected_profit": trade_payload["projected_profit"],
             "projected_loss": trade_payload["projected_loss"],
         }
-        # 2️⃣ run service
-        svc = TradeService(request.user, payload)
-        account, final_lot, sl, tp = svc.validate()
-        resp = svc.execute_on_broker(account, final_lot, sl, tp)
-        order, trade = svc.persist(account, resp, final_lot, sl, tp)
+        try:
+            # 2️⃣ run service
+            svc = TradeService(request.user, payload)
+            account, final_lot, sl, tp = svc.validate()
+            resp = svc.execute_on_broker(account, final_lot, sl, tp)
+            order, trade = svc.persist(account, resp, final_lot, sl, tp)
+        except Exception as e:
+            return Response(
+                {"error": str(e)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         # 3️⃣ build and return output
         out = svc.build_response(order, trade)

@@ -1,5 +1,2 @@
-# This will ensure that strategy and indicator modules are loaded
-# when the Django app starts, populating their respective registries.
-import bots.strategy_templates.ema_crossover_v1
-import indicators.ema
-import indicators.atr
+# This file is intentionally left blank.
+# App components are registered in bots/apps.py in the ready() method.

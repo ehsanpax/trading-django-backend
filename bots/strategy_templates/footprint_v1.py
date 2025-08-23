@@ -8,44 +8,39 @@ from decimal import Decimal
 # Configure logging for the strategy
 logger = logging.getLogger(__name__)
 
-class FootprintV1Strategy:
+from bots.base import BaseStrategy, BotParameter
+
+class FootprintV1Strategy(BaseStrategy):
     """
     Encapsulates the Footprint v1 trading strategy logic.
     """
+    NAME = "footprint_v1"
+    DISPLAY_NAME = "Footprint Strategy v1"
+    PARAMETERS = [
+        BotParameter(name="PIVOT_RANGE", parameter_type="int", display_name="Pivot Range", description="Range for pivot detection.", default_value=3),
+        BotParameter(name="BOS_BUFFER", parameter_type="float", display_name="BOS Buffer", description="Buffer for Break of Structure.", default_value=0.001),
+        BotParameter(name="IMBALANCE_FACTOR", parameter_type="int", display_name="Imbalance Factor", description="Factor for detecting order flow imbalance.", default_value=3),
+        BotParameter(name="ATR_H1_LOOKBACK", parameter_type="int", display_name="ATR H1 Lookback", description="Lookback period for H1 ATR.", default_value=14),
+        BotParameter(name="SL_ATR_MULT", parameter_type="float", display_name="SL ATR Multiple", description="Multiplier for ATR to determine Stop Loss.", default_value=0.25),
+        BotParameter(name="MAX_CONSEC_LOSS", parameter_type="int", display_name="Max Consecutive Losses", description="Maximum number of consecutive losses before pausing.", default_value=4),
+        BotParameter(name="VOL_GATE_ATR_H1_LOOKBACK_DAYS", parameter_type="int", display_name="Volatility Gate ATR H1 Lookback Days", description="Lookback in days for the volatility gate ATR median.", default_value=90),
+        BotParameter(name="VOL_GATE_ATR_MULT", parameter_type="float", display_name="Volatility Gate ATR Multiple", description="Multiplier for the volatility gate.", default_value=0.75),
+        BotParameter(name="ORDER_FLOW_CONFIRM_DELTAS", parameter_type="int", display_name="Order Flow Confirm Deltas", description="Number of consecutive deltas for order flow confirmation.", default_value=2),
+        BotParameter(name="ORDER_FLOW_IMBALANCE_FACTOR", parameter_type="int", display_name="Order Flow Imbalance Factor", description="Factor for order flow imbalance.", default_value=3),
+        BotParameter(name="ENTRY_PULLBACK_ATR_MULT", parameter_type="float", display_name="Entry Pullback ATR Multiple", description="Multiplier for ATR to determine pullback depth.", default_value=0.25),
+        BotParameter(name="TP_R_MULTIPLE", parameter_type="float", display_name="TP R-Multiple", description="Take Profit as a multiple of risk.", default_value=2.0),
+        BotParameter(name="SCALE_OUT_R_MULTIPLE", parameter_type="float", display_name="Scale-Out R-Multiple", description="R-Multiple for scaling out.", default_value=1.0),
+        BotParameter(name="SCALE_OUT_FRACTION", parameter_type="float", display_name="Scale-Out Fraction", description="Fraction of position to scale out.", default_value=1/3),
+        BotParameter(name="MAX_TRADE_RISK_PERCENT", parameter_type="float", display_name="Max Trade Risk (%)", description="Maximum risk per trade as a percentage of account.", default_value=0.007),
+        BotParameter(name="MAX_DAILY_DD_PERCENT", parameter_type="float", display_name="Max Daily DD (%)", description="Maximum daily drawdown as a percentage of account.", default_value=0.03),
+        BotParameter(name="MAX_PORTFOLIO_HEAT_PERCENT", parameter_type="float", display_name="Max Portfolio Heat (%)", description="Maximum portfolio heat as a percentage of account.", default_value=0.01),
+    ]
+    REQUIRED_INDICATORS = []
 
-    # Default parameters as per "Footprint Strategy Logic Deep Dive (1).pdf"
-    DEFAULT_PARAMS = {
-        "PIVOT_RANGE": 3,
-        "BOS_BUFFER": 0.001,  # 0.1%
-        "IMBALANCE_FACTOR": 3,
-        "ATR_H1_LOOKBACK": 14,
-        "SL_ATR_MULT": 0.25,
-        "MAX_CONSEC_LOSS": 4,
-        # Parameters from "strategy engine.docx" (Section 5: Strategy Logic)
-        "VOL_GATE_ATR_H1_LOOKBACK_DAYS": 90, # For 90-day median ATR
-        "VOL_GATE_ATR_MULT": 0.75,
-        "ORDER_FLOW_CONFIRM_DELTAS": 2, # Two consecutive 1-minute deltas
-        "ORDER_FLOW_IMBALANCE_FACTOR": 3, # Renamed from IMBALANCE_FACTOR for clarity here
-        "ENTRY_PULLBACK_ATR_MULT": 0.25, # Micro-pullback depth <= 0.25 * ATR_H1
-        "TP_R_MULTIPLE": 2.0, # TP = 2R
-        "SCALE_OUT_R_MULTIPLE": 1.0, # Scale-out 1/3 @ 1R
-        "SCALE_OUT_FRACTION": 1/3,
-        "MAX_TRADE_RISK_PERCENT": 0.007, # 0.7% per trade
-        "MAX_DAILY_DD_PERCENT": 0.03, # 3% daily DD
-        "MAX_PORTFOLIO_HEAT_PERCENT": 0.01 # <= 1% portfolio heat
-    }
 
-    def __init__(self, params=None, risk_settings=None, account_info=None):
-        """
-        Initializes the strategy with specific parameters, risk settings, and account info.
-
-        :param params: Dictionary of strategy-specific parameters.
-        :param risk_settings: Dictionary of risk management settings.
-                               For live trading, this comes from risk.models.RiskManagement.
-                               For backtesting, this comes from BacktestConfig.risk_json.
-        :param account_info: Dictionary containing account details like balance, equity.
-        """
-        self.params = {**self.DEFAULT_PARAMS, **(params or {})}
+    def __init__(self, instrument_symbol: str, account_id: str, instrument_spec: any, strategy_params: dict, indicator_params: dict, risk_settings: dict):
+        super().__init__(instrument_symbol, account_id, instrument_spec, strategy_params, indicator_params, risk_settings)
+        self.params = self.strategy_params
         self.risk_settings = risk_settings or {}
         self.account_info = account_info or {}
         self.current_bias = None  # 'long', 'short', or None

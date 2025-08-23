@@ -34,6 +34,7 @@ class Trade(models.Model):
     lot_size = models.DecimalField(max_digits=10, decimal_places=2)
     remaining_size = models.DecimalField(max_digits=10, decimal_places=2)
     entry_price = models.DecimalField(max_digits=18, decimal_places=5, null=True, blank=True)
+    close_price = models.DecimalField(max_digits=18, decimal_places=5, null=True, blank=True)
     stop_loss = models.DecimalField(max_digits=18, decimal_places=5)
     profit_target = models.DecimalField(max_digits=18, decimal_places=5)
     risk_percent = models.DecimalField(max_digits=5, decimal_places=2)
@@ -66,9 +67,53 @@ class Trade(models.Model):
         null=True, blank=True,
         help_text="Snapshot of precomputed indicators at entry"
     )
+    max_runup = models.DecimalField(
+        max_digits=15,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Maximum profit reached by the trade"
+    )
+    max_drawdown = models.DecimalField(
+        max_digits=15,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Maximum loss experienced by the trade"
+    )
+
+    # New: Bot lineage and source tagging (Option B)
+    source = models.CharField(
+        max_length=16,
+        choices=[
+            ("MANUAL", "Manual"),
+            ("AI", "AI"),
+            ("BOT", "Bot"),
+            ("BACKTEST", "Backtest"),
+        ],
+        default="MANUAL",
+    )
+    live_run = models.ForeignKey(
+        'bots.LiveRun', on_delete=models.SET_NULL, null=True, blank=True, related_name='trades'
+    )
+    bot_version = models.ForeignKey(
+        'bots.BotVersion', on_delete=models.SET_NULL, null=True, blank=True, related_name='trades'
+    )
+    correlation_id = models.UUIDField(null=True, blank=True, db_index=True)
+
+    # New: Closure tagging (final close only)
+    close_reason = models.CharField(max_length=32, null=True, blank=True, db_index=True)
+    close_subreason = models.CharField(max_length=32, null=True, blank=True)
 
     def __str__(self):
         return f"Trade {self.id} on {self.instrument}"
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["bot_version", "created_at"]),
+            models.Index(fields=["live_run", "created_at"]),
+            models.Index(fields=["source", "created_at"]),
+        ]
 
 
 class ProfitTarget(models.Model):
@@ -138,6 +183,12 @@ class TradePerformance(models.Model):
     win_rate = models.DecimalField(max_digits=5, decimal_places=2, default=0.00)
     average_rr_ratio = models.DecimalField(max_digits=5, decimal_places=2, default=0.00)
     max_drawdown = models.DecimalField(max_digits=15, decimal_places=2, default=0.00)
+    max_account_drawdown = models.DecimalField(
+        max_digits=15,
+        decimal_places=2,
+        default=0.00,
+        help_text="Maximum account drawdown percentage or value"
+    )
     profit_factor = models.DecimalField(max_digits=5, decimal_places=2, default=0.00)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -236,6 +287,12 @@ class Order(models.Model):
         default=Status.PENDING,
     )
 
+    # Risk-related fields, copied from the initial trade request
+    risk_percent = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    projected_profit = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True)
+    projected_loss = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True)
+    rr_ratio = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+
     # Data returned from broker/platform (ticket, deal ids, etc.)
     broker_order_id = models.BigIntegerField(null=True, blank=True)
     broker_deal_id = models.BigIntegerField(null=True, blank=True)
@@ -254,6 +311,10 @@ class Order(models.Model):
 
     # Application-specific textual reason for the order/deal, e.g., "TP1 hit by scan"
     closure_reason = models.CharField(max_length=255, null=True, blank=True, help_text="Application-specific reason for order closure")
+
+    # New: Closure tagging for partials and terminal deals
+    close_reason = models.CharField(max_length=32, null=True, blank=True, db_index=True)
+    close_subreason = models.CharField(max_length=32, null=True, blank=True)
 
     # Link to the resulting Trade (created when filled, or for subsequent deal history)
     trade = models.ForeignKey(
@@ -295,11 +356,14 @@ class Order(models.Model):
             entry_price=price,
             stop_loss=self.stop_loss or Decimal("0"),
             profit_target=self.take_profit or Decimal("0"),
-            risk_percent=Decimal("0"),  # set if known
+            risk_percent=self.risk_percent or Decimal("0"),
+            projected_profit=self.projected_profit or Decimal("0"),
+            projected_loss=self.projected_loss or Decimal("0"),
+            rr_ratio=self.rr_ratio or Decimal("0"),
             trade_status="open",
             order_id=self.broker_order_id,
             deal_id=broker_deal_id,
-            position_id=None,
+            position_id=broker_deal_id,
         )
 
         self.trade = trade
@@ -345,8 +409,8 @@ class InstrumentSpecification(models.Model):
     # swap_long = models.DecimalField(max_digits=10, decimal_places=5, null=True, blank=True)
     # swap_short = models.DecimalField(max_digits=10, decimal_places=5, null=True, blank=True)
 
-    created_at = models.DateTimeField(auto_now_add=True)
-    last_updated = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True, null=True)
+    last_updated = models.DateTimeField(auto_now=True, null=True)
 
     class Meta:
         verbose_name = "Instrument Specification"
@@ -355,3 +419,25 @@ class InstrumentSpecification(models.Model):
 
     def __str__(self):
         return f"{self.symbol} (Spec)"
+
+
+class EquityDataPoint(models.Model):
+    """
+    Stores a single data point for an account's equity curve.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    account = models.ForeignKey(
+        Account,
+        on_delete=models.CASCADE,
+        related_name="equity_data"
+    )
+    date = models.DateTimeField()
+    equity = models.DecimalField(max_digits=15, decimal_places=2)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('account', 'date')
+        ordering = ['date']
+
+    def __str__(self):
+        return f"Equity for {self.account.name} at {self.date}: {self.equity}"

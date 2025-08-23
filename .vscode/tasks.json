@@ -1,0 +1,14 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"type": "shell",
+			"label": "Run heartbeat reconciler once",
+			"command": "C:\\Users\\ehsan\\trading-platform-root\\.venv\\Scripts\\python.exe manage.py shell -c \"from django.utils import timezone; from datetime import timedelta; from bots.models import LiveRun; from bots.tasks import live_loop; import os; stale_after=timedelta(seconds=30); now=timezone.now(); qs=LiveRun.objects.filter(status='RUNNING');\nfor lr in qs:\n    if not lr.last_heartbeat or (now - lr.last_heartbeat) > stale_after:\n        LiveRun.objects.filter(id=lr.id).update(status='ERROR', last_error='Heartbeat stale');\nprint('Reconciled', qs.count(), 'live runs')\"",
+			"group": "none",
+			"problemMatcher": [],
+			"args": [],
+			"isBackground": false
+		}
+	]
+}

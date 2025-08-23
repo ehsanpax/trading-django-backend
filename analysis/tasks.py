@@ -12,6 +12,7 @@ import logging
 import pandas as pd # Added for pd.Timestamp
 
 from .utils import data_fetcher, data_processor # Import actual utilities
+from core.registry import indicator_registry
 # from ..analysis import core_analysis # This import might be problematic due to relative path, direct import of modules is better
 import importlib
 
@@ -23,6 +24,7 @@ ANALYSIS_MODULE_MAPPING = {
     'TREND_CONTINUATION': 'trend_continuation',
     'VWAP_CONDITIONAL': 'vwap_conditional',
     'ATR_SCENARIO': 'atr_scenario',
+    'ATR_SQUEEZE_BREAKOUT': 'atr_squeeze_breakout',
 }
 
 
@@ -217,6 +219,49 @@ def update_daily_history_task():
 
 
 @shared_task
+def calculate_indicators_dynamically(df: pd.DataFrame, indicator_configs: list) -> pd.DataFrame:
+    """
+    Calculates indicators on a DataFrame based on a list of configurations using the new IndicatorInterface.
+    """
+    if not indicator_configs:
+        return df
+
+    df_with_indicators = df.copy()
+    for config in indicator_configs:
+        indicator_name = config.get('name')
+        params = config.get('params', {})
+        
+        if not indicator_name:
+            logger.warning("Skipping indicator config because 'name' is missing.")
+            continue
+
+        try:
+            # The registry uses the class name, e.g., "EMAIndicator". The config might just have "EMA".
+            if not indicator_name.endswith("Indicator"):
+                indicator_name = f"{indicator_name}Indicator"
+
+            IndicatorClass = indicator_registry.get_indicator(indicator_name)
+            indicator_instance = IndicatorClass()
+
+            # The new interface returns a dictionary of Series
+            indicator_outputs = indicator_instance.compute(df_with_indicators, params)
+
+            for output_name, series in indicator_outputs.items():
+                # Create a unique column name, e.g., EMAIndicator_ema
+                column_name = f"{indicator_name}_{output_name}"
+                df_with_indicators[column_name] = series
+            
+            logger.info(f"Calculated indicator: {indicator_name}")
+
+        except ValueError as e:
+            logger.error(f"Could not calculate indicator: {e}")
+        except Exception as e:
+            logger.error(f"An unexpected error occurred while calculating indicator '{indicator_name}': {e}", exc_info=True)
+
+    return df_with_indicators
+
+
+@shared_task
 def run_analysis_job_task(job_id_str):
     job_id = uuid.UUID(job_id_str) # Convert string back to UUID
     logger.info(f"Task run_analysis_job_task started for job {job_id}")
@@ -250,7 +295,11 @@ def run_analysis_job_task(job_id_str):
 
         m1_df = data_processor.load_m1_data_from_parquet(job.instrument.symbol, start_ts, end_ts)
         if m1_df.empty:
-            raise ValueError(f"No M1 data loaded for {job.instrument.symbol} between {job.start_date} and {job.end_date}.")
+            logger.warning(f"No M1 data found for {job.instrument.symbol} between {job.start_date} and {job.end_date}. Triggering data fetch.")
+            job.status = 'FETCHING_DATA'
+            job.save()
+            fetch_missing_instrument_data_task.delay(job.instrument.symbol, str(job.job_id))
+            return
 
         # 2. Resample data to target timeframe
         resampled_df = data_processor.resample_data(m1_df, job.target_timeframe)
@@ -259,8 +308,8 @@ def run_analysis_job_task(job_id_str):
 
         job.status = 'CALCULATING_INDICATORS'
         job.save()
-        # 3. Calculate indicators (currently a placeholder)
-        df_with_indicators = data_processor.calculate_all_indicators(resampled_df)
+        # 3. Calculate indicators dynamically
+        df_with_indicators = calculate_indicators_dynamically(resampled_df, job.indicator_configs)
 
         job.status = 'RUNNING_ANALYSIS'
         job.save()
@@ -280,9 +329,8 @@ def run_analysis_job_task(job_id_str):
         if not hasattr(analysis_module, 'run_analysis'):
             raise AttributeError(f"Analysis module {analysis_module_name} does not have a 'run_analysis' function.")
 
-        # Prepare parameters for the analysis function (if any are stored in the job or are standard)
-        # For now, passing empty dict for params. This can be extended.
-        analysis_params = {} 
+        # Prepare parameters for the analysis function
+        analysis_params = job.analysis_params
         
         logger.info(f"Calling {analysis_module_name}.run_analysis for job {job_id}")
         analysis_result_data = analysis_module.run_analysis(df_with_indicators, **analysis_params)

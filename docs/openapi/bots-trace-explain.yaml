@@ -1,0 +1,209 @@
+openapi: 3.0.3
+info:
+  title: Trading Backend - Trace & Explain APIs
+  version: "1.0.0"
+  description: |
+    Handoff spec for frontend integration of Trace and Explain endpoints.
+    Base path assumes project URLs mount bots app at `/api/bots`.
+servers:
+  - url: https://{host}/api/bots
+    variables:
+      host:
+        default: localhost:8000
+        description: Backend host (dev/prod)
+security:
+  - tokenAuth: []
+components:
+  securitySchemes:
+    tokenAuth:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: "Use DRF token auth header: `Authorization: Token <your-token>`"
+  schemas:
+    TraceItem:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 123
+        ts:
+          type: string
+          format: date-time
+          example: "2024-01-01T00:00:00Z"
+        bar_index:
+          type: integer
+          example: 5
+        symbol:
+          type: string
+          example: EURUSD
+        timeframe:
+          type: string
+          example: M1
+        section:
+          type: string
+          description: entry|exit|filter|risk|fill|engine
+          example: filter
+        kind:
+          type: string
+          description: condition_eval|result|blocked|entry|exit|reduce|modify_sltp|state|order
+          example: result
+        payload:
+          type: object
+          additionalProperties: true
+          example: { eligible: false, reason: outside_trading_session }
+        idx:
+          type: integer
+          nullable: true
+          example: 1
+    TraceListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/TraceItem'
+        count:
+          type: integer
+          example: 3
+    ExplainAtom:
+      type: object
+      properties:
+        section:
+          type: string
+          example: filter
+        kind:
+          type: string
+          example: blocked
+        payload:
+          type: object
+          additionalProperties: true
+          example: { reason: max_open_positions }
+    ExplainResponse:
+      type: object
+      properties:
+        bar_index:
+          type: integer
+          nullable: true
+          example: 5
+        symbol:
+          type: string
+          example: EURUSD
+        timeframe:
+          type: string
+          example: M1
+        summary:
+          type: object
+          properties:
+            action:
+              type: string
+              example: entry
+            reason:
+              type: string
+              example: fill:entry
+        path:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              $ref: '#/components/schemas/ExplainAtom'
+        state:
+          type: object
+          additionalProperties: true
+paths:
+  /backtest-runs/{id}/trace:
+    get:
+      operationId: getBacktestTrace
+      summary: List decision trace items for a run
+      tags: [Trace]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: bar_index
+          in: query
+          required: false
+          schema: { type: integer }
+        - name: ts
+          in: query
+          required: false
+          schema: { type: string, description: "Epoch seconds or ISO8601" }
+        - name: section
+          in: query
+          required: false
+          schema: { type: string, enum: [entry, exit, filter, risk, fill, engine] }
+        - name: kind
+          in: query
+          required: false
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, default: 200, minimum: 1, maximum: 1000 }
+        - name: offset
+          in: query
+          required: false
+          schema: { type: integer, default: 0, minimum: 0 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TraceListResponse'
+              examples:
+                example:
+                  value:
+                    count: 3
+                    items:
+                      - { id: 1, ts: "2024-01-01T00:00:00Z", bar_index: 5, symbol: EURUSD, timeframe: M1, section: filter, kind: result, payload: { eligible: false, reason: outside_trading_session }, idx: 1 }
+                      - { id: 2, ts: "2024-01-01T00:00:00Z", bar_index: 5, symbol: EURUSD, timeframe: M1, section: risk, kind: blocked, payload: { reason: max_open_positions }, idx: 2 }
+        '400': { description: Bad request (invalid bar_index/ts) }
+        '403': { description: Forbidden }
+        '404': { description: Not found }
+  /backtest-runs/{id}/explain:
+    get:
+      operationId: getBacktestExplain
+      summary: Explain the decision at a bar for a run
+      tags: [Trace]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: bar_index
+          in: query
+          required: false
+          schema: { type: integer }
+        - name: ts
+          in: query
+          required: false
+          schema: { type: string, description: "Epoch seconds or ISO8601" }
+        - name: include
+          in: query
+          required: false
+          schema: { type: string, description: "Comma-separated: conditions,filters,risk,orders,fills,state" }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExplainResponse'
+              examples:
+                example:
+                  value:
+                    bar_index: 5
+                    symbol: EURUSD
+                    timeframe: M1
+                    summary: { action: entry, reason: fill:entry }
+                    path:
+                      fill:
+                        - { section: fill, kind: entry, payload: { pos_id: p1 } }
+                      risk:
+                        - { section: risk, kind: blocked, payload: { reason: max_open_positions } }
+                    state: { position: null, balance: null }
+        '400': { description: Bad request (bar_index or ts required) }
+        '403': { description: Forbidden }
+        '404': { description: Not found }

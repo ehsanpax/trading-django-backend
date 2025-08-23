@@ -31,9 +31,11 @@ class Bot(models.Model):
 class BotVersion(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     bot = models.ForeignKey(Bot, on_delete=models.CASCADE, related_name="versions")
+    version_name = models.CharField(max_length=255, blank=True, null=True, help_text="A user-friendly name for this version.")
     strategy_name = models.CharField(max_length=255, default="", help_text="Name of the strategy from the registry, e.g., 'ema_crossover_v1'")
     strategy_params = JSONField(default=dict, help_text="Parameters for the chosen strategy")
     indicator_configs = JSONField(default=list, help_text="List of indicator configurations, e.g., [{'name': 'EMA', 'params': {'length': 20}}]")
+    strategy_graph = JSONField(null=True, blank=True, help_text="JSON representation of the no-code strategy graph")
     notes = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -44,7 +46,7 @@ class BotVersion(models.Model):
         ordering = ['-created_at']
 
     def __str__(self):
-        return f"Version for {self.bot.name} created at {self.created_at.strftime('%Y-%m-%d %H:%M')}"
+        return f"Version {self.version_name or self.id} for {self.bot.name}"
 
     # def save(self, *args, **kwargs):
     #     # Implement immutability logic here if needed
@@ -52,6 +54,30 @@ class BotVersion(models.Model):
     #     # if self.pk:
     #     #     raise ValidationError("BotVersion instances are immutable.")
     #     super().save(*args, **kwargs)
+
+
+class ExecutionConfig(models.Model):
+    SLIPPAGE_MODEL_CHOICES = [
+        ('NONE', 'None'),
+        ('FIXED', 'Fixed Ticks'),
+        ('PERCENTAGE', 'Percentage'),
+    ]
+    COMMISSION_UNITS_CHOICES = [
+        ('PER_TRADE', 'Per Trade'),
+        ('PER_LOT', 'Per Lot'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=255, unique=True)
+    slippage_model = models.CharField(max_length=20, choices=SLIPPAGE_MODEL_CHOICES, default='NONE')
+    slippage_value = models.FloatField(default=0, help_text="Value for slippage (e.g., ticks or percentage)")
+    commission_units = models.CharField(max_length=20, choices=COMMISSION_UNITS_CHOICES, default='PER_TRADE')
+    commission_per_unit = models.DecimalField(max_digits=12, decimal_places=6, default=0)
+    spread_pips = models.FloatField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.name
 
 
 class BacktestConfig(models.Model):
@@ -66,7 +92,14 @@ class BacktestConfig(models.Model):
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    bot_version = models.ForeignKey(BotVersion, on_delete=models.CASCADE, related_name="backtest_configs")
+    name = models.CharField(max_length=255, blank=True, null=True, help_text="User-defined name for this backtest config")
+    # Make version optional so configs can be reused across versions
+    bot_version = models.ForeignKey('bots.BotVersion', on_delete=models.CASCADE, related_name="backtest_configs", null=True, blank=True)
+    # Direct reference to Bot for easier filtering in admin and queries (bot-scoped configs)
+    bot = models.ForeignKey('bots.Bot', on_delete=models.CASCADE, related_name='backtest_configs', null=True, blank=True)
+    # New: owner-scoped (user-level) configs
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='backtest_configs', null=True, blank=True)
+
     timeframe = models.CharField(
         max_length=10,
         choices=TIMEframe_CHOICES,
@@ -74,17 +107,37 @@ class BacktestConfig(models.Model):
         help_text="Chart timeframe for the backtest (e.g., M1, H1, D1)"
     )
     risk_json = JSONField(default=dict, help_text="Custom risk settings for this backtest")
-    slippage_ms = models.IntegerField(default=0, help_text="Slippage in milliseconds")
-    slippage_r = models.DecimalField(max_digits=10, decimal_places=5, default=0.0, help_text="Slippage in R (risk units) or percentage")
+    execution_config = models.ForeignKey(ExecutionConfig, on_delete=models.PROTECT, null=True, blank=True)
     label = models.CharField(max_length=255, blank=True, null=True, help_text="User-defined label for this config")
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
-        return f"BacktestConfig {self.label or self.id} for {self.bot_version.bot.name} v{self.bot_version.created_at.strftime('%Y%m%d%H%M%S')} ({self.get_timeframe_display()})"
+        scope = None
+        try:
+            if self.bot_version:
+                scope = f"{self.bot_version.bot.name} v{self.bot_version.created_at.strftime('%Y%m%d%H%M%S')}"
+            elif self.bot:
+                scope = f"bot {self.bot.name}"
+            elif self.owner:
+                scope = f"user {getattr(self.owner, 'username', self.owner_id)}"
+        except Exception:
+            scope = scope or 'unscoped'
+        return f"BacktestConfig {self.label or self.id} ({self.get_timeframe_display()}) [{scope or 'unscoped'}]"
+
+    def clean(self):
+        # Ensure at least one scope is present
+        if not (self.bot_version or self.bot or self.owner):
+            from django.core.exceptions import ValidationError
+            raise ValidationError("BacktestConfig must be linked to a bot_version, a bot, or an owner.")
+        # If version is set but bot not set, keep bot redundant link for convenience
+        if self.bot_version and not self.bot:
+            self.bot = self.bot_version.bot
 
 class BacktestRun(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     config = models.ForeignKey(BacktestConfig, on_delete=models.CASCADE, related_name="runs")
+    # New: concrete BotVersion used for this run (even if config is bot/user scoped)
+    bot_version = models.ForeignKey('bots.BotVersion', on_delete=models.PROTECT, related_name='backtest_runs', null=True, blank=False)
     instrument_symbol = models.CharField(max_length=50, help_text="The trading instrument symbol for this backtest run") # Added field
     data_window_start = models.DateTimeField()
     data_window_end = models.DateTimeField()
@@ -95,6 +148,8 @@ class BacktestRun(models.Model):
     # status (e.g., pending, running, completed, failed) could be useful
     status = models.CharField(max_length=50, default="pending")
     progress = models.IntegerField(default=0, help_text="Backtest progress percentage")
+    runtime_fingerprint = models.JSONField(null=True, blank=True, help_text="Versions of code and libraries used for this run.")
+    random_seed = models.PositiveIntegerField(null=True, blank=True, help_text="Seed for any random operations to ensure reproducibility.")
 
     class Meta:
         ordering = ['-created_at']
@@ -140,10 +195,61 @@ class BacktestIndicatorData(models.Model):
         verbose_name = "Backtest Indicator Data"
         verbose_name_plural = "Backtest Indicator Data"
 
+# --- New: Structured decision trace storage for explainability ---
+class BacktestDecisionTrace(models.Model):
+    id = models.BigAutoField(primary_key=True)
+    backtest_run = models.ForeignKey(BacktestRun, on_delete=models.CASCADE, related_name="decision_traces")
+    ts = models.DateTimeField(db_index=True)
+    bar_index = models.IntegerField(db_index=True)
+    symbol = models.CharField(max_length=50)
+    timeframe = models.CharField(max_length=10)
+    section = models.CharField(max_length=32, null=True, blank=True, help_text="entry|exit|filter|risk|fill|engine")
+    kind = models.CharField(max_length=64, help_text="Atom kind, e.g., condition_eval, filter_result, risk_check, order, fill, state")
+    payload = JSONField(default=dict, help_text="Compact JSON payload of the trace atom")
+    idx = models.IntegerField(null=True, blank=True, help_text="Stable order within the bar if needed")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["backtest_run", "bar_index"]),
+            models.Index(fields=["backtest_run", "ts"]),
+            models.Index(fields=["backtest_run", "section"]),
+        ]
+        verbose_name = "Backtest Decision Trace"
+        verbose_name_plural = "Backtest Decision Traces"
+        ordering = ["backtest_run", "bar_index", "idx", "id"]
+
+    def __str__(self) -> str:
+        return f"Trace run={self.backtest_run_id} bar={self.bar_index} sec={self.section} kind={self.kind}"
+
 class LiveRun(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     bot_version = models.ForeignKey(BotVersion, on_delete=models.CASCADE, related_name="live_runs")
     instrument_symbol = models.CharField(max_length=50, help_text="The trading instrument symbol for this live run") # Added field
+    # --- New: Explicit account targeted by this LiveRun ---
+    account = models.ForeignKey(Account, on_delete=models.PROTECT, related_name="live_runs", null=True, blank=True)
+    # Add timeframe selection for live run (aligns with migration 0008)
+    timeframe = models.CharField(
+        max_length=10,
+        choices=[
+            ('M1', '1 Minute'),
+            ('M5', '5 Minutes'),
+            ('M15', '15 Minutes'),
+            ('M30', '30 Minutes'),
+            ('H1', '1 Hour'),
+            ('H4', '4 Hours'),
+            ('D1', '1 Day'),
+        ],
+        default='M1',
+        help_text="Chart timeframe for the live run (e.g., M1, H1, D1)"
+    )
+    # New: decision mode for strategy evaluation
+    decision_mode = models.CharField(
+        max_length=10,
+        choices=[('CANDLE', 'On Candle Close'), ('TICK', 'On Each Tick')],
+        default='CANDLE',
+        help_text="Whether to evaluate strategy on candle close or each tick."
+    )
     started_at = models.DateTimeField(auto_now_add=True)
     stopped_at = models.DateTimeField(null=True, blank=True)
     # Consider more granular status: pending, running, stopping, stopped, error
@@ -159,6 +265,11 @@ class LiveRun(models.Model):
     drawdown_r = models.DecimalField(max_digits=10, decimal_places=5, null=True, blank=True, help_text="Max drawdown in R units or percentage")
     # Add a field for last_error_message or similar for debugging
     last_error = models.TextField(blank=True, null=True)
+
+    # Observability/state management
+    task_id = models.CharField(max_length=64, null=True, blank=True, help_text="Celery task id executing this LiveRun")
+    last_heartbeat = models.DateTimeField(null=True, blank=True, help_text="Last heartbeat timestamp from live_loop")
+    last_action_at = models.DateTimeField(null=True, blank=True, help_text="Last time an action was executed")
 
     class Meta:
         ordering = ['-started_at']

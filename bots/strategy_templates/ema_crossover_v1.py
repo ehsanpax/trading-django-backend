@@ -20,7 +20,7 @@ import pandas as pd
 import pandas_ta as ta
 
 from bots.base import BaseStrategy, BotParameter
-from bots.registry import register_strategy, get_indicator_class
+from core.registry import indicator_registry
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 # Strategy Class
 # ──────────────────────────────────────────────────────────────────────────────
 
-class EMACrossoverV1(BaseStrategy):
+class EMACrossover(BaseStrategy):
     NAME = "ema_crossover_v1"
     DISPLAY_NAME = "EMA Crossover Strategy v1"
     PARAMETERS = [
@@ -132,7 +132,11 @@ class EMACrossoverV1(BaseStrategy):
             self.price_digits = 3
 
         logger.info(f"EMA Crossover Strategy (class {self.NAME}) initialized for {self.instrument_symbol}. Params: {self.strategy_params}")
-        logger.info(f"Instrument Spec derived: tick_size={self.tick_size}, contract_size={self.contract_size}, digits={self.price_digits}")
+        logger.info(f"Instrument Spec derived: tick_size={self.tick_size}, tick_value={self.tick_value}, contract_size={self.contract_size}, digits={self.price_digits}")
+
+        # Sanity check for non-JPY pairs with unusual tick sizes
+        if "JPY" not in (self.instrument_symbol or "").upper() and self.tick_size < 0.0001:
+            logger.warning(f"Unusually small tick_size ({self.tick_size}) for non-JPY pair {self.instrument_symbol}. This may cause issues with lot size calculation.")
 
     def _get_default_param(self, param_name: str) -> Any:
         for param_def in self.PARAMETERS:
@@ -145,59 +149,19 @@ class EMACrossoverV1(BaseStrategy):
         # Max of longest EMA and ATR period, plus 2 for crossover logic, plus buffer
         max_indicator_history = 0
         for req_ind in self.REQUIRED_INDICATORS:
-            indicator_class = get_indicator_class(req_ind["name"])
-            if indicator_class:
-                # Resolve dynamic parameters from strategy_params
-                resolved_params = {k: self.strategy_params.get(v, v) if isinstance(v, str) and v in self.strategy_params else v for k, v in req_ind["params"].items()}
-                max_indicator_history = max(max_indicator_history, indicator_class().required_history(**resolved_params))
-        
+            try:
+                indicator_class = indicator_registry.get_indicator(req_ind["name"])
+                if indicator_class:
+                    # This part is tricky because the new interface doesn't have required_history.
+                    # We'll have to estimate based on params. A better solution is needed long-term.
+                    # For now, let's assume the 'length' param is the history needed.
+                    resolved_params = {k: self.strategy_params.get(v, v) if isinstance(v, str) and v in self.strategy_params else v for k, v in req_ind["params"].items()}
+                    max_indicator_history = max(max_indicator_history, resolved_params.get('length', 200))
+            except ValueError:
+                # Indicator not found, use a safe default
+                max_indicator_history = max(max_indicator_history, 200)
+
         return max(max_indicator_history, self.ema_long_period, self.atr_length) + 2 + buffer_bars
-
-    def _ensure_indicators(self, df_input: pd.DataFrame) -> pd.DataFrame:
-        df = df_input.copy()
-
-        required_ohlcv = ["open", "high", "low", "close"]
-        for col in required_ohlcv:
-            if col not in df.columns:
-                logger.error(f"Missing required column '{col}' for indicator calculation. Symbol: {self.instrument_symbol}")
-                df[col] = np.nan
-            else:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-
-        try:
-            if not isinstance(df.index, pd.DatetimeIndex):
-                df.index = pd.to_datetime(df.index, utc=True)
-            if isinstance(df.index, pd.Timestamp):
-                original_index_name = df.index.name if hasattr(df.index, 'name') else None
-                df.index = pd.DatetimeIndex([df.index], name=original_index_name)
-            if not df.index.is_monotonic_increasing:
-                df = df.sort_index()
-        except Exception as e_idx:
-            logger.error(f"Error refreshing or validating index: {e_idx}", exc_info=True)
-            return df # Return df as is, further checks will handle NaNs
-
-        min_rows_for_ta = self.get_min_bars_needed(buffer_bars=0) # Use strategy's method
-        if len(df.index) < min_rows_for_ta :
-            timestamp_info = df.index[-1] if not df.empty and isinstance(df.index, pd.DatetimeIndex) and len(df.index) > 0 else 'N/A'
-            logger.warning(f"DataFrame for {self.instrument_symbol} has {len(df.index)} row(s) at {timestamp_info}, needs {min_rows_for_ta}. Skipping TA.")
-            return df
-        
-        # Calculate indicators using the new BaseIndicator structure
-        for req_ind in self.REQUIRED_INDICATORS:
-            indicator_name = req_ind["name"]
-            indicator_class = get_indicator_class(indicator_name)
-            if indicator_class:
-                # Resolve dynamic parameters from strategy_params
-                resolved_params = {k: self.strategy_params.get(v, v) if isinstance(v, str) and v in self.strategy_params else v for k, v in req_ind["params"].items()}
-                try:
-                    indicator_instance = indicator_class()
-                    df = indicator_instance.calculate(df, **resolved_params)
-                except Exception as e:
-                    logger.error(f"Error calculating indicator {indicator_name} for {self.instrument_symbol}: {e}", exc_info=True)
-            else:
-                logger.warning(f"Indicator '{indicator_name}' not found in registry.")
-            
-        return df
 
     def get_indicator_column_names(self) -> List[str]:
         """
@@ -205,16 +169,16 @@ class EMACrossoverV1(BaseStrategy):
         to the DataFrame. This is used by the backtesting engine to know
         which columns to store as indicator data.
         """
-        # This method needs to be dynamic based on the actual indicator implementations
-        # For now, hardcode for EMA Crossover, but this should be derived from BaseIndicator.calculate
-        return [
-            f"EMA_{self.ema_short_period}",
-            f"EMA_{self.ema_long_period}",
-            f"ATRr_{self.atr_length}"
-        ]
+        # This method is now simplified to inherit the naming convention from the base class.
+        # However, for ATR, pandas_ta uses a specific naming convention ("ATRr_length").
+        # We will handle this by creating a more specific name in the base class.
+        
+        # For this strategy, we can rely on the base class implementation.
+        return super().get_indicator_column_names()
 
     def _calculate_lot_size(self, account_equity: float, sl_pips: float) -> Optional[float]:
         if account_equity <= 0 or self.risk_per_trade_percent <= 0 or sl_pips <= 0:
+            logger.warning(f"[{self.instrument_symbol}] Lot size calculation skipped: Invalid input. account_equity={account_equity}, risk_per_trade_percent={self.risk_per_trade_percent}, sl_pips={sl_pips}")
             return None
         
         risk_amount_per_trade = account_equity * self.risk_per_trade_percent
@@ -230,6 +194,13 @@ class EMACrossoverV1(BaseStrategy):
             cash_risk_per_lot = (price_risk_per_unit / self.tick_size) * self.tick_value
             if cash_risk_per_lot > 0:
                 calculated_lot_size = risk_amount_per_trade / cash_risk_per_lot
+                
+                logger.debug(
+                    f"[{self.instrument_symbol}] Lot Size Calculation: "
+                    f"account_equity={account_equity}, risk_per_trade_percent={self.risk_per_trade_percent}, risk_amount_per_trade={risk_amount_per_trade}, "
+                    f"sl_pips={sl_pips}, tick_size={self.tick_size}, tick_value={self.tick_value}, "
+                    f"cash_risk_per_lot={cash_risk_per_lot}, initial_lot_size={calculated_lot_size}"
+                )
                 
                 if self.instrument_spec and self.instrument_spec.volume_step is not None and self.instrument_spec.volume_step > 0:
                     vol_step = float(self.instrument_spec.volume_step)
@@ -280,43 +251,59 @@ class EMACrossoverV1(BaseStrategy):
     def run_tick(self, df_current_window: pd.DataFrame, account_equity: float) -> List[Dict[str, Any]]:
         actions = []
         
-        required_bars = self.get_min_bars_needed(buffer_bars=0)
-        if len(df_current_window) < required_bars:
-            return actions
+        # The df_current_window already has indicators calculated by the backtest task.
+        # No need to call _ensure_indicators here.
+        df = df_current_window
 
-        df = self._ensure_indicators(df_current_window)
-        
+        # Define column names based on the strategy's parameters.
+        # This must match the naming convention in BaseStrategy.get_indicator_column_names
+        # and the actual indicator's implementation.
         ema_short_col = f"EMA_{self.ema_short_period}"
         ema_long_col = f"EMA_{self.ema_long_period}"
         atr_col = f"ATRr_{self.atr_length}"
 
-        if not all(col in df.columns for col in [ema_short_col, ema_long_col, atr_col, "close", "open"]):
-            logger.debug(f"[{self.instrument_symbol}] Missing required columns after indicator calculation. Columns: {df.columns}")
+        # Ensure all required columns are present
+        required_cols = [ema_short_col, ema_long_col, atr_col, "close", "open"]
+        if not all(col in df.columns for col in required_cols):
+            logger.debug(f"[{self.instrument_symbol}] Missing required columns. Expected: {required_cols}. Actual: {df.columns.tolist()}")
             return actions
         
-        if df[[ema_short_col, ema_long_col, atr_col, "close"]].iloc[-2:].isnull().any().any():
+        # Check for NaN values in the last two bars (current and previous)
+        if df[required_cols].iloc[-2:].isnull().values.any():
             logger.debug(f"[{self.instrument_symbol}] NaN values in recent indicator/price data. Skipping tick.")
             return actions
 
         current_bar = df.iloc[-1]
         prev_bar = df.iloc[-2]
+        current_timestamp = current_bar.name
+
+        # Log indicator values for debugging
+        logger.debug(
+            f"[{self.instrument_symbol}@{current_timestamp}] "
+            f"Prev EMA Short: {prev_bar[ema_short_col]:.5f}, Prev EMA Long: {prev_bar[ema_long_col]:.5f} | "
+            f"Current EMA Short: {current_bar[ema_short_col]:.5f}, Current EMA Long: {current_bar[ema_long_col]:.5f}"
+        )
 
         current_price = current_bar["close"]
         current_atr = current_bar[atr_col]
         
         if pd.isna(current_atr) or current_atr == 0:
-            logger.debug(f"[{self.instrument_symbol}] Invalid ATR ({current_atr}) for trade signal. Skipping tick.")
+            logger.debug(f"[{self.instrument_symbol}@{current_timestamp}] Invalid ATR ({current_atr}) for trade signal. Skipping tick.")
             return actions
 
-        if prev_bar[ema_short_col] < prev_bar[ema_long_col] and \
-           current_bar[ema_short_col] > current_bar[ema_long_col]:
+        # Crossover logic
+        long_condition = (prev_bar[ema_short_col] < prev_bar[ema_long_col] and current_bar[ema_short_col] > current_bar[ema_long_col])
+        short_condition = (prev_bar[ema_short_col] > prev_bar[ema_long_col] and current_bar[ema_short_col] < current_bar[ema_long_col])
+
+        if long_condition:
+            logger.info(f"[{self.instrument_symbol}@{current_timestamp}] BUY signal detected.")
             sl_price = current_price - (current_atr * self.atr_sl_multiple)
             tp_price = current_price + (current_atr * self.atr_tp_multiple)
             signal = self._place_trade_signal(current_price, "BUY", sl_price, tp_price, account_equity, current_atr, current_bar.name)
             if signal: actions.append(signal)
 
-        elif prev_bar[ema_short_col] > prev_bar[ema_long_col] and \
-             current_bar[ema_short_col] < current_bar[ema_long_col]:
+        elif short_condition:
+            logger.info(f"[{self.instrument_symbol}@{current_timestamp}] SELL signal detected.")
             sl_price = current_price + (current_atr * self.atr_sl_multiple)
             tp_price = current_price - (current_atr * self.atr_tp_multiple)
             signal = self._place_trade_signal(current_price, "SELL", sl_price, tp_price, account_equity, current_atr, current_bar.name)
@@ -324,8 +311,8 @@ class EMACrossoverV1(BaseStrategy):
             
         return actions
 
-# Register the strategy
-register_strategy(EMACrossoverV1.NAME, EMACrossoverV1)
+# The strategy is now discovered automatically by the registry.
+# No manual registration is needed.
 
 if __name__ == "__main__":
     try:
@@ -376,9 +363,9 @@ if __name__ == "__main__":
                     return length + 1
 
             # Temporarily register mock indicators for testing purposes
-            from bots.registry import INDICATOR_REGISTRY
-            INDICATOR_REGISTRY["EMA"] = MockEMAIndicator
-            INDICATOR_REGISTRY["ATR"] = MockATRIndicator
+            # In a real test, you would mock the indicator_registry instance
+            indicator_registry._indicators["EMA"] = MockEMAIndicator
+            indicator_registry._indicators["ATR"] = MockATRIndicator
 
             bot_params = {
                 "ema_short_period": 21,
@@ -388,8 +375,9 @@ if __name__ == "__main__":
                 "atr_tp_multiple": 3.0,
                 "risk_per_trade_percent": 0.01,
             }
-            bot = EMACrossoverV1( 
+            bot = EMACrossover( 
                 instrument_symbol=symbol_platform, 
+                account_id="test_account",
                 instrument_spec=mock_spec,
                 strategy_params=bot_params,
                 indicator_params={}, # No specific indicator params passed to strategy init

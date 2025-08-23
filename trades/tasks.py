@@ -304,30 +304,67 @@ def reconcile_open_positions():
                 continue
 
             platform_open_positions = platform_positions_response.get("open_positions", [])
-            platform_position_ids = {str(pos['ticket']) for pos in platform_open_positions if 'ticket' in pos}
+            platform_position_ids = {str(pos['ticket']) for pos in platform_open_positions if 'ticket' in pos and pos.get('type') != 'pending_order'}
             print(f"{log_prefix}Found {len(platform_position_ids)} open position(s) on platform.")
 
             # 3. Compare and find discrepancies
-            for trade in local_open_trades:
-                if not trade.position_id:
-                    print(f"{log_prefix}Skipping local trade {trade.id} because it has no position_id.")
-                    continue
 
-                if str(trade.position_id) not in platform_position_ids:
-                    print(f"{log_prefix}Discrepancy found! Trade {trade.id} (PositionID: {trade.position_id}) is 'open' locally but not on the platform. Triggering sync.")
-                    try:
-                        sync_result = synchronize_trade_with_platform(trade_id=trade.id)
-                        if sync_result.get("error"):
-                            print(f"{log_prefix}Error synchronizing trade {trade.id}: {sync_result['error']}")
-                            total_errors += 1
-                        else:
-                            print(f"{log_prefix}Successfully synchronized trade {trade.id}.")
-                            total_synced += 1
-                    except Exception as e_sync:
-                        print(f"{log_prefix}Exception during synchronization for trade {trade.id}: {e_sync}")
+            # Check for closed trades
+            local_position_ids = {str(trade.position_id) for trade in local_open_trades if trade.position_id}
+            closed_on_platform = local_position_ids - platform_position_ids
+            for position_id in closed_on_platform:
+                trade_to_sync = local_open_trades.get(position_id=position_id)
+                print(f"{log_prefix}Discrepancy found! Trade {trade_to_sync.id} (PositionID: {position_id}) is 'open' locally but not on the platform. Triggering sync.")
+                try:
+                    sync_result = synchronize_trade_with_platform(trade_id=trade_to_sync.id)
+                    if sync_result.get("error"):
+                        print(f"{log_prefix}Error synchronizing trade {trade_to_sync.id}: {sync_result['error']}")
                         total_errors += 1
-                else:
-                    print(f"{log_prefix}Trade {trade.id} (PositionID: {trade.position_id}) is correctly marked as open.")
+                    else:
+                        print(f"{log_prefix}Successfully synchronized trade {trade_to_sync.id}.")
+                        total_synced += 1
+                except Exception as e_sync:
+                    print(f"{log_prefix}Exception during synchronization for trade {trade_to_sync.id}: {e_sync}")
+                    total_errors += 1
+
+            # Check for new trades (from filled pending orders)
+            new_on_platform = platform_position_ids - local_position_ids
+            if new_on_platform:
+                print(f"{log_prefix}Found {len(new_on_platform)} new position(s) on platform: {new_on_platform}")
+                for position_id in new_on_platform:
+                    position_data = next((pos for pos in platform_open_positions if str(pos.get('ticket')) == position_id), None)
+                    if not position_data:
+                        continue
+
+                    try:
+                        instrument = position_data.get('symbol')
+                        volume = Decimal(str(position_data.get('volume')))
+                        direction = "BUY" if position_data.get('type') == 0 else "SELL"
+                        price = Decimal(str(position_data.get('price_open')))
+
+                        # Find a matching pending order
+                        pending_order = Order.objects.filter(
+                            account=account,
+                            instrument=instrument,
+                            volume=volume,
+                            direction=direction,
+                            status='pending'
+                        ).first()
+
+                        if pending_order:
+                            print(f"{log_prefix}Found matching pending order {pending_order.id} for new position {position_id}.")
+                            pending_order.mark_filled(
+                                price=price,
+                                volume=volume,
+                                broker_deal_id=int(position_id)
+                            )
+                            print(f"{log_prefix}Successfully created trade for new position {position_id}.")
+                            total_synced += 1
+                        else:
+                            print(f"{log_prefix}No matching pending order found for new position {position_id}.")
+                    except Exception as e_new_trade:
+                        print(f"{log_prefix}Error processing new position {position_id}: {e_new_trade}")
+                        total_errors += 1
 
         except Exception as e_account:
             print(f"{log_prefix}An unexpected error occurred while processing this account: {e_account}")
@@ -336,4 +373,77 @@ def reconcile_open_positions():
             total_errors += 1
 
     print(f"{task_name} finished. Synced: {total_synced}, Errors: {total_errors}.")
+    return f"{task_name}: Synced {total_synced}, Errors {total_errors}."
+
+
+@shared_task(name="trades.tasks.synchronize_account_trades")
+def synchronize_account_trades(account_id: int):
+    """
+    Synchronizes trades for a specific account on demand.
+    """
+    task_name = "synchronize_account_trades"
+    print(f"CELERY TASK: {task_name} CALLED for account_id {account_id} at {timezone.now()}")
+
+    try:
+        account = Account.objects.get(id=account_id)
+        mt5_account = MT5Account.objects.get(account=account)
+    except (Account.DoesNotExist, MT5Account.DoesNotExist):
+        print(f"{task_name}: Account or MT5Account not found for id {account_id}.")
+        return f"{task_name}: Account or MT5Account not found."
+
+    log_prefix = f"{task_name} (Account: {account.id}, MT5 Login: {mt5_account.account_number}): "
+    total_synced = 0
+    total_errors = 0
+
+    local_open_trades = Trade.objects.filter(account=account, trade_status="open")
+
+    if not local_open_trades.exists():
+        print(f"{log_prefix}No open trades found in the database. Skipping.")
+        return f"{task_name}: No open trades to sync."
+
+    print(f"{log_prefix}Found {local_open_trades.count()} open trade(s) in DB. Checking against platform.")
+
+    try:
+        connector = MT5APIClient(
+            base_url=settings.MT5_API_BASE_URL,
+            account_id=mt5_account.account_number,
+            password=mt5_account.encrypted_password,
+            broker_server=mt5_account.broker_server,
+            internal_account_id=str(account.id)
+        )
+
+        platform_positions_response = connector.get_all_open_positions_rest()
+        if "error" in platform_positions_response:
+            print(f"{log_prefix}Error fetching open positions from platform: {platform_positions_response['error']}")
+            return f"{task_name}: Error fetching positions."
+
+        platform_open_positions = platform_positions_response.get("open_positions", [])
+        platform_position_ids = {str(pos['ticket']) for pos in platform_open_positions if 'ticket' in pos and pos.get('type') != 'pending_order'}
+        print(f"{log_prefix}Found {len(platform_position_ids)} open position(s) on platform.")
+
+        local_position_ids = {str(trade.position_id) for trade in local_open_trades if trade.position_id}
+        closed_on_platform = local_position_ids - platform_position_ids
+
+        for position_id in closed_on_platform:
+            trade_to_sync = local_open_trades.get(position_id=position_id)
+            print(f"{log_prefix}Discrepancy found! Trade {trade_to_sync.id} (PositionID: {position_id}) is 'open' locally but not on the platform. Triggering sync.")
+            try:
+                sync_result = synchronize_trade_with_platform(trade_id=trade_to_sync.id)
+                if sync_result.get("error"):
+                    print(f"{log_prefix}Error synchronizing trade {trade_to_sync.id}: {sync_result['error']}")
+                    total_errors += 1
+                else:
+                    print(f"{log_prefix}Successfully synchronized trade {trade_to_sync.id}.")
+                    total_synced += 1
+            except Exception as e_sync:
+                print(f"{log_prefix}Exception during synchronization for trade {trade_to_sync.id}: {e_sync}")
+                total_errors += 1
+
+    except Exception as e_account:
+        print(f"{log_prefix}An unexpected error occurred while processing this account: {e_account}")
+        import traceback
+        traceback.print_exc()
+        total_errors += 1
+
+    print(f"{task_name} finished for account {account_id}. Synced: {total_synced}, Errors: {total_errors}.")
     return f"{task_name}: Synced {total_synced}, Errors {total_errors}."

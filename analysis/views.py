@@ -12,9 +12,10 @@ from .serializers import (
     AnalysisResultSerializer,
     InstrumentCreateSerializer, # Added
 )
-from .tasks import run_analysis_job_task, fetch_missing_instrument_data_task, download_initial_history_task # Added download_initial_history_task
+from .tasks import run_analysis_job_task, fetch_missing_instrument_data_task, download_initial_history_task, ANALYSIS_MODULE_MAPPING # Added download_initial_history_task
 from datetime import datetime, timedelta # Added
 from django.utils import timezone # Added for timezone.now()
+import importlib
 
 # Note: For token authentication, you'll need to choose one method.
 # If using DRF's built-in TokenAuthentication, ensure it's in DEFAULT_AUTHENTICATION_CLASSES in settings.
@@ -123,10 +124,13 @@ class AnalysisSubmitView(views.APIView):
             job = AnalysisJob.objects.create(
                 user=request.user,
                 instrument=instrument,
+                name=validated_data.get('name'),
                 analysis_type=validated_data['analysis_type'],
                 target_timeframe=validated_data['target_timeframe'],
                 start_date=validated_data['start_date'],
                 end_date=validated_data['end_date'],
+                indicator_configs=validated_data.get('indicator_configs', []),
+                analysis_params=validated_data.get('analysis_params', {}),
                 status='PENDING' # Initial status
             )
 
@@ -152,7 +156,7 @@ class AnalysisSubmitView(views.APIView):
         
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-class AnalysisJobStatusView(generics.RetrieveAPIView):
+class AnalysisJobStatusView(generics.RetrieveUpdateDestroyAPIView):
     queryset = AnalysisJob.objects.all()
     serializer_class = AnalysisJobStatusSerializer
     permission_classes = [IsAuthenticated]
@@ -198,3 +202,35 @@ class AnalysisJobListView(generics.ListAPIView):
     def get_queryset(self):
         # Return jobs for the current authenticated user, ordered by creation date
         return AnalysisJob.objects.filter(user=self.request.user).order_by('-created_at')
+
+class AnalysisTypeListView(views.APIView):
+    """
+    A view to get the list of available analysis types.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        analysis_types = [
+            {"value": choice[0], "label": choice[1]}
+            for choice in AnalysisJob.ANALYSIS_TYPE_CHOICES
+        ]
+        return Response(analysis_types)
+
+class AnalysisTypeDetailView(views.APIView):
+    """
+    A view to get the details of a specific analysis type, including required indicators.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, analysis_type_name, *args, **kwargs):
+        analysis_module_name = ANALYSIS_MODULE_MAPPING.get(analysis_type_name)
+        if not analysis_module_name:
+            return Response({"error": "Analysis type not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            module_path = f"analysis.core_analysis.{analysis_module_name}"
+            analysis_module = importlib.import_module(module_path)
+            required_indicators = getattr(analysis_module, 'REQUIRED_INDICATORS', [])
+            return Response(required_indicators)
+        except (ImportError, AttributeError):
+            return Response({"error": "Could not retrieve analysis details."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

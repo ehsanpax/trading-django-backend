@@ -7,6 +7,7 @@ from django.shortcuts import redirect
 from django.conf import settings
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
+from django.http import StreamingHttpResponse  # Added for SSE proxy
 
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -183,3 +184,217 @@ class CTRaderSelectAccountAPIView(APIView):
 
         ctrader_account.save()
         return Response({"message": "Account successfully linked to cTrader!"})
+
+
+class CTraderOnboardProxyAPIView(APIView):
+    """Proxy: POST -> FastAPI /ctrader/onboard to initiate OAuth."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, *args, **kwargs):
+        try:
+            payload = request.data if hasattr(request, "data") else json.loads(request.body or "{}")
+        except json.JSONDecodeError:
+            return Response({"error": "Invalid JSON."}, status=status.HTTP_400_BAD_REQUEST)
+
+        url = f"{settings.CTRADER_API_BASE_URL.rstrip('/')}/ctrader/onboard"
+        headers = {
+            "Content-Type": "application/json",
+            "X-Internal-Secret": settings.INTERNAL_SHARED_SECRET or "",
+        }
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=20)
+        except requests.RequestException as e:
+            return Response({"error": f"Upstream error: {e}"}, status=status.HTTP_502_BAD_GATEWAY)
+        return Response(resp.json() if resp.content else {}, status=resp.status_code)
+
+
+class CTraderOAuthCallbackProxyView(APIView):
+    """Proxy: Redirect GET to FastAPI /ctrader/oauth/callback with same query params."""
+    permission_classes = []
+
+    def get(self, request, *args, **kwargs):
+        base = f"{settings.CTRADER_API_BASE_URL.rstrip('/')}/ctrader/oauth/callback"
+        query = request.META.get("QUERY_STRING", "")
+        target = f"{base}?{query}" if query else base
+        return redirect(target)
+
+
+class CTraderAccountsProxyAPIView(APIView):
+    """Proxy: GET -> FastAPI /ctrader/accounts (lists accounts after OAuth)."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        url = f"{settings.CTRADER_API_BASE_URL.rstrip('/')}/ctrader/accounts"
+        headers = {
+            "X-Internal-Secret": settings.INTERNAL_SHARED_SECRET or "",
+            "Accept": "application/json",
+        }
+        try:
+            resp = requests.get(url, params=request.GET, headers=headers, timeout=25)
+        except requests.RequestException as e:
+            return Response({"error": f"Upstream error: {e}"}, status=status.HTTP_502_BAD_GATEWAY)
+
+        # Try to return JSON; if it fails, return a safe text payload for debugging
+        try:
+            data = resp.json()
+            return Response(data, status=resp.status_code)
+        except ValueError:
+            content_type = resp.headers.get("Content-Type", "")
+            text = resp.text or ""
+            payload = {
+                "error": "Upstream returned non-JSON response",
+                "status": resp.status_code,
+                "content_type": content_type,
+                "body": text[:1000],  # truncate to avoid huge responses
+            }
+            return Response(payload, status=resp.status_code)
+
+
+class CTraderOnboardCompleteProxyAPIView(APIView):
+    """Proxy: POST -> FastAPI /ctrader/onboard/{account_id}/complete to finalize selection."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, account_id: str, *args, **kwargs):
+        try:
+            payload = request.data if hasattr(request, "data") else json.loads(request.body or "{}")
+        except json.JSONDecodeError:
+            return Response({"error": "Invalid JSON."}, status=status.HTTP_400_BAD_REQUEST)
+
+        url = f"{settings.CTRADER_API_BASE_URL.rstrip('/')}/ctrader/onboard/{account_id}/complete"
+        headers = {
+            "Content-Type": "application/json",
+            "X-Internal-Secret": settings.INTERNAL_SHARED_SECRET or "",
+        }
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=25)
+        except requests.RequestException as e:
+            return Response({"error": f"Upstream error: {e}"}, status=status.HTTP_502_BAD_GATEWAY)
+        return Response(resp.json() if resp.content else {}, status=resp.status_code)
+
+
+# New proxies: connect/close and instance delete
+class CTraderConnectProxyAPIView(APIView):
+    """Proxy: POST -> FastAPI /ctrader/connect to ensure session for account_id."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, *args, **kwargs):
+        try:
+            payload = request.data if hasattr(request, "data") else json.loads(request.body or "{}")
+        except json.JSONDecodeError:
+            return Response({"error": "Invalid JSON."}, status=status.HTTP_400_BAD_REQUEST)
+
+        url = f"{settings.CTRADER_API_BASE_URL.rstrip('/')}/ctrader/connect"
+        headers = {
+            "Content-Type": "application/json",
+            "X-Internal-Secret": settings.INTERNAL_SHARED_SECRET or "",
+        }
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=25)
+        except requests.RequestException as e:
+            return Response({"error": f"Upstream error: {e}"}, status=status.HTTP_502_BAD_GATEWAY)
+        return Response(resp.json() if resp.content else {}, status=resp.status_code)
+
+
+class CTraderCloseProxyAPIView(APIView):
+    """Proxy: POST -> FastAPI /ctrader/close to stop session."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, *args, **kwargs):
+        try:
+            payload = request.data if hasattr(request, "data") else json.loads(request.body or "{}")
+        except json.JSONDecodeError:
+            return Response({"error": "Invalid JSON."}, status=status.HTTP_400_BAD_REQUEST)
+
+        url = f"{settings.CTRADER_API_BASE_URL.rstrip('/')}/ctrader/close"
+        headers = {
+            "Content-Type": "application/json",
+            "X-Internal-Secret": settings.INTERNAL_SHARED_SECRET or "",
+        }
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=25)
+        except requests.RequestException as e:
+            return Response({"error": f"Upstream error: {e}"}, status=status.HTTP_502_BAD_GATEWAY)
+        return Response(resp.json() if resp.content else {}, status=resp.status_code)
+
+
+class CTraderInstanceDeleteProxyAPIView(APIView):
+    """Proxy: DELETE -> FastAPI /ctrader/instance/{account_id} to delete runtime and mappings."""
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, account_id: str, *args, **kwargs):
+        url = f"{settings.CTRADER_API_BASE_URL.rstrip('/')}/ctrader/instance/{account_id}"
+        headers = {
+            "X-Internal-Secret": settings.INTERNAL_SHARED_SECRET or "",
+            "Accept": "application/json",
+        }
+        try:
+            resp = requests.delete(url, headers=headers, timeout=25)
+        except requests.RequestException as e:
+            return Response({"error": f"Upstream error: {e}"}, status=status.HTTP_502_BAD_GATEWAY)
+        try:
+            data = resp.json()
+            return Response(data, status=resp.status_code)
+        except ValueError:
+            return Response({}, status=resp.status_code)
+
+
+class CTraderPortfolioSSEProxyView(APIView):
+    """
+    SSE proxy: streams normalized portfolio updates (account trader updates, open positions, pending orders)
+    from the FastAPI microservice to the frontend via Django. Keeps platform-agnostic format.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        base = settings.CTRADER_API_BASE_URL.rstrip('/')
+        url = f"{base}/ctrader/stream/portfolio"
+        headers = {
+            "X-Internal-Secret": settings.INTERNAL_SHARED_SECRET or "",
+            "Accept": "text/event-stream",
+            "Connection": "keep-alive",
+            "Cache-Control": "no-cache",
+        }
+
+        # Pass through query params like account_id, ctid_trader_account_id, etc.
+        params = request.GET.copy()
+
+        try:
+            upstream = requests.get(url, headers=headers, params=params, stream=True, timeout=(10, None))
+        except requests.RequestException as e:
+            return Response({"error": f"Upstream error: {e}"}, status=status.HTTP_502_BAD_GATEWAY)
+
+        # If upstream immediately failed, surface the error body
+        if upstream.status_code != 200:
+            try:
+                data = upstream.json()
+                return Response(data, status=upstream.status_code)
+            except ValueError:
+                return Response({
+                    "error": "Upstream stream failed",
+                    "status": upstream.status_code,
+                    "body": (upstream.text or "")[:1000],
+                }, status=upstream.status_code)
+
+        def event_stream():
+            try:
+                for chunk in upstream.iter_content(chunk_size=4096):
+                    if not chunk:
+                        continue
+                    # Yield raw SSE bytes
+                    yield chunk
+            except GeneratorExit:
+                try:
+                    upstream.close()
+                except Exception:
+                    pass
+            except Exception:
+                try:
+                    upstream.close()
+                except Exception:
+                    pass
+
+        resp = StreamingHttpResponse(event_stream(), content_type="text/event-stream")
+        resp["Cache-Control"] = "no-cache"
+        resp["X-Accel-Buffering"] = "no"  # helpful when behind nginx
+        return resp

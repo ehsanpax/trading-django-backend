@@ -18,6 +18,8 @@ import numpy as np
 import pandas as pd
 import pandas_ta as ta # pandas-ta should be in requirements.txt
 
+from bots.base import BaseStrategy, BotParameter
+
 logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -53,25 +55,32 @@ class BoxBreakoutParams:
 # Strategy Class
 # ──────────────────────────────────────────────────────────────────────────────
 
-class BoxBreakoutV1Strategy:
-    ParamsDataclass = BoxBreakoutParams # Convention for parameter discovery
-    DEFAULT_PARAMS = {
-        "lookback": 20, "max_atr_multiple": 0.5, "slope_window": 5,
-        "risk_per_trade_percent": 0.005, "tp_multiple": 2.0, "sl_buffer_pips": 1.0,
-        "require_retest": False, "macd_fast": 12, "macd_slow": 26,
-        "macd_signal": 9, "cmf_length": 20, "atr_length": 14,
-    }
+class BoxBreakoutV1Strategy(BaseStrategy):
+    NAME = "box_breakout_v1"
+    DISPLAY_NAME = "Box Breakout Strategy v1"
+    PARAMETERS = [
+        BotParameter(name="lookback", parameter_type="int", display_name="Lookback Period", description="Number of bars to define the consolidation box.", default_value=20, min_value=10, max_value=100, step=1),
+        BotParameter(name="max_atr_multiple", parameter_type="float", display_name="Max ATR Multiple", description="The maximum height of the box as a multiple of ATR.", default_value=0.5, min_value=0.1, max_value=3.0, step=0.1),
+        BotParameter(name="slope_window", parameter_type="int", display_name="Slope Window", description="Number of bars to measure indicator slope for divergence.", default_value=5, min_value=3, max_value=20, step=1),
+        BotParameter(name="risk_per_trade_percent", parameter_type="float", display_name="Risk Per Trade (%)", description="Percentage of account balance to risk per trade.", default_value=0.005, min_value=0.001, max_value=0.1, step=0.001),
+        BotParameter(name="tp_multiple", parameter_type="float", display_name="Take Profit Multiple", description="Take Profit distance as a multiple of the box height.", default_value=2.0, min_value=0.5, max_value=10.0, step=0.1),
+        BotParameter(name="sl_buffer_pips", parameter_type="float", display_name="Stop Loss Buffer (Pips)", description="Extra pips to add below the box low for the Stop Loss.", default_value=1.0, min_value=0.0, max_value=10.0, step=0.1),
+        BotParameter(name="require_retest", parameter_type="bool", display_name="Require Retest", description="Wait for a retest of the box high before entering.", default_value=False),
+        BotParameter(name="macd_fast", parameter_type="int", display_name="MACD Fast Period", description="Fast period for the MACD indicator.", default_value=12, min_value=2, max_value=50, step=1),
+        BotParameter(name="macd_slow", parameter_type="int", display_name="MACD Slow Period", description="Slow period for the MACD indicator.", default_value=26, min_value=10, max_value=100, step=1),
+        BotParameter(name="macd_signal", parameter_type="int", display_name="MACD Signal Period", description="Signal period for the MACD indicator.", default_value=9, min_value=2, max_value=50, step=1),
+        BotParameter(name="cmf_length", parameter_type="int", display_name="CMF Length", description="Length for the Chaikin Money Flow (CMF) indicator.", default_value=20, min_value=5, max_value=50, step=1),
+        BotParameter(name="atr_length", parameter_type="int", display_name="ATR Length", description="Length for the Average True Range (ATR) indicator.", default_value=14, min_value=5, max_value=50, step=1),
+    ]
+    REQUIRED_INDICATORS = [
+        {"name": "MACD", "params": {"fast": "macd_fast", "slow": "macd_slow", "signal": "macd_signal"}},
+        {"name": "CMF", "params": {"length": "cmf_length"}},
+        {"name": "ATR", "params": {"length": "atr_length"}},
+    ]
 
-    def __init__(self, params: Optional[Dict[str, Any]] = None, 
-                 risk_settings: Optional[Dict[str, Any]] = None,
-                 instrument_symbol: Optional[str] = None,
-                 account_id: Optional[str] = None,
-                 instrument_spec = None, # trading.models.InstrumentSpecification instance
-                 pip_value: float = 0.0001 # Fallback if instrument_spec not provided
-                ):
-        
-        actual_params = {**self.DEFAULT_PARAMS, **(params or {})}
-        self.p = BoxBreakoutParams.from_dict(actual_params)
+    def __init__(self, instrument_symbol: str, account_id: str, instrument_spec: Any, strategy_params: Dict[str, Any], indicator_params: Dict[str, Any], risk_settings: Dict[str, Any]):
+        super().__init__(instrument_symbol, account_id, instrument_spec, strategy_params, indicator_params, risk_settings)
+        self.p = BoxBreakoutParams.from_dict(self.strategy_params)
         
         self.risk_settings = risk_settings or {}
         self.instrument_symbol = instrument_symbol

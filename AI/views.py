@@ -1,11 +1,13 @@
 from rest_framework import viewsets, permissions
-from .models import Prompt, ChatSession
+from .models import Prompt, ChatSession, SessionSchedule
 from .serializers import (
     PromptSerializer,
     SessionExecutionSerializer,
     ChatSessionSerializer,
     TradeJournalSerializer,
+    SessionScheduleSerializer,
 )
+from .choices import ChatSessionTypeChoices
 from rest_framework.views import APIView
 from rest_framework.viewsets import ModelViewSet
 from rest_framework.authentication import TokenAuthentication
@@ -13,12 +15,14 @@ from rest_framework.response import Response
 from rest_framework import status
 from trade_journal.models import TradeJournal
 from django.db.models import Q
+import uuid
 
 
 class PromptViewSet(viewsets.ModelViewSet):
     queryset = Prompt.objects.all()
     serializer_class = PromptSerializer
     permission_classes = [permissions.IsAuthenticated]
+    authentication_classes = [TokenAuthentication]
 
     def get_queryset(self):
         """
@@ -27,13 +31,15 @@ class PromptViewSet(viewsets.ModelViewSet):
         """
         user = self.request.user
         if user.is_authenticated:
-            return Prompt.objects.filter(user=user) | Prompt.objects.filter(
-                is_globally_shared=True
-            )
-        return Prompt.objects.filter(is_globally_shared=True)
-
-    def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
+            queryset = Prompt.objects.filter(
+                Q(user=user) | Q(is_globally_shared=True)
+            ).order_by("-created_at")
+        else:
+            queryset = Prompt.objects.filter(is_globally_shared=True)
+        prompt_name = self.request.query_params.get("name", None)
+        if prompt_name:
+            queryset = queryset.filter(name=prompt_name)
+        return queryset
 
 
 class StoreSessionExecutionViewset(APIView):
@@ -59,7 +65,9 @@ class StoreSessionExecutionViewset(APIView):
 class ChatSessionViewset(ModelViewSet):
     serializer_class = ChatSessionSerializer
     permission_classes = [permissions.IsAuthenticated]
-    queryset = ChatSession.objects.all()
+    queryset = ChatSession.objects.filter(
+        session_type=ChatSessionTypeChoices.CHAT.value
+    )
 
     def get_queryset(self):
         return (
@@ -86,7 +94,41 @@ class TradeJournalViewset(ModelViewSet):
         )
         account_id = self.request.query_params.get("account", None)
         if account_id:
+            try:
+                account_id = uuid.UUID(account_id, version=4)
+                queryset = queryset.filter(
+                    trade__account__id=account_id,
+                    trade__account__user=self.request.user,
+                )
+            except Exception:
+                queryset = queryset.filter(
+                    trade__account__name__iexact=str(account_id),
+                    trade__account__user=self.request.user,
+                )
+
+        return queryset
+
+
+class SessionScheduleViewset(ModelViewSet):
+    serializer_class = SessionScheduleSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    authentication_classes = [TokenAuthentication]
+    queryset = SessionSchedule.objects.all()
+
+    def get_queryset(self):
+        queryset = (
+            super()
+            .get_queryset()
+            .filter(session__user=self.request.user)
+            .order_by("-created_at")
+        )
+        session_id = self.request.query_params.get("session_id", None)
+        if session_id:
             queryset = queryset.filter(
-                Q(trade__account__id=account_id) | Q(trade__account__simple_id=True)
+                Q(session__id=session_id) | Q(session__external_session_id=session_id)
             )
+        name = self.request.query_params.get("name", None)
+        if name:
+            queryset = queryset.filter(name__iexact=name)
+
         return queryset

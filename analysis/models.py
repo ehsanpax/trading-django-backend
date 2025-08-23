@@ -25,6 +25,7 @@ class AnalysisJob(models.Model):
         ('TREND_CONTINUATION', 'Trend Continuation'),
         ('VWAP_CONDITIONAL', 'VWAP Conditional'),
         ('ATR_SCENARIO', 'ATR Scenario'),
+        ('ATR_SQUEEZE_BREAKOUT', 'ATR Squeeze Breakout'),
         # Add more choices as they are defined
     ]
     JOB_STATUS_CHOICES = [
@@ -38,6 +39,7 @@ class AnalysisJob(models.Model):
     ]
 
     job_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=255, blank=True, null=True)
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE) # Changed to CASCADE as PROTECT might be too restrictive if user is deleted
     instrument = models.ForeignKey(Instrument, on_delete=models.PROTECT)
     analysis_type = models.CharField(max_length=100, choices=ANALYSIS_TYPE_CHOICES)
@@ -45,6 +47,8 @@ class AnalysisJob(models.Model):
     start_date = models.DateField()
     end_date = models.DateField()
     status = models.CharField(max_length=30, choices=JOB_STATUS_CHOICES, default='PENDING')
+    indicator_configs = models.JSONField(default=list, blank=True)
+    analysis_params = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     error_message = models.TextField(null=True, blank=True)
