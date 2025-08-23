@@ -16,6 +16,7 @@ class OBVIndicator:
     VERSION = 1
     PANE_TYPE = 'pane'
     OUTPUTS = ["obv"]
+<<<<<<< Updated upstream
     # Visual metadata
     VISUAL_SCHEMA = {
         "series": {
@@ -37,6 +38,8 @@ class OBVIndicator:
         },
         "guides": {"zero": {"value": 0, "color": "#808080", "visible": False}}
     }
+=======
+>>>>>>> Stashed changes
     PARAMS_SCHEMA = {
         "source": {
             "type": "string",

@@ -8,7 +8,10 @@ from .choices import (
     ScheduleTypeChoices,
     WeekDayChoices,
     SessionScheduleTaskStatusChoices,
+<<<<<<< Updated upstream
     ChatSessionTypeChoices,
+=======
+>>>>>>> Stashed changes
 )
 from rest_framework.authtoken.models import Token
 

@@ -16,6 +16,7 @@ class StochasticRSIIndicator:
     VERSION = 1
     PANE_TYPE = 'pane'
     OUTPUTS = ["stoch_rsi_k", "stoch_rsi_d"]
+<<<<<<< Updated upstream
     # Visual metadata
     VISUAL_SCHEMA = {
         "series": {
@@ -49,6 +50,8 @@ class StochasticRSIIndicator:
             "lower": {"value": 20, "color": "#808080", "visible": True}
         }
     }
+=======
+>>>>>>> Stashed changes
     PARAMS_SCHEMA = {
         "rsi_length": {
             "type": "integer",

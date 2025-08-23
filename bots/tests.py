@@ -12,9 +12,12 @@ from bots.models import ExecutionConfig
 from bots.gates import evaluate_filters, risk_allows_entry, apply_fill_model
 from core.interfaces import IndicatorInterface
 
+<<<<<<< Updated upstream
 # --- New imports for validator ---
 from bots.validation.sectioned import validate_sectioned_spec
 
+=======
+>>>>>>> Stashed changes
 class MockIndicator(IndicatorInterface):
     def compute(self, df, params):
         param_str = "_".join([f"{k}_{v}" for k, v in sorted(params.items())])
@@ -32,6 +35,7 @@ class BotsAppTests(TestCase):
         self.tick_size = Decimal("0.00001")
         self.tick_value = Decimal("1")
         self.initial_equity = 10000.0
+<<<<<<< Updated upstream
         # Align with SectionedStrategySpec (entry_long/short, exit_long/short)
         self.spec_data = {
             "entry_long": {
@@ -46,6 +50,15 @@ class BotsAppTests(TestCase):
             },
             "exit_long": {},
             "risk": {"fixed_lot_size": 0.1}
+=======
+        self.spec_data = {
+            "entry": {
+                "and": [
+                    {"left": {"indicator": "ema", "params": {"length": 9, "period": 5}, "output": "default"}, "op": "cross_above", "right": {"indicator": "ema", "params": {"length": 21}, "output": "default"}}
+                ]
+            },
+            "exit": {}, "risk": {"fixed_lot_size": 0.1}
+>>>>>>> Stashed changes
         }
         self.strategy_params = {"sectioned_spec": self.spec_data}
         self.instrument_spec = MagicMock()
@@ -166,8 +179,13 @@ class BotsAppTests(TestCase):
         strategy.df = strategy._calculate_indicators(strategy.df)
         
         # The _get_value method returns a series, so we compare the names
+<<<<<<< Updated upstream
         col_name = strategy._get_value({"type": "indicator", "name": "ema", "params": {"length": 9, "period": 5}}, strategy.df).name
         col_name_reordered = strategy._get_value({"type": "indicator", "name": "ema", "params": {"period": 5, "length": 9}}, strategy.df).name
+=======
+        col_name = strategy._get_value({"indicator": "ema", "params": {"length": 9, "period": 5}}, strategy.df).name
+        col_name_reordered = strategy._get_value({"indicator": "ema", "params": {"period": 5, "length": 9}}, strategy.df).name
+>>>>>>> Stashed changes
         self.assertEqual(col_name, col_name_reordered)
 
     # @patch('core.registry.indicator_registry.get_indicator')
@@ -230,6 +248,7 @@ class BotsAppTests(TestCase):
         engine.run()
         self.assertEqual(len(engine.trades), 1)
         self.assertEqual(pd.to_datetime(engine.trades[0]['entry_timestamp']).date(), self.data.index[1].date())
+<<<<<<< Updated upstream
 
     def test_sectioned_validator_basic(self):
         indicator_catalog = {
@@ -284,3 +303,5 @@ class BotsAppTests(TestCase):
         self.assertIn('inputs', kinds)
         self.assertIn('condition_eval', kinds)
         self.assertTrue(any(t['kind'] == 'order_intent' for t in trace) or len(actions) >= 0)
+=======
+>>>>>>> Stashed changes

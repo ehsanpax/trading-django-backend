@@ -93,12 +93,20 @@ class IndicatorMetadataAPIView(APIView):
 
 
 class NodeMetadataAPIView(APIView):
+<<<<<<< Updated upstream
     permission_classes = [permissions.AllowAny]
 
     def get(self, request, *args, **kwargs):
         indicators_meta = StrategyManager.get_available_indicators_metadata()
         nodes = {
             "indicators": indicators_meta,
+=======
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        nodes = {
+            "indicators": StrategyManager.get_available_indicators_metadata(),
+>>>>>>> Stashed changes
             "operators": [
                 {"name": name, "params": op.PARAMS_SCHEMA}
                 for name, op in operator_registry.get_all_operators().items()
@@ -462,10 +470,18 @@ class LaunchBacktestAPIView(APIView):
                     status='PENDING'
                 )
 
+<<<<<<< Updated upstream
+=======
+                # Then, launch the backtest with the new backtest_run_id
+>>>>>>> Stashed changes
                 services.launch_backtest(
                     backtest_run_id=backtest_run.id,
                     random_seed=data.get('random_seed')
                 )
+<<<<<<< Updated upstream
+=======
+                
+>>>>>>> Stashed changes
                 response_serializer = BacktestRunSerializer(backtest_run)
                 return Response(response_serializer.data, status=status.HTTP_202_ACCEPTED)
             except DjangoValidationError as ve:
@@ -491,13 +507,24 @@ class StartLiveRunAPIView(APIView):
 
                 account = get_object_or_404(Account, id=data['account_id'], user=request.user)
 
+<<<<<<< Updated upstream
+=======
+                # Validate account belongs to the user
+                account = get_object_or_404(Account, id=data['account_id'], user=request.user)
+
+                # First, create the LiveRun object (now with account)
+>>>>>>> Stashed changes
                 live_run = LiveRun.objects.create(
                     bot_version=bot_version,
                     instrument_symbol=data['instrument_symbol'],
                     account=account,
+<<<<<<< Updated upstream
                     timeframe=data.get('timeframe') or 'M1',
                     decision_mode=data.get('decision_mode') or 'CANDLE',
                     status='PENDING'
+=======
+                    status='PENDING' # Set initial status
+>>>>>>> Stashed changes
                 )
 
                 services.start_bot_live_run(live_run_id=live_run.id)

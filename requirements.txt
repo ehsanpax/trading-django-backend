@@ -83,7 +83,10 @@ whitenoise==6.2.0
 django-environ
 django-celery-results
 django-celery-beat
+<<<<<<< Updated upstream
 aio-pika
 httpx==0.27.2
 tenacity==9.0.0
 pybreaker==1.2.0
+=======
+>>>>>>> Stashed changes

@@ -9,6 +9,7 @@ from django.db import transaction
 # from asgiref.sync import sync_to_async
 import time
 import numpy as np
+<<<<<<< Updated upstream
 import threading
 import os
 from django.db import close_old_connections
@@ -18,6 +19,8 @@ from django.conf import settings
 # Expose a stable attribute for tests to patch
 def fetch_symbol_info_for_platform(account, symbol: str) -> dict:  # pragma: no cover
     return _fetch_symbol_info_for_platform(account, symbol)
+=======
+>>>>>>> Stashed changes
 
 from .models import LiveRun, BacktestRun, BotVersion, BacktestConfig, BacktestOhlcvData, BacktestIndicatorData
 from accounts.models import Account
@@ -34,12 +37,16 @@ from datetime import timedelta
 from .engine import BacktestEngine
 from .adapters import LegacyStrategyAdapter
 
+<<<<<<< Updated upstream
 # New for live runner
 from bots.feeds import make_feed, MarketDataFeed
 from bots.execution import ExecutionAdapter
 # Ensure reconcilers are registered with Celery when bots.tasks is imported
 from .reconciler import reconcile_live_runs  # noqa: F401
 
+=======
+# It's good practice to get a logger instance per module
+>>>>>>> Stashed changes
 logger = logging.getLogger(__name__)
 
 
@@ -121,24 +128,57 @@ def live_loop(self, live_run_id, strategy_name, strategy_params, indicator_confi
             logger.error(f"Failed to mark LiveRun ERROR: {e}")
 
     try:
+<<<<<<< Updated upstream
         # Eagerly load all needed relations to avoid lazy ORM later
         live_run = LiveRun.objects.select_related('bot_version__bot__created_by', 'account').get(id=live_run_id)
         if live_run.status not in ('RUNNING', 'PENDING'):
             logger.warning(f"LiveRun {live_run_id} is not runnable (status: {live_run.status}). Exiting.")
+=======
+        live_run = LiveRun.objects.select_related('bot_version__bot', 'account').get(id=live_run_id)
+        
+        if live_run.status not in ('RUNNING', 'PENDING'):
+            logger.warning(f"LiveRun {live_run_id} is not in a runnable state (status: {live_run.status}). Exiting task.")
+>>>>>>> Stashed changes
             return
         if live_run.status == 'PENDING':
             # Set RUNNING before any async/websocket begins
             LiveRun.objects.filter(id=live_run_id).update(status='RUNNING', started_at=timezone.now(), task_id=self.request.id, last_heartbeat=timezone.now())
             live_run.status = 'RUNNING'
+<<<<<<< Updated upstream
         else:
             # Update task_id if resuming
             LiveRun.objects.filter(id=live_run_id).update(task_id=self.request.id, last_heartbeat=timezone.now())
+=======
+            live_run.started_at = timezone.now()
+            live_run.save(update_fields=['status', 'started_at'])
+
+        bot_version = live_run.bot_version
+        bot = bot_version.bot
+        account = live_run.account
+
+        if not instrument_symbol:
+            live_run.status = 'ERROR'
+            live_run.last_error = "LiveRun is missing an instrument_symbol."
+            live_run.stopped_at = timezone.now()
+            live_run.save(update_fields=['status', 'last_error', 'stopped_at'])
+            logger.error(f"LiveRun {live_run.id}: Missing instrument_symbol. Stopping.")
+            return
+>>>>>>> Stashed changes
 
         account = live_run.account
         if not account:
+<<<<<<< Updated upstream
             raise ValueError("LiveRun has no account")
         if not instrument_symbol:
             raise ValueError("LiveRun missing instrument_symbol")
+=======
+            live_run.status = 'ERROR'
+            live_run.last_error = "LiveRun is not associated with an account."
+            live_run.stopped_at = timezone.now()
+            live_run.save(update_fields=['status', 'last_error', 'stopped_at'])
+            logger.error(f"LiveRun {live_run.id}: No account assigned. Stopping.")
+            return
+>>>>>>> Stashed changes
 
         # Optional instrument spec (do before feed)
         try:
@@ -151,7 +191,11 @@ def live_loop(self, live_run_id, strategy_name, strategy_params, indicator_confi
         strategy_instance = StrategyManager.instantiate_strategy(
             strategy_name=strategy_name,
             instrument_symbol=instrument_symbol,
+<<<<<<< Updated upstream
             account_id=str(account.id),
+=======
+            account_id=str(account.id), # Use explicit account ID
+>>>>>>> Stashed changes
             instrument_spec=instrument_spec,
             strategy_params=strategy_params,
             indicator_configs=indicator_configs,
@@ -161,6 +205,7 @@ def live_loop(self, live_run_id, strategy_name, strategy_params, indicator_confi
         # Prepare adapter and cached user before feed to avoid lazy ORM
         adapter_user = live_run.bot_version.bot.created_by
         
+<<<<<<< Updated upstream
         # Enhanced logic to extract max_open_positions from potentially nested structures
         max_open_positions = None
         
@@ -357,6 +402,13 @@ def live_loop(self, live_run_id, strategy_name, strategy_params, indicator_confi
 
         # Mark stopped via separate thread-safe ORM call
         _mark_stopped()
+=======
+        logger.info(f"live_loop for LiveRun ID: {live_run_id} on {instrument_symbol} completed one placeholder cycle.")
+        # Temporary: Stop the run to avoid lingering RUNNING state until real loop is added
+        live_run.status = 'STOPPED'
+        live_run.stopped_at = timezone.now()
+        live_run.save(update_fields=['status', 'stopped_at'])
+>>>>>>> Stashed changes
 
     except LiveRun.DoesNotExist:
         logger.error(f"LiveRun with ID {live_run_id} does not exist.")
@@ -523,12 +575,16 @@ def run_backtest(self, backtest_run_id, strategy_name, strategy_params, indicato
             tick_value=Decimal(str(instrument_spec_instance.tick_value)),
             initial_equity=initial_equity,
             risk_settings=final_risk_settings, # Use the final merged settings
+<<<<<<< Updated upstream
             filter_settings=strategy_params.get("filters", {}), # Assuming filters are passed in strategy_params
             trace_enabled=getattr(settings, "BOTS_TRACE_ENABLED_DEFAULT", False),
             trace_sampling=getattr(settings, "BOTS_TRACE_SAMPLING", 1),
             backtest_run=backtest_run,
             trace_symbol=instrument_symbol,
             trace_timeframe=config.timeframe,
+=======
+            filter_settings=strategy_params.get("filters", {}) # Assuming filters are passed in strategy_params
+>>>>>>> Stashed changes
         )
 
         # Adapt the legacy strategy to the new StrategyInterface, passing the engine instance

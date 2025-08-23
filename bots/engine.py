@@ -2,6 +2,7 @@ import pandas as pd
 import logging
 import uuid
 from decimal import Decimal
+<<<<<<< Updated upstream
 from typing import Optional, Dict, Any, List
 
 from django.db import transaction
@@ -13,10 +14,21 @@ from bots.gates import evaluate_filters, risk_allows_entry, apply_fill_model
 
 logger = logging.getLogger(__name__)
 
+=======
+
+from core.interfaces import StrategyInterface
+from bots.models import ExecutionConfig
+
+logger = logging.getLogger(__name__)
+
+from bots.gates import evaluate_filters, risk_allows_entry, apply_fill_model
+
+>>>>>>> Stashed changes
 class BacktestEngine:
     """
     An event-driven backtesting engine with realistic execution simulation.
     """
+<<<<<<< Updated upstream
     def __init__(
         self,
         strategy: StrategyInterface,
@@ -34,6 +46,9 @@ class BacktestEngine:
         trace_symbol: Optional[str] = None,
         trace_timeframe: Optional[str] = None,
     ):
+=======
+    def __init__(self, strategy: StrategyInterface, data: pd.DataFrame, execution_config: ExecutionConfig, tick_size: Decimal, tick_value: Decimal, initial_equity: float, risk_settings: dict = None, filter_settings: dict = None):
+>>>>>>> Stashed changes
         self.strategy = strategy
         self.data = data
         self.execution_config = execution_config
@@ -42,6 +57,7 @@ class BacktestEngine:
         self.initial_equity = initial_equity
         self.risk_settings = risk_settings if risk_settings is not None else {}
         self.filter_settings = filter_settings if filter_settings is not None else {}
+<<<<<<< Updated upstream
         # Trace state
         self._trace_enabled = bool(trace_enabled)
         self._trace_sampling = max(1, int(trace_sampling or 1))
@@ -56,6 +72,9 @@ class BacktestEngine:
         self._trace_batch_size = int(getattr(settings, 'BOTS_TRACE_BATCH_SIZE', 1000))
         self._trace_truncated = False
 
+=======
+        
+>>>>>>> Stashed changes
         self.current_bar = 0
         self.equity = initial_equity
         self.equity_curve = []
@@ -66,6 +85,7 @@ class BacktestEngine:
         """
         Runs the backtest simulation.
         """
+<<<<<<< Updated upstream
         # If strategy supports tracing, wire callback (prefers legacy_strategy if using adapter)
         try:
             target = getattr(self.strategy, 'legacy_strategy', self.strategy)
@@ -74,12 +94,15 @@ class BacktestEngine:
         except Exception:
             logger.debug("Trace setup failed", exc_info=True)
 
+=======
+>>>>>>> Stashed changes
         self.equity_curve.append({'timestamp': self.data.index[0].isoformat(), 'equity': self.equity})
 
         for i in range(len(self.data)):
             self.current_bar = i
             current_window = self.data.iloc[:i+1]
             current_bar_data = self.data.iloc[i]
+<<<<<<< Updated upstream
 
             # 1. Update open positions for SL/TP hits
             self._check_sl_tp(current_bar_data)
@@ -95,12 +118,31 @@ class BacktestEngine:
             if actions:
                 self._process_actions(actions, current_bar_data, eligible, filter_reason)
 
+=======
+            
+            # 1. Update open positions for SL/TP hits
+            self._check_sl_tp(current_bar_data)
+            
+            # 2. Evaluate filters
+            eligible, filter_reason = evaluate_filters(current_bar_data.name, current_bar_data, self.filter_settings)
+            
+            # 3. Get strategy actions
+            actions = self.strategy.on_bar_close(current_window)
+            
+            # 4. Process actions
+            if actions:
+                self._process_actions(actions, current_bar_data, eligible, filter_reason)
+            
+>>>>>>> Stashed changes
             # 5. Record equity point
             self.equity_curve.append({'timestamp': current_bar_data.name.isoformat(), 'equity': round(self.equity, 2)})
 
         self._close_open_positions(self.data.iloc[-1])
+<<<<<<< Updated upstream
         # Persist traces at the end
         self._persist_traces()
+=======
+>>>>>>> Stashed changes
         logger.info("Backtest finished.")
 
     def _check_sl_tp(self, current_bar):
@@ -128,7 +170,11 @@ class BacktestEngine:
                         pos_closed = True
                         exit_price = tp
                         closure_reason = 'TP_HIT'
+<<<<<<< Updated upstream
 
+=======
+            
+>>>>>>> Stashed changes
             elif pos['direction'] == 'SELL':
                 # Check Stop Loss
                 if pos.get('stop_loss') is not None:
@@ -150,17 +196,30 @@ class BacktestEngine:
                 positions_to_remove.append(pos)
 
         self.open_positions = [p for p in self.open_positions if p not in positions_to_remove]
+<<<<<<< Updated upstream
 
     def _close_position(self, pos, exit_price, exit_timestamp, closure_reason):
         entry_price = Decimal(str(pos['entry_price']))
         volume = Decimal(str(pos['volume']))
         exit_price = Decimal(str(exit_price))  # Ensure exit_price is also a Decimal
 
+=======
+    
+    def _close_position(self, pos, exit_price, exit_timestamp, closure_reason):
+        entry_price = Decimal(str(pos['entry_price']))
+        volume = Decimal(str(pos['volume']))
+        exit_price = Decimal(str(exit_price)) # Ensure exit_price is also a Decimal
+        
+>>>>>>> Stashed changes
         pnl = Decimal('0.0')
         if self.tick_size > 0:
             if pos['direction'] == 'BUY':
                 price_diff_ticks = (exit_price - entry_price) / self.tick_size
+<<<<<<< Updated upstream
             else:  # SELL
+=======
+            else: # SELL
+>>>>>>> Stashed changes
                 price_diff_ticks = (entry_price - exit_price) / self.tick_size
             pnl = price_diff_ticks * self.tick_value * volume
 
@@ -170,6 +229,7 @@ class BacktestEngine:
                 pnl -= commission
             elif self.execution_config.commission_units == 'PER_LOT':
                 pnl -= commission * volume
+<<<<<<< Updated upstream
 
         self.equity += float(pnl)
 
@@ -177,11 +237,21 @@ class BacktestEngine:
             **pos,
             'exit_price': float(exit_price),
             'exit_timestamp': exit_timestamp.isoformat() if hasattr(exit_timestamp, 'isoformat') else str(exit_timestamp),
+=======
+        
+        self.equity += float(pnl)
+        
+        closed_trade = {
+            **pos,
+            'exit_price': float(exit_price),
+            'exit_timestamp': exit_timestamp.isoformat(),
+>>>>>>> Stashed changes
             'pnl': float(pnl),
             'status': 'CLOSED',
             'closure_reason': closure_reason
         }
         self.trades.append(closed_trade)
+<<<<<<< Updated upstream
         # Engine trace for exit
         self._emit_engine_trace('fill', 'exit', {
             'pos_id': pos.get('id'),
@@ -190,12 +260,18 @@ class BacktestEngine:
             'reason': closure_reason,
             'pnl': float(pnl),
         }, None, ts=exit_timestamp)
+=======
+>>>>>>> Stashed changes
         logger.info(f"Sim CLOSE: {pos['direction']} {pos['volume']} @{pos['entry_price']} by {closure_reason} @{exit_price}. P&L: {pnl:.2f}. Equity: {self.equity:.2f}")
 
     def _close_open_positions(self, last_bar):
         if not self.open_positions:
             return
+<<<<<<< Updated upstream
 
+=======
+        
+>>>>>>> Stashed changes
         logger.info(f"End of backtest: Closing {len(self.open_positions)} remaining open positions.")
         last_price = Decimal(str(last_bar['close']))
         for pos in list(self.open_positions):
@@ -205,6 +281,7 @@ class BacktestEngine:
     def _process_actions(self, actions, bar_data, eligible, filter_reason):
         for action in actions:
             action_type = action.get('action')
+<<<<<<< Updated upstream
 
             if action_type == 'OPEN_TRADE':
                 if not eligible:
@@ -212,27 +289,49 @@ class BacktestEngine:
                     self._emit_engine_trace('filter', 'blocked', {'reason': filter_reason}, bar_data)
                     continue
 
+=======
+            
+            if action_type == 'OPEN_TRADE':
+                if not eligible:
+                    logger.info(f"Entry skipped due to filter: {filter_reason}")
+                    continue
+                
+>>>>>>> Stashed changes
                 # Risk gates only apply to new entries
                 ok, risk_reason = risk_allows_entry(self.open_positions, self.equity_curve, bar_data.name, self.risk_settings, self.initial_equity)
                 if not ok:
                     logger.info(f"Entry skipped due to risk guard: {risk_reason}")
+<<<<<<< Updated upstream
                     self._emit_engine_trace('risk', 'blocked', {'reason': risk_reason}, bar_data)
                     continue
 
+=======
+                    continue
+                
+>>>>>>> Stashed changes
                 self._open_trade(action, bar_data)
 
             elif action_type == 'CLOSE_POSITION':
                 # Exits should bypass filters
                 self._handle_close_position(action, bar_data)
+<<<<<<< Updated upstream
 
             elif action_type == 'REDUCE_POSITION':
                 # Exits should bypass filters
                 self._handle_reduce_position(action, bar_data)
 
+=======
+            
+            elif action_type == 'REDUCE_POSITION':
+                # Exits should bypass filters
+                self._handle_reduce_position(action, bar_data)
+                
+>>>>>>> Stashed changes
             elif action_type == 'MODIFY_SLTP':
                 self._handle_modify_sltp(action)
 
     def _open_trade(self, action, bar_data):
+<<<<<<< Updated upstream
         intended_price = Decimal(str(bar_data['close']))  # Assume entry at close for now
         direction = action['side'].upper()
 
@@ -259,10 +358,17 @@ class BacktestEngine:
                     else:  # SELL
                         tp_dec = fill_price_dec - Decimal(str(rr)) * price_sl_distance
                     logger.info(f"Derived TP for backtest using RR={rr}: entry={fill_price_dec}, SL_dist={price_sl_distance} -> TP={tp_dec}")
+=======
+        intended_price = Decimal(str(bar_data['close'])) # Assume entry at close for now
+        direction = action['side'].upper()
+        
+        fill_price = self.apply_fill_model(direction, intended_price, bar_data, self.execution_config)
+>>>>>>> Stashed changes
 
         new_pos = {
             'id': str(uuid.uuid4()),
             'intended_price': float(intended_price),
+<<<<<<< Updated upstream
             'entry_price': float(fill_price_dec),
             'volume': float(action['qty']),
             'direction': direction,
@@ -281,16 +387,36 @@ class BacktestEngine:
             'sl': float(sl_dec) if sl_dec is not None else None,
             'tp': float(tp_dec) if tp_dec is not None else (float(action['tp']) if action.get('tp') is not None else None),
         }, bar_data)
+=======
+            'entry_price': float(fill_price),
+            'volume': float(action['qty']),
+            'direction': direction,
+            'stop_loss': float(action['sl']) if action.get('sl') else None,
+            'take_profit': float(action['tp']) if action.get('tp') else None,
+            'entry_timestamp': bar_data.name.isoformat(),
+            'symbol': self.strategy.legacy_strategy.instrument_symbol, # Bit of a hack to get the symbol
+            'comment': action.get('tag', '')
+        }
+        self.open_positions.append(new_pos)
+>>>>>>> Stashed changes
         logger.info(f"Sim OPEN: {new_pos['direction']} {new_pos['volume']} @{new_pos['entry_price']} (intended: {intended_price})")
 
     def _handle_close_position(self, action, bar_data):
         positions_to_close = []
         side_to_close = action.get('side', 'ANY').upper()
+<<<<<<< Updated upstream
 
         for pos in self.open_positions:
             if side_to_close == 'ANY' or pos['direction'] == side_to_close:
                 positions_to_close.append(pos)
 
+=======
+        
+        for pos in self.open_positions:
+            if side_to_close == 'ANY' or pos['direction'] == side_to_close:
+                positions_to_close.append(pos)
+        
+>>>>>>> Stashed changes
         for pos in positions_to_close:
             # Assume close at the current bar's close price
             intended_price = Decimal(str(bar_data['close']))
@@ -338,6 +464,7 @@ class BacktestEngine:
                 'closure_reason': 'REDUCE_SIGNAL',
                 'reduced_volume': float(reduce_now),
             })
+<<<<<<< Updated upstream
             # Engine trace for reduce
             self._emit_engine_trace('fill', 'reduce', {
                 'pos_id': pos.get('id'),
@@ -346,6 +473,8 @@ class BacktestEngine:
                 'reduced_volume': float(reduce_now),
                 'pnl': float(pnl),
             }, bar_data)
+=======
+>>>>>>> Stashed changes
 
             if Decimal(str(pos['volume'])) <= 0:
                 self.open_positions.remove(pos)
@@ -363,6 +492,7 @@ class BacktestEngine:
                 if action.get('tp') is not None:
                     pos['take_profit'] = float(action['tp'])
                 logger.info(f"Sim MODIFY SL/TP for position {pos['id']}: SL={pos['stop_loss']}, TP={pos['take_profit']}")
+<<<<<<< Updated upstream
                 # Engine trace for modify
                 self._emit_engine_trace('fill', 'modify_sltp', {
                     'pos_id': pos.get('id'),
@@ -466,3 +596,8 @@ class BacktestEngine:
                         " (truncated)" if self._trace_truncated else "")
         except Exception:
             logger.error('Trace persistence failed', exc_info=True)
+=======
+
+    def apply_fill_model(self, side: str, intended_price: Decimal, bar: pd.Series, cfg: ExecutionConfig) -> Decimal:
+        return apply_fill_model(side, float(intended_price), bar, cfg, self.tick_size)
+>>>>>>> Stashed changes

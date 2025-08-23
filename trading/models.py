@@ -81,6 +81,7 @@ class Trade(models.Model):
         blank=True,
         help_text="Maximum loss experienced by the trade"
     )
+<<<<<<< Updated upstream
 
     # New: Bot lineage and source tagging (Option B)
     source = models.CharField(
@@ -104,6 +105,8 @@ class Trade(models.Model):
     # New: Closure tagging (final close only)
     close_reason = models.CharField(max_length=32, null=True, blank=True, db_index=True)
     close_subreason = models.CharField(max_length=32, null=True, blank=True)
+=======
+>>>>>>> Stashed changes
 
     def __str__(self):
         return f"Trade {self.id} on {self.instrument}"

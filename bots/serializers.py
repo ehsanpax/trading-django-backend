@@ -1,5 +1,9 @@
 from rest_framework import serializers
+<<<<<<< Updated upstream
 from .models import Bot, BotVersion, BacktestConfig, BacktestRun, LiveRun, ExecutionConfig, BacktestDecisionTrace
+=======
+from .models import Bot, BotVersion, BacktestConfig, BacktestRun, LiveRun, ExecutionConfig
+>>>>>>> Stashed changes
 from accounts.serializers import AccountSerializer # Assuming you have this
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
@@ -71,15 +75,19 @@ class BacktestConfigSerializer(serializers.ModelSerializer):
     timeframe_display = serializers.CharField(source='get_timeframe_display', read_only=True)
     execution_config = ExecutionConfigSerializer(read_only=True)
     execution_config_id = serializers.UUIDField(write_only=True, required=False, allow_null=True)
+<<<<<<< Updated upstream
     # New scope fields
     bot_id = serializers.UUIDField(write_only=True, required=False, allow_null=True)
     owner_id = serializers.IntegerField(write_only=True, required=False, allow_null=True)
     bot = serializers.PrimaryKeyRelatedField(read_only=True)
     owner = UserSimpleSerializer(read_only=True)
+=======
+>>>>>>> Stashed changes
 
     class Meta:
         model = BacktestConfig
         fields = [
+<<<<<<< Updated upstream
             'id', 'name', 'bot_version', 'bot_version_info', 'bot', 'bot_id', 'owner', 'owner_id',
             'timeframe', 'timeframe_display', 'risk_json', 'execution_config', 'execution_config_id', 'label', 'created_at'
         ]
@@ -121,6 +129,12 @@ class BacktestConfigSerializer(serializers.ModelSerializer):
         if not (bot_version or attrs.get('bot') or attrs.get('owner') or attrs.get('owner_id')):
             raise serializers.ValidationError('Provide one of bot_version, bot_id, or rely on owner (user-scoped).')
         return attrs
+=======
+            'id', 'name', 'bot_version', 'bot_version_info', 'timeframe', 'timeframe_display',
+            'risk_json', 'execution_config', 'execution_config_id', 'label', 'created_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'bot_version_info', 'timeframe_display', 'execution_config']
+>>>>>>> Stashed changes
 
     def create(self, validated_data):
         execution_config_id = validated_data.pop('execution_config_id', None)
@@ -130,20 +144,28 @@ class BacktestConfigSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         execution_config_id = validated_data.pop('execution_config_id', None)
+<<<<<<< Updated upstream
         validated_data.pop('bot_id', None)
         validated_data.pop('owner_id', None)
+=======
+>>>>>>> Stashed changes
         if execution_config_id:
             instance.execution_config = ExecutionConfig.objects.get(id=execution_config_id)
         return super().update(instance, validated_data)
 
 class BacktestRunSerializer(serializers.ModelSerializer):
     config_label = serializers.CharField(source='config.label', read_only=True, allow_null=True)
+<<<<<<< Updated upstream
     bot_name = serializers.CharField(source='bot_version.bot.name', read_only=True)
+=======
+    bot_name = serializers.CharField(source='config.bot_version.bot.name', read_only=True)
+>>>>>>> Stashed changes
     original_timeframe = serializers.CharField(source='config.timeframe', read_only=True)
 
     class Meta:
         model = BacktestRun
         fields = [
+<<<<<<< Updated upstream
             'id', 'config', 'bot_version', 'instrument_symbol', 'config_label', 'bot_name', 'original_timeframe', 'data_window_start', 
             'data_window_end', 'equity_curve', 'stats', 'simulated_trades_log', 'status', 'progress', 'created_at'
         ]
@@ -179,6 +201,12 @@ class LaunchBacktestSerializer(serializers.Serializer):
             if not (owns_version and owns_cfg):
                 raise serializers.ValidationError("You do not have permission to use this config/version.")
         return data
+=======
+            'id', 'config', 'instrument_symbol', 'config_label', 'bot_name', 'original_timeframe', 'data_window_start', 
+            'data_window_end', 'equity_curve', 'stats', 'simulated_trades_log', 'status', 'progress', 'created_at'
+        ]
+        read_only_fields = ['id', 'instrument_symbol', 'equity_curve', 'stats', 'simulated_trades_log', 'created_at', 'config_label', 'bot_name', 'progress', 'original_timeframe']
+>>>>>>> Stashed changes
 
 class LiveRunSerializer(serializers.ModelSerializer):
     bot_name = serializers.CharField(source='bot_version.bot.name', read_only=True)
@@ -263,9 +291,14 @@ class BotVersionCreateSerializer(serializers.Serializer):
 class CreateLiveRunSerializer(serializers.Serializer):
     bot_version_id = serializers.UUIDField()
     instrument_symbol = serializers.CharField(max_length=50)
+<<<<<<< Updated upstream
     account_id = serializers.UUIDField()
     timeframe = serializers.ChoiceField(choices=[('M1','1 Minute'),('M5','5 Minutes'),('M15','15 Minutes'),('M30','30 Minutes'),('H1','1 Hour'),('H4','4 Hours'),('D1','1 Day')], default='M1')
     decision_mode = serializers.ChoiceField(choices=[('CANDLE','On Candle Close'),('TICK','On Each Tick')], default='CANDLE')
+=======
+    # --- New: explicit target account for this live run ---
+    account_id = serializers.UUIDField()
+>>>>>>> Stashed changes
 
     def validate(self, data):
         # Basic validation for instrument_symbol

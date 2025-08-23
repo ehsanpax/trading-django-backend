@@ -7,6 +7,7 @@ Purpose
 Status Legend
 - [ ] Not started  [~] In progress  [x] Done  [!] Blocked
 
+<<<<<<< Updated upstream
 ## Concurrency & Idempotency Addendum (2025-08-14)
 - See `EXECUTION_CONCURRENCY_PLAN.md` for details.
 - Current status:
@@ -87,6 +88,8 @@ Next steps
 
 ---
 
+=======
+>>>>>>> Stashed changes
 Milestones
 - M1 Monolith live execution (account-bound) usable end-to-end
 - M2 Observability, idempotency, safety rails
@@ -94,6 +97,7 @@ Milestones
 
 Phase 0 – Prerequisites
 - [ ] Fix bid/ask selection in `risk.management.calculate_position_size` (BUY=ask, SELL=bid)
+<<<<<<< Updated upstream
 - [x] Add shared helper to fetch pip_size/contract_size consistently (reuse `trades.helpers.fetch_symbol_info_for_platform`)
 - [ ] Define a system user/service principal for headless execution (used by LiveRun)
 
@@ -104,10 +108,23 @@ Phase 1 – Data model and API wiring
 - [x] Update `StartLiveRunAPIView` to set `LiveRun.account`
 - [x] Update `services.start_bot_live_run` to use `live_run.account` (drop reliance on `bot.account`)
 - [x] Pass `account_id` into Celery `live_loop`
+=======
+- [ ] Add shared helper to fetch pip_size/contract_size consistently (reuse `trades.helpers.fetch_symbol_info_for_platform`)
+- [ ] Define a system user/service principal for headless execution (used by LiveRun)
+
+Phase 1 – Data model and API wiring
+- [ ] Add `LiveRun.account = ForeignKey(Account, null=False)`
+- [ ] Migrations and admin list displays
+- [ ] Update `CreateLiveRunSerializer` to accept `account_id` and validate ownership
+- [ ] Update `StartLiveRunAPIView` to set `LiveRun.account`
+- [ ] Update `services.start_bot_live_run` to use `live_run.account` (drop reliance on `bot.account`)
+- [ ] Pass `account_id` into Celery `live_loop`
+>>>>>>> Stashed changes
 
 Acceptance: Create multiple LiveRuns for the same BotVersion across different user accounts.
 
 Phase 2 – Execution DTO and Gateway (monolith)
+<<<<<<< Updated upstream
 - [~] Define a single in-process DTO for execution (inputs to TradeService):
   - account_id (UUID), symbol, direction, order_type, limit_price?, stop_loss_distance_pips, take_profit_price, risk_percent, metadata (live_run_id, bot_version_id, signal_id, reason), projections (projected_profit, projected_loss, rr_ratio), idempotency_key (optional)
 - [ ] Implement `build_trade_request(...)` helper used by both LiveRun and AI view to build the DTO (computes SL distance from absolute SL; TP is absolute)
@@ -142,10 +159,26 @@ Phase 3 – Live loop (minimum viable)
 - [x] Evaluate strategy; for OPEN_TRADE map to DTO and call `ExecutionAdapter`
 - [x] Respect STOPPING; set STOPPED on exit
 - [x] Error handling: set ERROR + last_error, safe shutdown
+=======
+- [ ] Define a single in-process DTO for execution (inputs to TradeService):
+  - account_id (UUID), symbol, direction, order_type, limit_price?, stop_loss_distance_pips, take_profit_price, risk_percent, metadata (live_run_id, bot_version_id, signal_id, reason), projections (projected_profit, projected_loss, rr_ratio), idempotency_key (optional)
+- [ ] Implement `build_trade_request(...)` helper used by both LiveRun and AI view to build the DTO (computes SL distance from absolute SL; TP is absolute)
+- [ ] Implement `ExecutionGatewayLocal` that wraps `TradeService`
+
+Acceptance: Unit tests for the helper across instruments (forex pairs with USD/non-USD quote, indices/CFD) and both sides BUY/SELL.
+
+Phase 3 – Live loop (minimum viable)
+- [ ] Implement bar/tick update (poll current price or bars)
+- [ ] Compute required indicators once, then incremental updates
+- [ ] Evaluate strategy; for OPEN_TRADE map to DTO and call `ExecutionGatewayLocal`
+- [ ] Respect STOPPING; set STOPPED on exit
+- [ ] Error handling: set ERROR + last_error, safe shutdown
+>>>>>>> Stashed changes
 
 Acceptance: A simple EMA cross Sectioned strategy places simulated orders on a real/sandbox account on demand.
 
 Phase 4 – Exits, reduction, SL/TP modification
+<<<<<<< Updated upstream
 - [x] Map CLOSE_POSITION → `close_trade_globally`
 - [x] Map REDUCE_POSITION → `partially_close_trade`
 - [ ] Map MODIFY_SLTP → `update_trade_stop_loss_globally` or `update_trade_protection_levels`
@@ -171,6 +204,20 @@ Phase 5 – Observability and safety
 - [~] Structured logs with correlation_id (live_run_id, signal_id)
 - [ ] Metrics: intents sent/succeeded/failed, latency, retries
 - [x] Guardrails: cooldown, max open per symbol, daily loss (reuse risk.management)
+=======
+- [ ] Map CLOSE_POSITION → `close_trade_globally`
+- [ ] Map REDUCE_POSITION → `partially_close_trade`
+- [ ] Map MODIFY_SLTP → `update_trade_stop_loss_globally` or `update_trade_protection_levels`
+- [ ] Persist mapping: `LiveRunTradeLink(live_run, symbol, side, trade_id, opened_at)` for lookups
+
+Acceptance: Strategy exits correctly close or reduce positions created by this LiveRun.
+
+Phase 5 – Observability and safety
+- [ ] Heartbeat updates on `LiveRun` (last_action_at, counters)
+- [ ] Structured logs with correlation_id (live_run_id, signal_id)
+- [ ] Metrics: intents sent/succeeded/failed, latency, retries
+- [ ] Guardrails: cooldown, max open per symbol, daily loss (reuse risk.management)
+>>>>>>> Stashed changes
 
 Acceptance: Dashboard/metrics show live activity; guardrails block entries when tripped.
 
@@ -210,7 +257,10 @@ Open Questions
 - What to do when SectionedStrategy emits no SL? (Enforce SL policy vs. reject)
 - Where to persist projections if TradeService recalculates them? (Single source of truth)
 - MT5/cTrader session affinity constraints per account (single consumer?)
+<<<<<<< Updated upstream
 - Do we need a `TradeCloseEvent`/`OrderEvent` table for high fidelity auditing, or are journal + order rows sufficient?
+=======
+>>>>>>> Stashed changes
 
 Testing Plan
 - Unit tests: DTO builder, risk conversions, idempotency

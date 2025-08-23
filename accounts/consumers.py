@@ -9,9 +9,12 @@ from trading_platform.mt5_api_client import connection_manager
 from trades.tasks import trigger_trade_synchronization
 from trades.listeners import PositionUpdateListener
 from monitoring.services import monitoring_service
+<<<<<<< Updated upstream
 from channels.layers import get_channel_layer
 import asyncio
 from accounts.services import get_account_details as get_account_details_service
+=======
+>>>>>>> Stashed changes
 
 logger = logging.getLogger(__name__)
 
@@ -193,7 +196,10 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         """Callback for account info updates from the MT5APIClient."""
         if not self.is_active:
             return
+<<<<<<< Updated upstream
         #logger.info(f"AccountConsumer.send_account_update account={self.account_id}")
+=======
+>>>>>>> Stashed changes
         self.account_info = account_info
         await self.send_combined_update()
 
@@ -201,7 +207,10 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         """Callback for open positions updates from the MT5APIClient."""
         if not self.is_active:
             return
+<<<<<<< Updated upstream
         #logger.info(f"AccountConsumer.send_positions_update account={self.account_id} count={len(open_positions) if isinstance(open_positions, list) else 'n/a'}")
+=======
+>>>>>>> Stashed changes
         all_positions = open_positions
         pending_orders = [p for p in all_positions if isinstance(p, dict) and p.get('type') == 'pending_order']
         open_trades = [p for p in all_positions if isinstance(p, dict) and p.get('type') != 'pending_order']
@@ -258,7 +267,11 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         for pos in self.open_positions:
             trade_id = self.ticket_to_uuid_map.get(str(pos.get('ticket')))
             if trade_id:
+<<<<<<< Updated upstream
                 await PositionUpdateListener.on_position_update(
+=======
+                await sync_to_async(PositionUpdateListener.on_position_update)(
+>>>>>>> Stashed changes
                     trade_id, pos.get('profit', 0)
                 )
 
@@ -307,6 +320,7 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         #logger.info(f"Sending account_update to client account={self.account_id} positions={len(processed_positions)} pending={len(processed_pending_orders)}")
         await self.send_json(payload)
         monitoring_service.update_server_message(self.channel_name, payload)
+<<<<<<< Updated upstream
 
     # Handlers for Channels group messages
     async def account_info_update(self, event):
@@ -320,3 +334,5 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         #logger.info(f"Channels open_positions_update received for account={self.account_id}")
         positions = event.get("open_positions", [])
         await self.send_positions_update(positions)
+=======
+>>>>>>> Stashed changes

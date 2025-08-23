@@ -96,6 +96,7 @@ class TradeJournalViewset(ModelViewSet):
         if account_id:
             try:
                 account_id = uuid.UUID(account_id, version=4)
+<<<<<<< Updated upstream
                 queryset = queryset.filter(
                     trade__account__id=account_id,
                     trade__account__user=self.request.user,
@@ -105,6 +106,11 @@ class TradeJournalViewset(ModelViewSet):
                     trade__account__name__iexact=str(account_id),
                     trade__account__user=self.request.user,
                 )
+=======
+                queryset = queryset.filter(trade__account__id=account_id, trade__account__user=self.request.user)
+            except Exception:
+                queryset = queryset.filter(trade__account__name__iexact=str(account_id), trade__account__user=self.request.user)
+>>>>>>> Stashed changes
 
         return queryset
 

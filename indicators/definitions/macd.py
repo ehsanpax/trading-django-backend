@@ -16,6 +16,7 @@ class MACDIndicator:
     VERSION = 1
     PANE_TYPE = 'pane'
     OUTPUTS = ["macd", "histogram", "signal"]
+<<<<<<< Updated upstream
     # Visual metadata
     VISUAL_SCHEMA = {
         "series": {
@@ -58,6 +59,8 @@ class MACDIndicator:
             "zero": {"value": 0, "color": "#808080", "visible": True}
         }
     }
+=======
+>>>>>>> Stashed changes
     PARAMS_SCHEMA = {
         "fast": {
             "type": "integer",

@@ -40,12 +40,17 @@ def execute_session_schedule(self, schedule_id):
             result=result_message,
         )
         session_endpoint_url = "https://endlessly-central-gelding.ngrok-free.app/webhook/08dbc21f-2055-47ea-8aaf-c1dfe2dbc69f"
+<<<<<<< Updated upstream
 
         schedule_message = f"Running schedule {schedule.name}.\n"
         context = schedule_message + str(schedule.context)
 
         data = {
             "context": context,
+=======
+        data = {
+            "context": schedule.context,
+>>>>>>> Stashed changes
             "session_id": str(schedule.session.external_session_id),
             "system_session_id": str(schedule.session.id),
             "trading_account_api_key": str(schedule.session.user_token),
@@ -56,9 +61,13 @@ def execute_session_schedule(self, schedule_id):
             json=data,
             timeout=None,
         )
+<<<<<<< Updated upstream
         task_record.status = SessionScheduleTaskStatusChoices.SUCCESS.value
         task_record.result = request.content
         task_record.save()
+=======
+
+>>>>>>> Stashed changes
         return result_message
     except SessionSchedule.DoesNotExist:
         # Handle the case where the schedule is not found

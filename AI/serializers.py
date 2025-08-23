@@ -4,7 +4,11 @@ from trade_journal.models import TradeJournal
 from django.db import models
 from trading.models import Trade, Order
 from trades.serializers import TradeSerializer, OrderSerializer
+<<<<<<< Updated upstream
 from .choices import WeekDayChoices, ChatSessionTypeChoices
+=======
+from .choices import WeekDayChoices
+>>>>>>> Stashed changes
 import datetime
 
 
@@ -115,9 +119,13 @@ class SessionScheduleSerializer(serializers.ModelSerializer):
     external_session_id = serializers.CharField(
         source="session.external_session_id", read_only=True
     )
+<<<<<<< Updated upstream
     excluded_days = serializers.CharField(
         allow_blank=True, allow_null=True, required=False
     )
+=======
+    excluded_days = serializers.CharField(allow_blank=True, allow_null=True, required=False)
+>>>>>>> Stashed changes
 
     class Meta:
         model = SessionSchedule

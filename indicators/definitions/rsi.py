@@ -16,6 +16,7 @@ class RSIIndicator:
     VERSION = 1
     PANE_TYPE = 'pane'
     OUTPUTS = ["rsi"]
+<<<<<<< Updated upstream
     # Visual metadata for frontend UI
     VISUAL_SCHEMA = {
         "series": {
@@ -55,6 +56,8 @@ class RSIIndicator:
             "middle": {"value": 50, "color": "#d3d3d3", "visible": False}
         }
     }
+=======
+>>>>>>> Stashed changes
     PARAMS_SCHEMA = {
         "length": {
             "type": "integer",

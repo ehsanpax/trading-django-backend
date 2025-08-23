@@ -29,12 +29,15 @@ from datetime import (
     timezone as dt_timezone,
 )  # Import datetime's timezone as dt_timezone
 from django.db.models import Q
+<<<<<<< Updated upstream
 # New: symbol info helper for inference
 from trades.helpers import fetch_symbol_info_for_platform
 
 # Phase 0 addition: use minimal connector factory for TradeService
 from connectors.factory import get_connector as get_platform_connector
 from utils.concurrency import RedisLock, is_in_cooldown, mark_cooldown
+=======
+>>>>>>> Stashed changes
 
 logger = logging.getLogger(__name__)
 
@@ -136,8 +139,12 @@ def get_cached(symbol, tf, ind):
 def partially_close_trade(user, trade_id: UUID, volume_to_close: Decimal) -> dict:
     """
     Partially closes an open trade, performs platform-specific actions,
+<<<<<<< Updated upstream
     and updates the database. Tags the closing Order with STRATEGY_EXIT by default
     unless broker mapping sets a more specific reason.
+=======
+    and updates the database.
+>>>>>>> Stashed changes
     """
     trade = get_object_or_404(Trade, id=trade_id)
 
@@ -210,6 +217,7 @@ def partially_close_trade(user, trade_id: UUID, volume_to_close: Decimal) -> dic
             .first()
         )
 
+<<<<<<< Updated upstream
         # Default tagging for strategy-driven partial close
         if closed_portion_order and not closed_portion_order.close_reason:
             closed_portion_order.close_reason = "STRATEGY_EXIT"
@@ -217,6 +225,17 @@ def partially_close_trade(user, trade_id: UUID, volume_to_close: Decimal) -> dic
                 "EXIT_LONG" if (trade.direction or "").upper() == "BUY" else "EXIT_SHORT"
             )
             closed_portion_order.save(update_fields=["close_reason", "close_subreason"])
+=======
+        profit_on_closed_portion = Decimal("0.00")
+        if (
+            closed_portion_order and closed_portion_order.volume == volume_to_close
+        ):  # A basic check
+            profit_on_closed_portion = (
+                (closed_portion_order.profit or 0)
+                + (closed_portion_order.commission or 0)
+                + (closed_portion_order.swap or 0)
+            )
+>>>>>>> Stashed changes
 
         # Refresh trade instance from DB after sync
         trade.refresh_from_db()
@@ -304,9 +323,28 @@ class TradeService:
         return account, final_lot, sl_price, tp_price
 
     def _get_connector(self, account: Account):
+<<<<<<< Updated upstream
         """Phase 0: delegate connector resolution to factory to prepare for multi-platform support."""
         return get_platform_connector(account)
 
+=======
+        if account.platform == "MT5":
+            mt5_acc = get_object_or_404(MT5Account, account=account)
+            return MT5APIClient(
+                base_url=settings.MT5_API_BASE_URL,
+                account_id=mt5_acc.account_number,
+                password=mt5_acc.encrypted_password,
+                broker_server=mt5_acc.broker_server,
+                internal_account_id=str(account.id),
+            )
+
+        if account.platform == "cTrader":
+            ct_acc = get_object_or_404(CTraderAccount, account=account)
+            return CTraderClient(ct_acc)
+
+        raise RuntimeError(f"Unsupported platform: {account.platform}")
+
+>>>>>>> Stashed changes
     def execute_on_broker(
         self, account: Account, final_lot, sl_price, tp_price
     ) -> dict:
@@ -379,7 +417,13 @@ class TradeService:
         conn = self._get_connector(account)
         if account.platform == "MT5":
             limit_price_float = (
+<<<<<<< Updated upstream
                 float(self.data["limit_price"]) if self.data.get("limit_price") is not None else None
+=======
+                float(self.data["limit_price"])
+                if self.data.get("limit_price") is not None
+                else None
+>>>>>>> Stashed changes
             )
             resp = conn.place_trade(
                 symbol=self.data["symbol"],
@@ -498,7 +542,13 @@ class TradeService:
             order_type=self.data["order_type"],
             volume=Decimal(final_lot),
             price=(
+<<<<<<< Updated upstream
                 Decimal(self.data["limit_price"]) if self.data.get("limit_price") is not None else None
+=======
+                Decimal(self.data["limit_price"])
+                if self.data.get("limit_price") is not None
+                else None
+>>>>>>> Stashed changes
             ),
             stop_loss=Decimal(sl_price),
             take_profit=Decimal(tp_price),
@@ -506,9 +556,15 @@ class TradeService:
             broker_order_id=resp["order_id"],
             status=resp.get("status", "pending"),
             risk_percent=Decimal(self.data["risk_percent"]),
+<<<<<<< Updated upstream
             projected_profit=Decimal(self.data.get("projected_profit", 0) or 0),
             projected_loss=Decimal(self.data.get("projected_loss", 0) or 0),
             rr_ratio=Decimal(self.data.get("rr_ratio", 0) or 0),
+=======
+            projected_profit=Decimal(self.data["projected_profit"]),
+            projected_loss=Decimal(self.data["projected_loss"]),
+            rr_ratio=Decimal(self.data["rr_ratio"]),
+>>>>>>> Stashed changes
         )
 
         trade = None
@@ -576,6 +632,7 @@ class TradeService:
                 deal_id=resp.get("deal_id"),
                 position_id=db_trade_position_id,
                 risk_percent=Decimal(self.data["risk_percent"]),
+<<<<<<< Updated upstream
                 projected_profit=Decimal(self.data.get("projected_profit", 0) or 0),
                 projected_loss=Decimal(self.data.get("projected_loss", 0) or 0),
                 rr_ratio=Decimal(self.data.get("rr_ratio", 0) or 0),
@@ -595,6 +652,14 @@ class TradeService:
                 trade.bot_version_id = self.data.get("bot_version_id")
             if trade:
                 trade.save()
+=======
+                projected_profit=Decimal(self.data["projected_profit"]),
+                projected_loss=Decimal(self.data["projected_loss"]),
+                rr_ratio=Decimal(self.data["rr_ratio"]),
+                reason=self.data.get("reason", ""),
+                indicators=snapshot,
+            )
+>>>>>>> Stashed changes
             order.trade = trade
             order.save(update_fields=["trade"])
 
@@ -649,7 +714,11 @@ class TradeService:
         return out
 
 
+<<<<<<< Updated upstream
 def close_trade_globally(user, trade_id: UUID, client_close_reason: str | None = None, client_close_subreason: str | None = None) -> dict:
+=======
+def close_trade_globally(user, trade_id: UUID) -> dict:
+>>>>>>> Stashed changes
     """
     Closes a trade, performs platform-specific actions, and updates the database.
     If client_close_reason is provided (e.g., MANUAL_CLOSE), prefer it when tagging.
@@ -704,6 +773,7 @@ def close_trade_globally(user, trade_id: UUID, client_close_reason: str | None =
 
         # After successful closure, synchronize with the platform to get the final P/L
         try:
+<<<<<<< Updated upstream
             sync_result = synchronize_trade_with_platform(
                 trade_id=trade.id, existing_connector=client
             )
@@ -711,9 +781,19 @@ def close_trade_globally(user, trade_id: UUID, client_close_reason: str | None =
                 logger.error(f"Error during post-close synchronization: {sync_result['error']}")
             else:
                 logger.info(f"Post-close synchronization for trade {trade.id} successful.")
+=======
+            synchronize_trade_with_platform(
+                trade_id=trade.id, existing_connector=client
+            )
+>>>>>>> Stashed changes
         except (BrokerAPIError, BrokerConnectionError, TradeSyncError) as e:
             logger.critical(f"Trade {trade.id} closed on MT5, but DB sync failed: {e}")
+<<<<<<< Updated upstream
             pass
+=======
+            # We can still proceed to mark as closed, but profit will be stale.
+            pass  # Continue to the standard closing logic below
+>>>>>>> Stashed changes
 
     elif trade.account.platform == "cTrader":
         raise BrokerAPIError("cTrader close not implemented yet.")
@@ -775,6 +855,7 @@ def close_trade_globally(user, trade_id: UUID, client_close_reason: str | None =
     }
 
 
+<<<<<<< Updated upstream
 def partially_close_trade(user, trade_id: UUID, volume_to_close: Decimal) -> dict:
     """
     Partially closes an open trade, performs platform-specific actions,
@@ -886,6 +967,8 @@ def partially_close_trade(user, trade_id: UUID, volume_to_close: Decimal) -> dic
         raise APIException(f"Unsupported trading platform: {trade.account.platform}")
 
 
+=======
+>>>>>>> Stashed changes
 def synchronize_trade_with_platform(
     trade_id: UUID, existing_connector: MT5APIClient = None
 ):  # Add existing_connector
@@ -974,38 +1057,79 @@ def synchronize_trade_with_platform(
             created_order = Order.objects.create(
                 account=trade_instance.account,
                 instrument=deal_info.get("symbol"),
+<<<<<<< Updated upstream
                 direction=(Order.Direction.BUY if deal_info.get("type") == 0 else Order.Direction.SELL),
                 order_type=Order.OrderType.MARKET,
                 volume=deal_info.get("volume"),
                 price=deal_info.get("price"),
+=======
+                direction=(
+                    Order.Direction.BUY
+                    if deal_info.get("type") == 0
+                    else Order.Direction.SELL
+                ),  # MT5: 0 for Buy, 1 for Sell
+                order_type=Order.OrderType.MARKET,  # Deals are executions
+                volume=deal_info.get(
+                    "volume"
+                ),  # Already Decimal from fetch_trade_sync_data
+                price=deal_info.get("price"),  # Already Decimal
+>>>>>>> Stashed changes
                 status=Order.Status.FILLED,
                 broker_order_id=deal_info.get("order"),
                 broker_deal_id=broker_deal_id,
                 filled_price=deal_info.get("price"),
                 filled_volume=deal_info.get("volume"),
+<<<<<<< Updated upstream
                 filled_at=(datetime.fromtimestamp(deal_info.get("time"), tz=dt_timezone.utc) if deal_info.get("time") else None),
                 profit=deal_info.get("profit"),
                 commission=deal_info.get("commission"),
                 swap=deal_info.get("swap"),
                 broker_deal_reason_code=deal_info.get("reason"),
+=======
+                filled_at=(
+                    datetime.fromtimestamp(deal_info.get("time"), tz=dt_timezone.utc)
+                    if deal_info.get("time")
+                    else None
+                ),
+                profit=deal_info.get(
+                    "profit"
+                ),  # Already Decimal from fetch_trade_sync_data
+                commission=deal_info.get("commission"),  # Already Decimal
+                swap=deal_info.get("swap"),  # Already Decimal
+                broker_deal_reason_code=deal_info.get("reason"),  # Integer reason code
+>>>>>>> Stashed changes
                 trade=trade_instance,
                 close_reason=close_reason,
                 close_subreason=close_subreason,
             )
+<<<<<<< Updated upstream
             existing_broker_deal_ids.add(broker_deal_id)
+=======
+            existing_broker_deal_ids.add(
+                broker_deal_id
+            )  # Add to set to prevent re-creation in same run
+>>>>>>> Stashed changes
 
     # 2. Update Trade.remaining_size
-    trade_instance.remaining_size = sync_data.get("platform_remaining_size", trade_instance.remaining_size)
+    trade_instance.remaining_size = sync_data.get(
+        "platform_remaining_size", trade_instance.remaining_size
+    )
 
     # 3. Update Trade status if closed and set close_reason
     if sync_data.get("is_closed_on_platform") and trade_instance.trade_status == "open":
         trade_instance.trade_status = "closed"
+<<<<<<< Updated upstream
         trade_instance.close_price = sync_data.get("last_deal_price")
+=======
+>>>>>>> Stashed changes
 
         latest_deal_ts = sync_data.get("latest_deal_timestamp")
         if latest_deal_ts:
-            trade_instance.closed_at = datetime.fromtimestamp(latest_deal_ts, tz=dt_timezone.utc)
+            trade_instance.closed_at = datetime.fromtimestamp(
+                latest_deal_ts, tz=dt_timezone.utc
+            )
         else:
+<<<<<<< Updated upstream
             trade_instance.closed_at = django_timezone.now()
 
         # Normalize to Decimal to avoid float + Decimal TypeError
@@ -1047,6 +1171,25 @@ def synchronize_trade_with_platform(
                 trade_instance.close_reason = inferred
                 trade_instance.close_subreason = None
 
+=======
+            # If no deals, but platform says closed, use current time. Unlikely scenario.
+            trade_instance.closed_at = django_timezone.now()
+
+        # Calculate P/L
+        final_profit = sync_data.get("final_profit", Decimal("0"))
+        final_commission = sync_data.get("final_commission", Decimal("0"))
+        final_swap = sync_data.get("final_swap", Decimal("0"))
+
+        # Ensure they are Decimals if not None
+        final_profit = final_profit if final_profit is not None else Decimal("0")
+        final_commission = (
+            final_commission if final_commission is not None else Decimal("0")
+        )
+        final_swap = final_swap if final_swap is not None else Decimal("0")
+
+        trade_instance.actual_profit_loss = final_profit + final_commission + final_swap
+
+>>>>>>> Stashed changes
     try:
         trade_instance.save()
         return {
@@ -1056,7 +1199,15 @@ def synchronize_trade_with_platform(
             "remaining_size": str(trade_instance.remaining_size),
         }
     except Exception as e:
+<<<<<<< Updated upstream
         raise TradeSyncError(f"Failed to save synchronized trade {trade_instance.id}: {str(e)}")
+=======
+        # Log error e
+        raise TradeSyncError(
+            f"Failed to save synchronized trade {trade_instance.id}: {str(e)}"
+        )
+
+>>>>>>> Stashed changes
 
 
 # ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++

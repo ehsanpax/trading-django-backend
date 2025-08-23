@@ -54,6 +54,7 @@ class IndicatorService:
         
         for name, indicator_class in all_indicators.items():
             schema = getattr(indicator_class, 'PARAMS_SCHEMA', {})
+<<<<<<< Updated upstream
             display_name = getattr(indicator_class, 'NAME', name)
             outputs = getattr(indicator_class, 'OUTPUTS', [])
             pane_type = getattr(indicator_class, 'PANE_TYPE', 'overlay')
@@ -71,5 +72,15 @@ class IndicatorService:
                 "scale_type": scale_type,
                 "visual_schema": visual_schema,
                 "visual_defaults": visual_defaults,
+=======
+            
+            indicators_info[name] = {
+                "display_name": name.replace("Indicator", ""), # Simple display name logic
+                "version": getattr(indicator_class, 'VERSION', 0),
+                "outputs": getattr(indicator_class, 'OUTPUTS', []),
+                "params_schema": schema,
+                "pane_type": getattr(indicator_class, 'PANE_TYPE', 'overlay'),  # Default to 'overlay'
+                "scale_type": getattr(indicator_class, 'SCALE_TYPE', 'linear') # Default to 'linear'
+>>>>>>> Stashed changes
             }
         return indicators_info

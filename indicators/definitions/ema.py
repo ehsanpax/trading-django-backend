@@ -14,6 +14,7 @@ class EMAIndicator:
     """
     NAME = "EMA"
     VERSION = 1
+<<<<<<< Updated upstream
     # Add pane type as overlay per spec
     PANE_TYPE = 'overlay'
     OUTPUTS = ["ema"]
@@ -34,6 +35,9 @@ class EMAIndicator:
             "ema": {"color": "#1f77b4", "lineStyle": "solid", "lineWidth": 1, "plotType": "line", "visible": True}
         }
     }
+=======
+    OUTPUTS = ["ema"]
+>>>>>>> Stashed changes
     PARAMS_SCHEMA = {
         "length": {
             "type": "integer",

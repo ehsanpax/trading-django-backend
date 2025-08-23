@@ -21,8 +21,11 @@ class SessionScheduleTaskStatusChoices(TextChoices):
     PENDING = "PENDING"
     SUCCESS = "SUCCESS"
     FAILURE = "FAILURE"
+<<<<<<< Updated upstream
 
 
 class ChatSessionTypeChoices(TextChoices):
     CHAT = "CHAT"
     BOT_BUILDER = "BOT_BUILDER"
+=======
+>>>>>>> Stashed changes

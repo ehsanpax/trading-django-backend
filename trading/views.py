@@ -50,6 +50,7 @@ class EquityCurveView(APIView):
             if start_date:
                 queryset = queryset.filter(date__gte=start_date)
 
+<<<<<<< Updated upstream
         # Build enriched equity curve with drawdown/runup per point
         points = list(queryset.values_list('date', 'equity'))
         result = []
@@ -78,3 +79,7 @@ class EquityCurveView(APIView):
             })
 
         return Response(result, status=status.HTTP_200_OK)
+=======
+        serializer = EquityDataPointSerializer(queryset, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+>>>>>>> Stashed changes

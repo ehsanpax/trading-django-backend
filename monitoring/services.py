@@ -1,4 +1,7 @@
+<<<<<<< Updated upstream
 import os
+=======
+>>>>>>> Stashed changes
 import redis
 import json
 from django.conf import settings
@@ -6,6 +9,7 @@ from datetime import datetime
 
 class MonitoringService:
     def __init__(self):
+<<<<<<< Updated upstream
         # Initialize Redis client compatible with Channels config (URL string or (host, port) tuple)
         try:
             hosts = settings.CHANNEL_LAYERS["default"]["CONFIG"].get("hosts", [])
@@ -26,6 +30,11 @@ class MonitoringService:
             # Last-resort fallback
             url = os.getenv("CHANNEL_REDIS_URL", "redis://localhost:6379/1")
             self.redis_client = redis.Redis.from_url(url, decode_responses=True)
+=======
+        self.redis_client = redis.Redis(host=settings.CHANNEL_LAYERS['default']['CONFIG']['hosts'][0][0],
+                                        port=settings.CHANNEL_LAYERS['default']['CONFIG']['hosts'][0][1],
+                                        db=0, decode_responses=True)
+>>>>>>> Stashed changes
         self.prefix = "ws_connection:"
 
     def register_connection(self, channel_name, user, account_id, connection_type, connection_details):

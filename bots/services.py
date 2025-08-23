@@ -12,6 +12,7 @@ from .models import Bot, BotVersion, LiveRun, BacktestRun, BacktestConfig
 from .tasks import live_loop, run_backtest
 from core.registry import indicator_registry, strategy_registry
 from bots.base import BaseStrategy, BotParameter
+<<<<<<< Updated upstream
 
 # --- New: validator for sectioned specs ---
 try:
@@ -22,6 +23,8 @@ except Exception:  # pragma: no cover
     class Issue:  # fallback ghost type
         level = "error"
         message = ""
+=======
+>>>>>>> Stashed changes
 
 logger = logging.getLogger(__name__)
 
@@ -119,10 +122,15 @@ class StrategyManager:
                 })
             # Enrich with outputs and pane type for frontend output selection and chart placement
             outputs = getattr(indicator_cls, 'OUTPUTS', None) or ["default"]
+<<<<<<< Updated upstream
             pane_type = getattr(indicator_cls, 'PANE_TYPE', None) or 'overlay'
             display_name = getattr(indicator_cls, 'NAME', name)
             visual_schema = getattr(indicator_cls, 'VISUAL_SCHEMA', None)
             visual_defaults = getattr(indicator_cls, 'VISUAL_DEFAULTS', None)
+=======
+            pane_type = getattr(indicator_cls, 'PANE_TYPE', 'OVERLAY')
+            display_name = getattr(indicator_cls, 'DISPLAY_NAME', name.replace("Indicator", ""))
+>>>>>>> Stashed changes
 
             metadata.append({
                 "name": name,
@@ -130,8 +138,11 @@ class StrategyManager:
                 "parameters": params_list,
                 "outputs": outputs,
                 "pane_type": pane_type,
+<<<<<<< Updated upstream
                 "visual_schema": visual_schema,
                 "visual_defaults": visual_defaults,
+=======
+>>>>>>> Stashed changes
             })
         return metadata
 
@@ -201,6 +212,7 @@ class StrategyManager:
         """
         if strategy_name == "SECTIONED_SPEC":
             from .sectioned_adapter import SectionedStrategy
+<<<<<<< Updated upstream
             # Validate sectioned spec before instantiation (supports nested sectioned_spec)
             try:
                 StrategyManager._validate_sectioned_spec_or_raise(strategy_params)
@@ -209,12 +221,20 @@ class StrategyManager:
             except Exception as e:
                 logger.warning(f"Sectioned spec validation error ignored during instantiation: {e}")
             logger.info("Instantiating SectionedStrategy adapter.")
+=======
+            logger.info("Instantiating SectionedStrategy adapter.")
+            # The spec, risk, and filters are all passed within the strategy_params bundle
+>>>>>>> Stashed changes
             return SectionedStrategy(
                 instrument_symbol=instrument_symbol,
                 account_id=account_id,
                 instrument_spec=instrument_spec,
                 strategy_params=strategy_params,
+<<<<<<< Updated upstream
                 indicator_params=indicator_configs,  # May be redundant if adapter handles it
+=======
+                indicator_params=indicator_configs, # May be redundant if adapter handles it
+>>>>>>> Stashed changes
                 risk_settings=risk_settings
             )
 
@@ -265,9 +285,12 @@ def create_bot_version(
         except Exception as e:
             logger.error(f"Unexpected error during BotVersion validation: {e}", exc_info=True)
             raise ValidationError(f"An unexpected error occurred during validation: {e}")
+<<<<<<< Updated upstream
     else:
         # Validate sectioned spec using the new validator (supports nested sectioned_spec)
         StrategyManager._validate_sectioned_spec_or_raise(strategy_params)
+=======
+>>>>>>> Stashed changes
 
     bot_version = BotVersion.objects.create(
         bot=bot,
