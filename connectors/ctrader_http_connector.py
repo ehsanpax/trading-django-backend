@@ -183,79 +183,38 @@ class CTraderHTTPConnector(TradingPlatformConnector):
     # --- Read-only snapshots ---
     async def get_account_info(self) -> AccountInfo:
         try:
-            # Retry on transient network issues (timeouts/connect errors)
-            retries = 2
-            delay = 0.3
-            last_exc: Exception | None = None
-            for attempt in range(retries + 1):
-                try:
-                    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-                        resp = await client.get(
-                            self._url("account-info"),
-                            params={"account_id": self.account_id, "async": "1"},
-                            headers=self._headers(),
-                        )
-                    if resp.status_code == 401:
-                        raise AuthenticationError("Unauthorized")
-                    if resp.status_code >= 400:
-                        raise ConnectionError(f"account-info failed: {resp.status_code} {resp.text}")
-                    if not resp.content:
-                        return AccountInfo(balance=0.0, equity=0.0, margin=0.0, free_margin=0.0, margin_level=0.0, currency="USD")
-                    try:
-                        data = resp.json()
-                    except Exception:
-                        return AccountInfo(balance=0.0, equity=0.0, margin=0.0, free_margin=0.0, margin_level=0.0, currency="USD")
-                    if not isinstance(data, dict) or data is None:
-                        data = {}
-                    return AccountInfo(
-                        balance=self._to_float(data.get("balance"), 0.0),
-                        equity=self._to_float(data.get("equity"), 0.0),
-                        margin=self._to_float(data.get("margin"), 0.0),
-                        free_margin=self._to_float(data.get("free_margin", data.get("freeMargin")), 0.0),
-                        margin_level=self._to_float(data.get("margin_level", data.get("marginLevel")), 0.0),
-                        currency=self._to_str(data.get("currency"), "USD"),
-                    )
-                except httpx.ReadTimeout as e:
-                    last_exc = e
-                    if attempt < retries:
-                        try:
-                            await asyncio.sleep(delay)
-                        except Exception:
-                            pass
-                        delay *= 2
-                        continue
-                    raise
-                except httpx.ConnectTimeout as e:
-                    last_exc = e
-                    if attempt < retries:
-                        try:
-                            await asyncio.sleep(delay)
-                        except Exception:
-                            pass
-                        delay *= 2
-                        continue
-                    raise
-                except httpx.ConnectError as e:
-                    last_exc = e
-                    if attempt < retries:
-                        try:
-                            await asyncio.sleep(delay)
-                        except Exception:
-                            pass
-                        delay *= 2
-                        continue
-                    raise
-            # If we somehow fall through without returning, raise last exception
-            if last_exc:
-                raise last_exc
-            return AccountInfo(balance=0.0, equity=0.0, margin=0.0, free_margin=0.0, margin_level=0.0, currency="USD")
+            async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
+                resp = await client.get(
+                    self._url("account-info"),
+                    params={"account_id": self.account_id, "async": "1"},
+                    headers=self._headers(),
+                )
+            if resp.status_code == 401:
+                raise AuthenticationError("Unauthorized")
+            if resp.status_code >= 400:
+                raise ConnectionError(f"account-info failed: {resp.status_code} {resp.text}")
+            if not resp.content:
+                return AccountInfo(balance=0.0, equity=0.0, margin=0.0, free_margin=0.0, margin_level=0.0, currency="USD")
+            try:
+                data = resp.json()
+            except Exception:
+                return AccountInfo(balance=0.0, equity=0.0, margin=0.0, free_margin=0.0, margin_level=0.0, currency="USD")
+            if not isinstance(data, dict) or data is None:
+                data = {}
+            return AccountInfo(
+                balance=self._to_float(data.get("balance"), 0.0),
+                equity=self._to_float(data.get("equity"), 0.0),
+                margin=self._to_float(data.get("margin"), 0.0),
+                free_margin=self._to_float(data.get("free_margin", data.get("freeMargin")), 0.0),
+                margin_level=self._to_float(data.get("margin_level", data.get("marginLevel")), 0.0),
+                currency=self._to_str(data.get("currency"), "USD"),
+            )
         except httpx.HTTPError as e:
-            # Include exception type to improve observability (ReadTimeout, etc.)
             raise ConnectionError(f"Failed to get account info: {type(e).__name__}: {e}")
 
     async def get_open_positions(self) -> List[PositionInfo]:
         try:
-            async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
                 resp = await client.get(
                     self._url("open-positions"),
                     params={"account_id": self.account_id, "async": "1"},
@@ -269,7 +228,7 @@ class CTraderHTTPConnector(TradingPlatformConnector):
             items = parsed.get("open_positions", []) if isinstance(parsed, dict) else []
             return [self._to_position(p) for p in items]
         except httpx.HTTPError as e:
-            raise ConnectionError(f"Failed to get open positions: {e}")
+            raise ConnectionError(f"Failed to get open positions: {type(e).__name__}: {e}")
 
     # --- Orders/positions write APIs (to be implemented in Phase 2) ---
     async def place_trade(self, trade_request: TradeRequest) -> Dict[str, Any]:

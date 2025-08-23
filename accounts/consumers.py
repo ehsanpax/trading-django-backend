@@ -319,7 +319,7 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
 
         closed_tickets = previous_trade_tickets - current_trade_tickets
         if closed_tickets:
-            #logger.info(f"Detected {len(closed_tickets)} closed trades: {closed_tickets}")
+            logger.info(f"Detected {len(closed_tickets)} closed trades: {closed_tickets}")
             for ticket in closed_tickets:
                 # Prevent duplicate enqueues for the same ticket
                 if ticket in self._enqueued_closed_tickets:
@@ -336,7 +336,7 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
 
         new_tickets = current_trade_tickets - previous_trade_tickets
         if new_tickets:
-            #logger.info(f"Detected {len(new_tickets)} new trades: {new_tickets}")
+            logger.info(f"Detected {len(new_tickets)} new trades: {new_tickets}")
             new_positions_data = [pos for pos in self.open_positions if str(pos.get('ticket')) in new_tickets]
             
             # Get the account instance

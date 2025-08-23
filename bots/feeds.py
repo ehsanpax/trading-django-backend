@@ -8,7 +8,7 @@ import os
 import json
 
 from django.conf import settings
-from accounts.models import Account, MT5Account
+from accounts.models import Account, MT5Account, CTraderAccount
 from trading_platform.mt5_api_client import connection_manager
 from price.services import PriceService
 # Add MT5 headless HTTP helpers for orchestrating subscriptions from bots
@@ -146,7 +146,7 @@ class PollingFeed(MarketDataFeed):
             self._thread.join(timeout=2)
 
     def warmup_candles(self, count: int) -> List[Dict[str, Any]]:
-        res = self._price_service.get_mt5_historical_data(
+        res = self._price_service.get_historical_data(
             account_id=self.account_id,
             symbol=self.symbol,
             timeframe=self.timeframe,
@@ -165,7 +165,7 @@ class PollingFeed(MarketDataFeed):
     def _run(self):
         while not self._stopped:
             try:
-                res = self._price_service.get_mt5_historical_data(
+                res = self._price_service.get_historical_data(
                     account_id=self.account_id,
                     symbol=self.symbol,
                     timeframe=self.timeframe,
@@ -339,21 +339,24 @@ class AMQPFeed(MarketDataFeed):
         self.account_id = account_id  # internal_account_id (UUID)
         self.symbol = symbol
         self.timeframe = timeframe
-        self._q: Queue = Queue(maxsize=1000)
+        self._q = Queue(maxsize=1000)
         self._ready = threading.Event()
-        self._stop_evt: Optional[asyncio.Event] = None
+        self._stop_evt = None
         self._conn = None
         self._channel = None
         self._queue = None
         self._consumer_tag = None
         self._target_symbol_upper = (self.symbol or '').upper()
+        self._target_timeframe_upper = (self.timeframe or '').upper()
         self._exchange_name = os.getenv('AMQP_EVENTS_EXCHANGE', getattr(settings, 'AMQP_EVENTS_EXCHANGE', 'mt5.events'))
         self._amqp_url = os.getenv('AMQP_URL', getattr(settings, 'AMQP_URL', 'amqp://guest:guest@rabbitmq:5672/%2F'))
         self._exchange = None
         # Optional fallback binding using broker_login when available
-        self._broker_login_bind: Optional[str] = None
+        self._broker_login_bind = None
+        # Optional additional bindings for alternate account identifiers (e.g., cTrader CTID/account_number)
+        self._alt_account_ids = []
         # MT5 headless subscription args/state (so bots drive polling independent of UI)
-        self._mt5_args: Optional[Dict[str, Any]] = None
+        self._mt5_args = None
         self._mt5_subscribed_price = False
         self._mt5_subscribed_candles = False
 
@@ -369,8 +372,25 @@ class AMQPFeed(MarketDataFeed):
         # Try to resolve broker_login once (fallback binding during transition) and MT5 creds
         try:
             acc = Account.objects.filter(id=self.account_id).first()
+            # Build accepted account keys for envelope filtering when using broad bindings
+            self._accepted_account_keys = {str(self.account_id)}
             if acc and hasattr(acc, 'mt5_account') and acc.mt5_account and acc.mt5_account.account_number:
                 self._broker_login_bind = str(acc.mt5_account.account_number)
+                self._accepted_account_keys.add(self._broker_login_bind)
+            # cTrader alternate IDs for routing key compatibility
+            try:
+                if acc and hasattr(acc, 'ctrader_account') and acc.ctrader_account:
+                    ct = acc.ctrader_account
+                    if ct.ctid_trader_account_id:
+                        alt = str(ct.ctid_trader_account_id)
+                        self._alt_account_ids.append(alt)
+                        self._accepted_account_keys.add(alt)
+                    if ct.account_number:
+                        alt = str(ct.account_number)
+                        self._alt_account_ids.append(alt)
+                        self._accepted_account_keys.add(alt)
+            except Exception:
+                pass
             # Prepare MT5 headless args if platform is MT5
             if acc and (acc.platform or '').upper() == 'MT5' and acc.mt5_account:
                 self._mt5_args = {
@@ -414,7 +434,7 @@ class AMQPFeed(MarketDataFeed):
 
     def warmup_candles(self, count: int) -> List[Dict[str, Any]]:
         # Use existing REST for warmup
-        res = PriceService().get_mt5_historical_data(
+        res = PriceService().get_historical_data(
             account_id=self.account_id,
             symbol=self.symbol,
             timeframe=self.timeframe,
@@ -513,6 +533,24 @@ class AMQPFeed(MarketDataFeed):
                     bound_keys += [rk_tick_login, rk_candle_login]
                 except Exception as e:
                     logger.debug(f"AMQPFeed broker_login bind skipped: {e}")
+            # Additional alternate account id bindings (e.g., cTrader CTID/account_number)
+            if self._alt_account_ids:
+                for alt in self._alt_account_ids:
+                    try:
+                        rk_tick_alt = f"account.{alt}.price.tick"
+                        rk_candle_alt = f"account.{alt}.candle.update"
+                        await self._queue.bind(self._exchange, routing_key=rk_tick_alt)
+                        await self._queue.bind(self._exchange, routing_key=rk_candle_alt)
+                        bound_keys += [rk_tick_alt, rk_candle_alt]
+                    except Exception as e:
+                        logger.debug(f"AMQPFeed alt account bind skipped for {alt}: {e}")
+            # Additionally bind to global keys for connectors that omit account prefix (e.g., some cTrader publishers)
+            try:
+                await self._queue.bind(self._exchange, routing_key='price.tick')
+                await self._queue.bind(self._exchange, routing_key='candle.update')
+                bound_keys += ['price.tick', 'candle.update']
+            except Exception as e:
+                logger.debug(f"AMQPFeed global bind skipped: {e}")
             # Startup log for observability
             try:
                 logger.info(
@@ -521,33 +559,73 @@ class AMQPFeed(MarketDataFeed):
                     getattr(self._queue, 'name', '<unknown>'),
                     ",".join(bound_keys),
                     self._target_symbol_upper,
-                    self.timeframe,
+                    self._target_timeframe_upper,
                 )
             except Exception:
                 pass
 
             async def _on_message(message):
+                nonlocal last_tick_ts, last_candle_ts
                 async with message.process(ignore_processed=True):
                     try:
                         evt = json.loads(message.body.decode('utf-8'))
                         etype = evt.get('type')
                         payload = evt.get('payload') or {}
+                        # Envelope-level account filtering when bound to global keys
+                        try:
+                            acc_keys = {
+                                str(evt.get('internal_account_id') or ''),
+                                str(evt.get('account_id') or ''),
+                                str(evt.get('broker_login') or ''),
+                            }
+                            # Remove empty string sentinel
+                            acc_keys.discard('')
+                            if hasattr(self, '_accepted_account_keys') and acc_keys and self._accepted_account_keys.isdisjoint(acc_keys):
+                                # Not for this feed
+                                return
+                        except Exception:
+                            pass
                         if etype == 'candle.update':
-                            sym = (payload.get('symbol') or '').upper()
+                            msg_rk = getattr(message, 'routing_key', None)
+                            sym_raw = payload.get('symbol') or ''
+                            sym = sym_raw.upper()
                             tf = str(payload.get('timeframe') or '')
-                            if sym == self._target_symbol_upper and tf == self.timeframe:
+                            tf_upper = tf.upper()
+                            # Exact symbol match only
+                            if sym == self._target_symbol_upper and tf_upper == self._target_timeframe_upper:
                                 candle = payload.get('candle') or {}
-                                data = {**candle, 'timeframe': tf}
-                                try:
-                                    self._q.put_nowait({'type': 'candle', 'data': data})
-                                    last_candle_ts = data.get('time')
-                                except Exception:
-                                    pass
+                                # Be flexible: if no nested candle, try flattened shape
+                                if not candle:
+                                    o = payload.get('open') or payload.get('o')
+                                    h = payload.get('high') or payload.get('h')
+                                    l = payload.get('low') or payload.get('l')
+                                    c = payload.get('close') or payload.get('c')
+                                    v = payload.get('tick_volume') or payload.get('volume') or payload.get('v')
+                                    t = payload.get('time') or payload.get('timestamp')
+                                    if any(x is not None for x in (o, h, l, c)):
+                                        candle = {
+                                            'open': o,
+                                            'high': h,
+                                            'low': l,
+                                            'close': c,
+                                            'tick_volume': v,
+                                            'time': t,
+                                        }
+                                if candle:
+                                    data = {**candle, 'timeframe': tf_upper}
+                                    try:
+                                        self._q.put_nowait({'type': 'candle', 'data': data})
+                                        last_candle_ts = data.get('time')
+                                    except Exception:
+                                        pass
                         elif etype == 'price.tick':
-                            sym = (payload.get('symbol') or '').upper()
+                            msg_rk = getattr(message, 'routing_key', None)
+                            sym_raw = payload.get('symbol') or ''
+                            sym = sym_raw.upper()
+                            # Exact symbol match only
                             if sym == self._target_symbol_upper:
                                 tick = {
-                                    'time': payload.get('time') or payload.get('occurred_at'),
+                                    'time': payload.get('time') or payload.get('timestamp') or evt.get('occurred_at'),
                                     'bid': payload.get('bid'),
                                     'ask': payload.get('ask'),
                                     'last': payload.get('last'),
@@ -580,6 +658,20 @@ class AMQPFeed(MarketDataFeed):
                         if self._broker_login_bind:
                             await self._queue.unbind(self._exchange, routing_key=f"account.{self._broker_login_bind}.price.tick")
                             await self._queue.unbind(self._exchange, routing_key=f"account.{self._broker_login_bind}.candle.update")
+                        # Unbind alt account ids
+                        if getattr(self, '_alt_account_ids', None):
+                            for alt in self._alt_account_ids:
+                                try:
+                                    await self._queue.unbind(self._exchange, routing_key=f"account.{alt}.price.tick")
+                                    await self._queue.unbind(self._exchange, routing_key=f"account.{alt}.candle.update")
+                                except Exception:
+                                    pass
+                        # Unbind global keys if bound
+                        try:
+                            await self._queue.unbind(self._exchange, routing_key='price.tick')
+                            await self._queue.unbind(self._exchange, routing_key='candle.update')
+                        except Exception:
+                            pass
                     except Exception:
                         pass
                 if self._channel and not getattr(self._channel, 'is_closed', False):
