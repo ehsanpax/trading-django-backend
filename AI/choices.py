@@ -6,15 +6,6 @@ class ScheduleTypeChoices(TextChoices):
     RECURRING = "RECURRING"
 
 
-class ScheduleRecurrenceChoices(TextChoices):
-    MINUTELY = "MINUTELY"
-    HOURLY = "HOURLY"
-    DAILY = "DAILY"
-    WEEKLY = "WEEKLY"
-    MONTHLY = "MONTHLY"
-    YEARLY = "YEARLY"
-
-
 class WeekDayChoices(TextChoices):
     MONDAY = "MONDAY"
     TUESDAY = "TUESDAY"

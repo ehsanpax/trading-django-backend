@@ -6,7 +6,6 @@ import json
 from django_celery_beat.models import PeriodicTask, CrontabSchedule
 from .choices import (
     ScheduleTypeChoices,
-    ScheduleRecurrenceChoices,
     WeekDayChoices,
     SessionScheduleTaskStatusChoices,
 <<<<<<< Updated upstream
@@ -93,13 +92,6 @@ class SessionSchedule(models.Model):
         max_length=50,
         choices=ScheduleTypeChoices.choices,
         default=ScheduleTypeChoices.ONE_TIME.value,
-    )
-    recurrence = models.CharField(
-        max_length=50,
-        null=True,
-        blank=True,
-        choices=ScheduleRecurrenceChoices.choices,
-        default=ScheduleRecurrenceChoices.MINUTELY.value,
     )
     start_at = models.DateTimeField(null=True, blank=True)
     end_at = models.DateTimeField(null=True, blank=True)
