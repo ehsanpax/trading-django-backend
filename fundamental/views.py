@@ -1,18 +1,19 @@
-from venv import logger
+
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from datetime import datetime
-from .models import EconomicCalendar, Currency, News, COTReport
+from .models import EconomicCalendar, Currency, News
 from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.authentication import TokenAuthentication
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.generics import ListAPIView
-from .serializers import EconomicCalendarSerializer, NewsSerializer, COTReportSerializer
-from django.utils.dateparse import parse_datetime
-from .mapping import MAPPING
-from  logging import Logger
+from .serializers import EconomicCalendarSerializer, NewsSerializer
+from django.utils.dateparse import parse_date, parse_datetime
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class EconomicCalendarAPIView(APIView):
@@ -57,7 +58,6 @@ class EconomicCalendarAPIView(APIView):
                 logger.error(f"Missing key in item: {e}")
                 continue
 
-
         return Response(
             {"message": "Data processed successfully."}, status=status.HTTP_200_OK
         )
@@ -78,21 +78,26 @@ class EconomicCalendarEventListAPIView(APIView):
         impact = self.request.query_params.get("impact")
         event = self.request.query_params.get("event")
 
-        if date_from:
-            dt_from = parse_datetime(date_from)
-            if dt_from:
-                queryset = queryset.filter(event_time__gte=dt_from)
-        if date_to:
-            dt_to = parse_datetime(date_to)
-            if dt_to:
-                queryset = queryset.filter(event_time__lte=dt_to)
+        if date_from and date_to:
+            try:
+                date_from = datetime.strptime(date_from, "%Y-%m-%d %H:%M:%S")
+                date_from = timezone.make_aware(
+                    date_from, timezone.get_current_timezone()
+                )
+                date_to = datetime.strptime(date_to, "%Y-%m-%d %H:%M:%S")
+                date_to = timezone.make_aware(date_to, timezone.get_current_timezone())
+                queryset = queryset.filter(
+                    event_time__gte=date_from, event_time__lte=date_to
+                )
+            except ValueError:
+                pass
 
         if currency:
-            currencies = currency.split(',')
+            currencies = currency.split(",")
             queryset = queryset.filter(currency__currency__in=currencies)
 
         if impact:
-            impacts = impact.split(',')
+            impacts = impact.split(",")
             queryset = queryset.filter(impact__in=impacts)
 
         if event:
@@ -186,84 +191,3 @@ class NewsListAPIView(ListAPIView):
             queryset = queryset.filter(source__iexact=source)
 
         return queryset
-
-
-def map_cot_data(item: dict) -> dict:
-   
-    mapped = {}
-    for source_key, target_field in MAPPING.items():
-        if source_key in item:
-            mapped[target_field] = item[source_key]
-
-    if "as_of_date" in mapped and mapped["as_of_date"]:
-        mapped["as_of_date"] = datetime.strptime(mapped["as_of_date"], "%Y-%m-%d").date()
-
-    return mapped
-
-
-class COTReportAPIView(APIView):
-    authentication_classes = [TokenAuthentication]
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        cot_data = request.data.get("cot_data", [])
-        if not isinstance(cot_data, list):
-            return Response(
-                {"detail": "Invalid data format."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        for item in cot_data:
-            try:
-                mapped_data = map_cot_data(item)
-
-                if "as_of_date" not in mapped_data or "market_and_exchange_names" not in mapped_data:
-                    continue
-
-                COTReport.objects.update_or_create(
-                    market_and_exchange_names=mapped_data["market_and_exchange_names"],
-                    as_of_date=mapped_data["as_of_date"],
-                    defaults=mapped_data,
-                )
-            except Exception as e:
-                return Response(
-                    {"detail": f"Error processing item: {str(e)}"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-        return Response(
-            {"message": "COT data processed successfully."},
-            status=status.HTTP_200_OK
-        )
-
-
-class COTReportListAPIView(APIView):
-    authentication_classes = [TokenAuthentication]
-    permission_classes = [IsAuthenticated]
-    serializer_class = COTReportSerializer
-
-    def get_queryset(self):
-        queryset = COTReport.objects.all().order_by("-as_of_date")
-
-        # query params
-        date_from = self.request.query_params.get("date_from")
-        date_to = self.request.query_params.get("date_to")
-        market = self.request.query_params.get("market")
-
-        if date_from and date_to:
-            try:
-                date_from = datetime.strptime(date_from, "%Y-%m-%d").date()
-                date_to = datetime.strptime(date_to, "%Y-%m-%d").date()
-                queryset = queryset.filter(as_of_date__gte=date_from, as_of_date__lte=date_to)
-            except ValueError:
-                pass  
-
-        if market:
-            queryset = queryset.filter(market_and_exchange_names__icontains=market)
-
-        return queryset
-
-    def get(self, request, *args, **kwargs):
-        queryset = self.get_queryset()
-        serializer = self.serializer_class(queryset, many=True)
-        return Response(serializer.data)

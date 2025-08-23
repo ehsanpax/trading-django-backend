@@ -1,3 +1,4 @@
+
 """
 Django settings for trading_platform project.
 
@@ -82,10 +83,7 @@ INSTALLED_APPS = [
     "user",
     "core",
     "task_logs",
-<<<<<<< Updated upstream
     "messaging",  # New app for RabbitMQ consumer/producer
-=======
->>>>>>> Stashed changes
 ]
 
 
@@ -328,7 +326,6 @@ OANDA_ENVIRONMENT = env("OANDA_ENVIRONMENT")
 
 
 CELERY_RESULT_BACKEND = "django-db"
-<<<<<<< Updated upstream
 
 # Concurrency controls (locks/cooldowns)
 # If REDIS_URL not provided, the utils will fallback to CELERY_BROKER_URL or no-op.
@@ -363,5 +360,3 @@ if not INTERNAL_SHARED_SECRET:
     # Generate a stable-on-boot random secret if none provided (dev only). For prod, set env var.
     import secrets
     INTERNAL_SHARED_SECRET = secrets.token_urlsafe(32)
-=======
->>>>>>> Stashed changes
