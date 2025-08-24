@@ -11,7 +11,7 @@ from .views import (
 
 urlpatterns = [
     path(
-        "prompts/<uuid:pk>/",
+        "prompts/<pk>/",
         PromptViewSet.as_view(
             {"get": "retrieve", "put": "partial_update", "delete": "destroy"}
         ),
