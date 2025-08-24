@@ -224,10 +224,17 @@ class InternalCTraderTokensView(APIView):
     Auth: requires header 'X-Internal-Secret' matching settings.INTERNAL_SHARED_SECRET
     """
     permission_classes = [permissions.AllowAny]
+    # Do not invoke DRF/JWT authentication for this internal endpoint; we self-auth via X-Internal-Secret
+    authentication_classes = []
 
     def _check_secret(self, request):
         shared_secret = getattr(settings, "INTERNAL_SHARED_SECRET", None) or getattr(settings, "APP_INTERNAL_SHARED_SECRET", None)
         provided = request.headers.get("X-Internal-Secret") or request.META.get("HTTP_X_INTERNAL_SECRET")
+        # Also accept Authorization: Bearer <secret>
+        if not provided:
+            auth = request.headers.get("Authorization") or request.META.get("HTTP_AUTHORIZATION")
+            if auth and auth.lower().startswith("bearer "):
+                provided = auth[7:].strip()
         if not shared_secret or not provided or provided != shared_secret:
             raise PermissionDenied("Forbidden")
 

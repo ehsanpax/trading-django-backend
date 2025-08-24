@@ -9,6 +9,8 @@ making it easy to add new platforms without changing business logic.
 """
 
 import logging
+import os
+import time
 from typing import Dict, Any, Optional, List, Callable
 from decimal import Decimal
 from datetime import datetime
@@ -29,6 +31,7 @@ from .base import (
     CandleData,
 )
 from trades.exceptions import TradeValidationError, BrokerAPIError
+from price.cache import get_last_tick as cache_get_last_tick, get_symbol_info as cache_get_symbol_info, set_symbol_info as cache_set_symbol_info
 
 logger = logging.getLogger(__name__)
 
@@ -360,16 +363,40 @@ class TradingService:
         Returns:
             Dict with price data (bid, ask, timestamp)
         """
+        t0 = time.perf_counter()
+        bypass = os.getenv('PRICE_BYPASS_CACHE', '0').lower() in ('1', 'true', 'yes')
+        timing = os.getenv('PRICE_TIMING_ENABLED', '1').lower() in ('1', 'true', 'yes')
+        if not bypass:
+            cached = cache_get_last_tick(str(self.account.id), symbol, max_age_seconds=5)
+            if cached:
+                dur_ms = int((time.perf_counter() - t0) * 1000)
+                if timing:
+                    logger.info(
+                        "PRICE_TIMING method=cache dur_ms=%s account=%s symbol=%s",
+                        dur_ms, self.account.id, symbol,
+                    )
+                return {
+                    'symbol': cached.get('symbol') or symbol,
+                    'bid': cached.get('bid'),
+                    'ask': cached.get('ask'),
+                    'timestamp': (cached.get('timestamp') or cached.get('time')),
+                }
         try:
             connector = await self._get_connector()
             price_data = await connector.get_live_price(symbol)
-            return {
+            out = {
                 'symbol': price_data.symbol,
                 'bid': price_data.bid,
                 'ask': price_data.ask,
                 'timestamp': price_data.timestamp.isoformat()
             }
-            
+            if timing:
+                dur_ms = int((time.perf_counter() - t0) * 1000)
+                logger.info(
+                    "PRICE_TIMING method=http dur_ms=%s account=%s symbol=%s",
+                    dur_ms, self.account.id, symbol,
+                )
+            return out
         except ConnectorError as e:
             logger.error(f"Failed to get live price: {e}")
             raise BrokerAPIError(f"Trading platform error: {e}")
@@ -379,15 +406,40 @@ class TradingService:
         Uses sync connector path and isolated event loop similar to other sync methods.
         Returns a dict with bid/ask/timestamp keys.
         """
+        t0 = time.perf_counter()
+        bypass = os.getenv('PRICE_BYPASS_CACHE', '0').lower() in ('1', 'true', 'yes')
+        timing = os.getenv('PRICE_TIMING_ENABLED', '1').lower() in ('1', 'true', 'yes')
+        if not bypass:
+            cached = cache_get_last_tick(str(self.account.id), symbol, max_age_seconds=5)
+            if cached:
+                dur_ms = int((time.perf_counter() - t0) * 1000)
+                if timing:
+                    logger.info(
+                        "PRICE_TIMING method=cache dur_ms=%s account=%s symbol=%s",
+                        dur_ms, self.account.id, symbol,
+                    )
+                return {
+                    'symbol': cached.get('symbol') or symbol,
+                    'bid': cached.get('bid'),
+                    'ask': cached.get('ask'),
+                    'timestamp': (cached.get('timestamp') or cached.get('time')),
+                }
         try:
             connector = self._get_connector_sync()
             price_data = self._run_sync(connector.get_live_price(symbol))
-            return {
+            out = {
                 'symbol': price_data.symbol,
                 'bid': price_data.bid,
                 'ask': price_data.ask,
                 'timestamp': price_data.timestamp.isoformat()
             }
+            if timing:
+                dur_ms = int((time.perf_counter() - t0) * 1000)
+                logger.info(
+                    "PRICE_TIMING method=http dur_ms=%s account=%s symbol=%s",
+                    dur_ms, self.account.id, symbol,
+                )
+            return out
         except ConnectorError as e:
             logger.error(f"Failed to get live price (sync): {e}")
             raise BrokerAPIError(f"Trading platform error: {e}")
@@ -480,19 +532,35 @@ class TradingService:
         Returns:
             Dict containing symbol information
         """
+        # Cache first (per-account)
+        cached = cache_get_symbol_info(str(self.account.id), symbol)
+        if cached:
+            return cached
         try:
             connector = await self._get_connector()
-            return await connector.get_symbol_info(symbol)
-            
+            info = await connector.get_symbol_info(symbol)
+            try:
+                cache_set_symbol_info(str(self.account.id), symbol, info)
+            except Exception:
+                pass
+            return info
         except ConnectorError as e:
             logger.error(f"Failed to get symbol info: {e}")
             raise BrokerAPIError(f"Trading platform error: {e}")
 
     def get_symbol_info_sync(self, symbol: str) -> Dict[str, Any]:
-        """Sync wrapper to fetch symbol info via the connector."""
+        """Sync wrapper to fetch symbol info via the connector with per-account cache."""
+        cached = cache_get_symbol_info(str(self.account.id), symbol)
+        if cached:
+            return cached
         try:
             connector = self._get_connector_sync()
-            return self._run_sync(connector.get_symbol_info(symbol))
+            info = self._run_sync(connector.get_symbol_info(symbol))
+            try:
+                cache_set_symbol_info(str(self.account.id), symbol, info)
+            except Exception:
+                pass
+            return info
         except ConnectorError as e:
             logger.error(f"Failed to get symbol info (sync): {e}")
             raise BrokerAPIError(f"Trading platform error: {e}")

@@ -23,6 +23,7 @@ from .base import (
     ConnectionError,
     AuthenticationError,
 )
+from price.cache import set_last_tick
 
 logger = logging.getLogger(__name__)
 
@@ -879,6 +880,11 @@ class CTraderHTTPConnector(TradingPlatformConnector):
                 data = resp.json()
             except Exception as e:
                 raise ConnectionError(f"price returned non-JSON: {e}")
+            # Mirror into last-tick cache for account+symbol
+            try:
+                set_last_tick(self.internal_account_id, symbol, bid=data.get("bid"), ask=data.get("ask"), last=data.get("last"), timestamp=data.get("timestamp") or data.get("time"))
+            except Exception:
+                pass
             return PriceData(
                 symbol=symbol,
                 bid=self._to_float(data.get("bid"), 0.0),

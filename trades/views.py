@@ -603,13 +603,45 @@ class WatchlistViewSet(viewsets.ModelViewSet):
     serializer_class = WatchlistSerializer
     permission_classes = [IsAuthenticated]
 
+    def get_serializer(self, *args, **kwargs):
+        # Strip any dynamic-fields kwarg to avoid shadowing DRF's fields mapping
+        kwargs.pop('fields', None)
+        kwargs.setdefault('context', self.get_serializer_context())
+        ser = self.serializer_class(*args, **kwargs)
+        # Guard against instance attribute 'fields' being set to a list by external mixins
+        try:
+            if isinstance(getattr(ser, 'fields', None), list):
+                delattr(ser, 'fields')
+        except Exception:
+            pass
+        return ser
+
     def get_queryset(self):
         """
-        This view should return a list of all the watchlists
-        for the currently authenticated user plus global watchlists.
+        Returns watchlist items visible to the user:
+        - Global items
+        - User-general items (user = request.user, no account links required)
+        - Items linked to any of the user's accounts
+
+        Supports filtering by specific account via ?account_id=<uuid>:
+        - Returns global items + items linked to that account (optionally, can include user-general; currently included)
         """
         user = self.request.user
-        return Watchlist.objects.filter(Q(user=user) | Q(is_global=True)).distinct()
+        qs = Watchlist.objects.filter(
+            Q(is_global=True) | Q(user=user) | Q(accounts__user=user)
+        ).distinct()
+
+        account_id = self.request.query_params.get('account_id')
+        if account_id:
+            # Validate ownership of the account filter
+            try:
+                _ = Account.objects.get(id=account_id, user=user)
+            except Account.DoesNotExist:
+                # Return only global items if the account doesn't belong to the user
+                return Watchlist.objects.filter(is_global=True)
+            # Narrow to items linked to that account or global; also include user's general items for convenience
+            qs = qs.filter(Q(is_global=True) | Q(accounts__id=account_id) | Q(user=user))
+        return qs.distinct()
 
     def perform_create(self, serializer):
         """
@@ -619,6 +651,104 @@ class WatchlistViewSet(viewsets.ModelViewSet):
         serializer.save(
             user=(self.request.user if not serializer.validated_data.get("is_global") else None)
         )
+
+    def create(self, request, *args, **kwargs):
+        """Allow both single-object and list (bulk) creation.
+
+        - Single object: { instrument, exchange?, is_global?, account_ids?, link_all_accounts? }
+        - Bulk: [ { ... }, { ... } ]
+        """
+        # Debug logging on incoming payload
+        try:
+            import json as _json
+            raw_body = request.body.decode('utf-8', errors='replace') if hasattr(request, 'body') else ''
+            logger.info(
+                "Watchlist create: content_type=%s length=%s body_sample=%s",
+                request.content_type,
+                len(raw_body) if raw_body else 0,
+                (raw_body[:500] + ('…' if raw_body and len(raw_body) > 500 else '')),
+            )
+        except Exception:
+            pass
+
+        data = request.data
+        # Treat non-mapping sequences as bulk
+        from collections.abc import Mapping, Sequence
+        is_mapping = isinstance(data, Mapping)
+        is_sequence = isinstance(data, Sequence) and not isinstance(data, (str, bytes, bytearray))
+
+        # Support alternative bulk wrapper: {"items": [...]} as well
+        if is_mapping and isinstance(data.get("items"), list):
+            data = data.get("items")
+            is_mapping = False
+            is_sequence = True
+
+        if is_sequence and not is_mapping:
+            # Manual bulk handling to avoid ListSerializer quirks
+            items = data
+            serializers = []
+            errors = []
+            try:
+                logger.info("Watchlist bulk create: items_count=%s item_type=%s", len(items), type(items[:1][0]).__name__ if items else None)
+            except Exception:
+                pass
+            # Validate all
+            for idx, item in enumerate(items):
+                if not isinstance(item, dict):
+                    # Convenience: allow list of instrument strings
+                    if isinstance(item, str):
+                        item = {"instrument": item}
+                    else:
+                        errors.append({"index": idx, "errors": "Each item must be an object or a string instrument."})
+                        continue
+                s = self.get_serializer(data=item)
+                # Final guard against external mixins setting serializer.fields to a list
+                try:
+                    if isinstance(getattr(s, 'fields', None), list):
+                        delattr(s, 'fields')
+                except Exception:
+                    pass
+                try:
+                    valid = s.is_valid()
+                except AttributeError as e:
+                    if "has no attribute 'values'" in str(e):
+                        errors.append({
+                            "index": idx,
+                            "errors": "Serializer error. Ensure Content-Type is application/json and each item is an object."
+                        })
+                        continue
+                    raise
+                if valid:
+                    serializers.append(s)
+                else:
+                    errors.append({"index": idx, "errors": s.errors})
+            if errors:
+                return Response({"errors": errors}, status=status.HTTP_400_BAD_REQUEST)
+            # Save all atomically
+            from django.db import transaction
+            with transaction.atomic():
+                for s in serializers:
+                    s.save()
+            return Response([s.data for s in serializers], status=status.HTTP_201_CREATED)
+        # Single object path
+        serializer = self.get_serializer(data=data)
+        try:
+            if isinstance(getattr(serializer, 'fields', None), list):
+                delattr(serializer, 'fields')
+        except Exception:
+            pass
+        try:
+            serializer.is_valid(raise_exception=True)
+        except AttributeError as e:
+            if "has no attribute 'values'" in str(e):
+                return Response({
+                    "error": "Serializer error. Ensure Content-Type is application/json and body is a JSON object.",
+                    "hint": "If sending a list, wrap as {\"items\": [...]} or send an array body."
+                }, status=status.HTTP_400_BAD_REQUEST)
+            raise
+        self.perform_create(serializer)
+        headers = self.get_success_headers(serializer.data)
+        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
     def get_permissions(self):
         """
@@ -636,8 +766,12 @@ class WatchlistViewSet(viewsets.ModelViewSet):
         instance = serializer.instance
         if instance.is_global and not self.request.user.is_staff:
             raise PermissionDenied("Only admins can modify global watchlist items.")
-        if not instance.is_global and instance.user != self.request.user:
-            raise PermissionDenied("You do not have permission to modify this watchlist item.")
+        # Allow if owned by user (user-general) or linked to one of user's accounts
+        if not instance.is_global:
+            owns_general = instance.user == self.request.user if instance.user_id else False
+            linked_account_owned = instance.accounts.filter(user=self.request.user).exists()
+            if not (owns_general or linked_account_owned):
+                raise PermissionDenied("You do not have permission to modify this watchlist item.")
 
         is_becoming_global = serializer.validated_data.get("is_global", instance.is_global)
         if is_becoming_global and not instance.is_global and not self.request.user.is_staff:
@@ -654,8 +788,11 @@ class WatchlistViewSet(viewsets.ModelViewSet):
         """
         if instance.is_global and not self.request.user.is_staff:
             raise PermissionDenied("Only admins can delete global watchlist items.")
-        if not instance.is_global and instance.user != self.request.user:
-            raise PermissionDenied("You do not have permission to delete this watchlist item.")
+        if not instance.is_global:
+            owns_general = instance.user == self.request.user if instance.user_id else False
+            linked_account_owned = instance.accounts.filter(user=self.request.user).exists()
+            if not (owns_general or linked_account_owned):
+                raise PermissionDenied("You do not have permission to delete this watchlist item.")
         instance.delete()
 
     @action(detail=True, methods=["post"], permission_classes=[IsAdminUser])

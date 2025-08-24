@@ -15,6 +15,7 @@ from channels.layers import get_channel_layer
 # New imports for platform-agnostic service
 from connectors.trading_service import TradingService
 from connectors.base import PriceData, CandleData
+from price.cache import set_last_tick
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,11 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
                 "timestamp": getattr(pd, "timestamp", None).isoformat() if getattr(pd, "timestamp", None) else None,
             }
             logger.info(f"TS_PATH: price tick {payload}")
+            # Populate cross-process cache for this account/symbol
+            try:
+                set_last_tick(str(self.account_id), pd.symbol, bid=pd.bid, ask=pd.ask, last=None, timestamp=payload.get("time") or payload.get("timestamp"))
+            except Exception:
+                pass
             await self.send_price_update(payload)
 
         self._price_cb = on_price
@@ -596,6 +602,11 @@ class PriceConsumer(AsyncJsonWebsocketConsumer):
     async def price_tick(self, event):
         """Channels group message: {'type': 'price_tick', 'price': {...}}"""
         price = event.get("price") or {}
+        # Populate cache from group fanout (covers connectors that don't invoke direct callbacks)
+        try:
+            set_last_tick(str(self.account_id), price.get('symbol'), bid=price.get('bid'), ask=price.get('ask'), last=price.get('last'), timestamp=price.get('time') or price.get('timestamp'))
+        except Exception:
+            pass
         await self.send_price_update(price)
 
     async def candle_update(self, event):

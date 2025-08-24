@@ -20,7 +20,9 @@ from .base import (
     AuthenticationError
 )
 from trading_platform.mt5_api_client import MT5APIClient, mt5_subscribe_price, mt5_unsubscribe_price, mt5_subscribe_candles, mt5_unsubscribe_candles
+from price.cache import set_last_tick
 from trades.exceptions import BrokerAPIError, BrokerConnectionError
+from price.cache import set_symbol_info as cache_set_symbol_info
 
 logger = logging.getLogger(__name__)
 
@@ -194,6 +196,11 @@ class MT5Connector(TradingPlatformConnector):
         """Get current live price for a symbol from MT5"""
         try:
             raw_price = self._client.get_live_price(symbol)
+            # Mirror to shared last-tick cache
+            try:
+                set_last_tick(self._creds['internal_account_id'], symbol, bid=raw_price.get('bid'), ask=raw_price.get('ask'), last=raw_price.get('last'), timestamp=raw_price.get('timestamp') or raw_price.get('time'))
+            except Exception:
+                pass
             return PriceData(
                 symbol=symbol,
                 bid=float(raw_price.get('bid', 0)),
@@ -257,7 +264,12 @@ class MT5Connector(TradingPlatformConnector):
     async def get_symbol_info(self, symbol: str) -> Dict[str, Any]:
         """Get MT5 symbol information"""
         try:
-            return self._client.get_symbol_info(symbol)
+            info = self._client.get_symbol_info(symbol)
+            try:
+                cache_set_symbol_info(self._creds['internal_account_id'], symbol, info)
+            except Exception:
+                pass
+            return info
         except (BrokerAPIError, BrokerConnectionError) as e:
             raise ConnectionError(f"Failed to get MT5 symbol info: {e}")
 

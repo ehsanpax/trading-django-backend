@@ -150,11 +150,19 @@ class Watchlist(models.Model):
     exchange = models.CharField(max_length=100, null=True, blank=True, help_text="e.g., NASDAQ, NYSE, FXCM")
     is_global = models.BooleanField(default=False, help_text="If true, this watchlist item is visible to all users.")
     created_at = models.DateTimeField(auto_now_add=True)
+    # New: account links (an item can be linked to multiple accounts)
+    accounts = models.ManyToManyField(
+        Account,
+        through='WatchlistAccountLink',
+        related_name='watchlists',
+        blank=True,
+        help_text="Accounts this watchlist item applies to. Leave empty for user-general items."
+    )
 
     def __str__(self):
         if self.is_global:
             return f"{self.instrument} (Global)"
-        elif self.user:
+        if self.user:
             return f"{self.instrument} in {self.user.username or self.user.id}'s watchlist"
         return f"{self.instrument} (Orphaned)"
 
@@ -167,6 +175,29 @@ class Watchlist(models.Model):
             models.Index(fields=['user', 'is_global']),
             models.Index(fields=['is_global']),
         ]
+
+
+class WatchlistAccountLink(models.Model):
+    """Through model linking Watchlist items to specific Accounts.
+
+    Ensures a watchlist item can be associated with multiple accounts while
+    preserving per-user/global semantics on the Watchlist itself.
+    """
+    watchlist = models.ForeignKey(Watchlist, on_delete=models.CASCADE, related_name='account_links')
+    account = models.ForeignKey(Account, on_delete=models.CASCADE, related_name='watchlist_links')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['watchlist', 'account'], name='unique_watchlist_account_link'),
+        ]
+        indexes = [
+            models.Index(fields=['account']),
+            models.Index(fields=['watchlist']),
+        ]
+
+    def __str__(self):
+        return f"{self.watchlist.instrument} ↔ {self.account_id}"
 
 
 class TradePerformance(models.Model):

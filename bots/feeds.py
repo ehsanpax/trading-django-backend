@@ -11,6 +11,7 @@ from django.conf import settings
 from accounts.models import Account, MT5Account, CTraderAccount
 from trading_platform.mt5_api_client import connection_manager
 from price.services import PriceService
+from price.cache import set_last_tick
 # Add MT5 headless HTTP helpers for orchestrating subscriptions from bots
 from trading_platform.mt5_api_client import (
     mt5_ensure_ready,
@@ -634,6 +635,11 @@ class AMQPFeed(MarketDataFeed):
                                 try:
                                     self._q.put_nowait({'type': 'tick', 'data': tick})
                                     last_tick_ts = tick.get('time')
+                                    # Populate cross-process last-tick cache for this account/symbol
+                                    try:
+                                        set_last_tick(self.account_id, sym_raw, bid=tick.get('bid'), ask=tick.get('ask'), last=tick.get('last'), timestamp=tick.get('time'))
+                                    except Exception:
+                                        pass
                                 except Exception:
                                     pass
                         # Optionally, log inactivity every ~60 deliveries
