@@ -16,13 +16,14 @@ from rest_framework import status
 from trade_journal.models import TradeJournal
 from django.db.models import Q
 import uuid
+from rest_framework_simplejwt.authentication import JWTAuthentication
 
 
 class PromptViewSet(viewsets.ModelViewSet):
     queryset = Prompt.objects.all()
     serializer_class = PromptSerializer
     permission_classes = [permissions.IsAuthenticated]
-    authentication_classes = [TokenAuthentication]
+    authentication_classes = [TokenAuthentication, JWTAuthentication]
 
     def get_queryset(self):
         """
@@ -81,7 +82,7 @@ class ChatSessionViewset(ModelViewSet):
 class TradeJournalViewset(ModelViewSet):
     serializer_class = TradeJournalSerializer
     permission_classes = [permissions.IsAuthenticated]
-    authentication_classes = [TokenAuthentication]
+    authentication_classes = [TokenAuthentication, JWTAuthentication]
     queryset = TradeJournal.objects.all()
     pagination_class = None  # Disable pagination for simplicity
 
@@ -112,7 +113,7 @@ class TradeJournalViewset(ModelViewSet):
 class SessionScheduleViewset(ModelViewSet):
     serializer_class = SessionScheduleSerializer
     permission_classes = [permissions.IsAuthenticated]
-    authentication_classes = [TokenAuthentication]
+    authentication_classes = [TokenAuthentication, JWTAuthentication]
     queryset = SessionSchedule.objects.all()
 
     def get_queryset(self):

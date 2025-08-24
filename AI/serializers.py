@@ -142,6 +142,15 @@ class SessionScheduleSerializer(serializers.ModelSerializer):
         session_id = validated_data.pop("session_id")
         name = validated_data.pop("name")
         session = ChatSession.objects.filter(external_session_id=session_id).first()
+        if not session:
+            session = ChatSession.objects.create(
+                external_session_id=session_id,
+                user=self.context["request"].user,
+                session_type=ChatSessionTypeChoices.CHAT.value,
+                user_first_message="",
+                session_data=None,
+            )
+
         if validated_data["start_at"]:
             validated_data["start_at"] = validated_data["start_at"].replace(
                 tzinfo=datetime.timezone.utc
