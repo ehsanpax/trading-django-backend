@@ -148,7 +148,7 @@ class SessionScheduleSerializer(serializers.ModelSerializer):
                 user=self.context["request"].user,
                 session_type=ChatSessionTypeChoices.CHAT.value,
                 user_first_message="",
-                session_data=None,
+                session_data={},
             )
 
         if validated_data["start_at"]:
