@@ -17,6 +17,14 @@ from trade_journal.models import TradeJournal
 from django.db.models import Q
 import uuid
 from rest_framework_simplejwt.authentication import JWTAuthentication
+from rest_framework.pagination import PageNumberPagination
+
+
+class StandardResultsSetPagination(PageNumberPagination):
+    page_size = 25
+    page_size_query_param = "page_size"  # /?page_size=50
+    max_page_size = 200
+    page_query_param = "page"
 
 
 class PromptViewSet(viewsets.ModelViewSet):
@@ -69,6 +77,7 @@ class ChatSessionViewset(ModelViewSet):
     queryset = ChatSession.objects.filter(
         session_type=ChatSessionTypeChoices.CHAT.value
     )
+    pagination_class = StandardResultsSetPagination
 
     def get_queryset(self):
         return (
