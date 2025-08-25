@@ -112,6 +112,7 @@ class ChatSessionSerializer(serializers.ModelSerializer):
             "user",
             "created_at",
             "total_cost",
+            "is_archived",
         ]
         read_only_fields = [
             "user"

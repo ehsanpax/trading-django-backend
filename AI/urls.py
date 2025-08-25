@@ -1,5 +1,4 @@
-from django.urls import path, include
-from rest_framework.routers import DefaultRouter
+from django.urls import path
 from .views import (
     PromptViewSet,
     StoreSessionExecutionViewset,
@@ -42,6 +41,16 @@ urlpatterns = [
         "chat-sessions/",
         ChatSessionViewset.as_view({"get": "list"}),
         name="chat-session-list-create",
+    ),
+    path(
+        "chat-sessions/<pk>/archive/",
+        ChatSessionViewset.as_view({"post": "archive"}),
+        name="chat-session-archive",
+    ),
+    path(
+        "chat-sessions/<pk>/unarchive/",
+        ChatSessionViewset.as_view({"post": "unarchive"}),
+        name="chat-session-unarchive",
     ),
     path(
         "trade-journals/",

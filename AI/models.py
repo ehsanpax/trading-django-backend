@@ -77,6 +77,7 @@ class ChatSession(models.Model):
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     session_data = models.JSONField(default=dict, blank=True)
     user_first_message = models.TextField(blank=True)
+    is_archived = models.BooleanField(default=False, db_index=True)
 
     class Meta:
         unique_together = ("external_session_id", "user")

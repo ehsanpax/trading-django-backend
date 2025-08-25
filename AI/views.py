@@ -18,6 +18,7 @@ from django.db.models import Q
 import uuid
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.pagination import PageNumberPagination
+from rest_framework.decorators import action
 
 
 class StandardResultsSetPagination(PageNumberPagination):
@@ -74,18 +75,42 @@ class StoreSessionExecutionViewset(APIView):
 class ChatSessionViewset(ModelViewSet):
     serializer_class = ChatSessionSerializer
     permission_classes = [permissions.IsAuthenticated]
+    authentication_classes = [TokenAuthentication, JWTAuthentication]
     queryset = ChatSession.objects.filter(
         session_type=ChatSessionTypeChoices.CHAT.value
     )
     pagination_class = StandardResultsSetPagination
 
     def get_queryset(self):
-        return (
-            super()
-            .get_queryset()
-            .filter(user=self.request.user)
-            .order_by("-created_at")
-        )
+        qs = super().get_queryset().filter(user=self.request.user)
+
+        archived = self.request.query_params.get("archived")
+        include_archived = self.request.query_params.get("include_archived")
+
+        if archived is not None:
+            flag = str(archived).lower() in ("1", "true", "yes")
+            qs = qs.filter(is_archived=flag)
+        elif not (str(include_archived).lower() in ("1", "true", "yes")):
+            qs = qs.filter(is_archived=False)
+
+        return qs.order_by("-created_at")
+
+    @action(detail=True, methods=["post"], url_path="archive")
+    def archive(self, request, pk=None):
+        session = self.get_object()
+        # Idempotent
+        if not session.is_archived:
+            session.is_archived = True
+            session.save(update_fields=["is_archived"])
+        return Response({"status": "archived", "id": str(session.id)})
+
+    @action(detail=True, methods=["post"], url_path="unarchive")
+    def unarchive(self, request, pk=None):
+        session = ChatSession.objects.get(pk=pk, user=request.user)
+        if session.is_archived:
+            session.is_archived = False
+            session.save(update_fields=["is_archived"])
+        return Response({"status": "unarchived", "id": str(session.id)})
 
 
 class TradeJournalViewset(ModelViewSet):

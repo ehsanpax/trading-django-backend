@@ -43,9 +43,13 @@ class ExecuteAITradeView(APIView):
         if account_id:
             try:
                 account_id = uuid.UUID(account_id, version=4)
-                account = Account.objects.filter(id=account_id, user=request.user).first()
+                account = Account.objects.filter(
+                    id=account_id, user=request.user
+                ).first()
             except Exception:
-                account = Account.objects.filter(name__iexact=str(account_id), user=request.user).first()
+                account = Account.objects.filter(
+                    name__iexact=str(account_id), user=request.user
+                ).first()
 
         account_id = str(account.id) if account else None
         payload["account_id"] = account_id
@@ -56,14 +60,14 @@ class ExecuteAITradeView(APIView):
             "direction", "BUY"
         ).upper()  # Default handled by serializer if not present
         trade_payload["order_type"] = payload.get("order_type", "MARKET").upper()
-
+        trade_payload["source"] = payload.get("source", "AI").upper()
         entry_price = Decimal(str(payload.get("entry_price")))
         stop_loss_price = Decimal(str(payload.get("stop_loss_price")))
         take_profit_price = Decimal(
             str(payload.get("take_profit_price"))
         )  # This is already the absolute TP price
 
-        direction = payload.get("direction", "BUY").upper()
+        direction = payload.get("direction").upper()
         symbol = payload.get("symbol")
 
         if not account:
@@ -159,6 +163,7 @@ class ExecuteAITradeView(APIView):
             "rr_ratio": trade_payload["rr_ratio"],
             "projected_profit": trade_payload["projected_profit"],
             "projected_loss": trade_payload["projected_loss"],
+            "source": trade_payload["source"],
         }
         try:
             # 2️⃣ run service
