@@ -1,6 +1,6 @@
 # serializers.py
 from rest_framework import serializers
-from .models import EconomicCalendar, Currency, News
+from .models import EconomicCalendar, Currency, News, COTReport
 
 class EconomicCalendarSerializer(serializers.ModelSerializer):
     currency = serializers.CharField(source= 'currency.currency')
@@ -17,3 +17,9 @@ class NewsSerializer(serializers.ModelSerializer):
     class Meta:
         model = News
         fields = '__all__'    
+        
+        
+class COTReportSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = COTReport
+        fields = "__all__"        
