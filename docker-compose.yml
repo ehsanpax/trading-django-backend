@@ -44,7 +44,21 @@ services:
     depends_on:
       - redis
       # - rabbitmq  # Uncomment if workers consume RabbitMQ directly later
-    command: celery -A trading_platform.celery_app worker -l info -P gevent --concurrency=10 -Q celery,live_bots
+    command: celery -A trading_platform.celery_app worker -l info -P gevent --concurrency=10 -Q celery
+
+  # Dedicated worker for live bot runs to isolate event loops
+  celery_live_bots_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.Celery
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    depends_on:
+      - redis
+      # - rabbitmq  # Uncomment if/when live bots directly consume AMQP
+    command: celery -A trading_platform.celery_app worker -l info -Q live_bots -P solo -c 1 -Ofair --logfile=logs/celery_live_bots.log
 
   celery_backtest_worker:
     build:

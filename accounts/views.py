@@ -224,22 +224,44 @@ class InternalCTraderTokensView(APIView):
     Auth: requires header 'X-Internal-Secret' matching settings.INTERNAL_SHARED_SECRET
     """
     permission_classes = [permissions.AllowAny]
+    # Do not invoke DRF/JWT authentication for this internal endpoint; we self-auth via X-Internal-Secret
+    authentication_classes = []
 
     def _check_secret(self, request):
         shared_secret = getattr(settings, "INTERNAL_SHARED_SECRET", None) or getattr(settings, "APP_INTERNAL_SHARED_SECRET", None)
         provided = request.headers.get("X-Internal-Secret") or request.META.get("HTTP_X_INTERNAL_SECRET")
+        # Also accept Authorization: Bearer <secret>
+        if not provided:
+            auth = request.headers.get("Authorization") or request.META.get("HTTP_AUTHORIZATION")
+            if auth and auth.lower().startswith("bearer "):
+                provided = auth[7:].strip()
         if not shared_secret or not provided or provided != shared_secret:
             raise PermissionDenied("Forbidden")
 
     def _resolve_broker_id(self, ctrader_account_id: str):
-        """Accept either numeric CTraderAccount.id or UUID Account.id. Return CTraderAccount instance."""
-        from .models import CTraderAccount, Account
-        # Try numeric CTraderAccount.id first
+        """Accept numeric internal CTraderAccount.id, numeric ctid_trader_account_id, optional account_number, or UUID Account.id. Return CTraderAccount instance."""
+        from .models import CTraderAccount
+        # Try numeric inputs first
         try:
-            int_id = int(ctrader_account_id)
-            return CTraderAccount.objects.get(id=int_id)
-        except (ValueError, CTraderAccount.DoesNotExist):
-            pass
+            int_val = int(ctrader_account_id)
+        except (TypeError, ValueError):
+            int_val = None
+        if int_val is not None:
+            # 1) Internal PK id
+            try:
+                return CTraderAccount.objects.get(id=int_val)
+            except CTraderAccount.DoesNotExist:
+                pass
+            # 2) cTrader broker account id (ctid_trader_account_id)
+            try:
+                return CTraderAccount.objects.get(ctid_trader_account_id=int_val)
+            except CTraderAccount.DoesNotExist:
+                pass
+            # 3) Optional: stored login/account_number (if present)
+            try:
+                return CTraderAccount.objects.get(account_number=int_val)
+            except CTraderAccount.DoesNotExist:
+                pass
         # Try UUID Account.id
         try:
             from uuid import UUID

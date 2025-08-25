@@ -7,7 +7,6 @@ from django.shortcuts import redirect
 from django.conf import settings
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
-from django.http import StreamingHttpResponse  # Added for SSE proxy
 
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -336,65 +335,3 @@ class CTraderInstanceDeleteProxyAPIView(APIView):
             return Response(data, status=resp.status_code)
         except ValueError:
             return Response({}, status=resp.status_code)
-
-
-class CTraderPortfolioSSEProxyView(APIView):
-    """
-    SSE proxy: streams normalized portfolio updates (account trader updates, open positions, pending orders)
-    from the FastAPI microservice to the frontend via Django. Keeps platform-agnostic format.
-    """
-
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request, *args, **kwargs):
-        base = settings.CTRADER_API_BASE_URL.rstrip('/')
-        url = f"{base}/ctrader/stream/portfolio"
-        headers = {
-            "X-Internal-Secret": settings.INTERNAL_SHARED_SECRET or "",
-            "Accept": "text/event-stream",
-            "Connection": "keep-alive",
-            "Cache-Control": "no-cache",
-        }
-
-        # Pass through query params like account_id, ctid_trader_account_id, etc.
-        params = request.GET.copy()
-
-        try:
-            upstream = requests.get(url, headers=headers, params=params, stream=True, timeout=(10, None))
-        except requests.RequestException as e:
-            return Response({"error": f"Upstream error: {e}"}, status=status.HTTP_502_BAD_GATEWAY)
-
-        # If upstream immediately failed, surface the error body
-        if upstream.status_code != 200:
-            try:
-                data = upstream.json()
-                return Response(data, status=upstream.status_code)
-            except ValueError:
-                return Response({
-                    "error": "Upstream stream failed",
-                    "status": upstream.status_code,
-                    "body": (upstream.text or "")[:1000],
-                }, status=upstream.status_code)
-
-        def event_stream():
-            try:
-                for chunk in upstream.iter_content(chunk_size=4096):
-                    if not chunk:
-                        continue
-                    # Yield raw SSE bytes
-                    yield chunk
-            except GeneratorExit:
-                try:
-                    upstream.close()
-                except Exception:
-                    pass
-            except Exception:
-                try:
-                    upstream.close()
-                except Exception:
-                    pass
-
-        resp = StreamingHttpResponse(event_stream(), content_type="text/event-stream")
-        resp["Cache-Control"] = "no-cache"
-        resp["X-Accel-Buffering"] = "no"  # helpful when behind nginx
-        return resp

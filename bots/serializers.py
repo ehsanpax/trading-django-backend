@@ -193,24 +193,6 @@ class LiveRunSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'instrument_symbol', 'started_at', 'stopped_at', 'pnl_r', 'drawdown_r', 'last_error', 'bot_name', 'bot_version_created_at']
 
 # Serializers for specific actions
-class LaunchBacktestSerializer(serializers.Serializer):
-    config_id = serializers.UUIDField()
-    instrument_symbol = serializers.CharField(max_length=50)
-    data_window_start = serializers.DateTimeField()
-    data_window_end = serializers.DateTimeField()
-    random_seed = serializers.IntegerField(required=False, allow_null=True)
-
-    def validate(self, data):
-        if data['data_window_start'] >= data['data_window_end']:
-            raise serializers.ValidationError("data_window_end must be after data_window_start.")
-        
-        # Validate that the BacktestConfig exists
-        try:
-            BacktestConfig.objects.get(id=data['config_id'])
-        except BacktestConfig.DoesNotExist:
-            raise serializers.ValidationError("BacktestConfig with provided ID does not exist.")
-
-        return data
 
 class BotVersionCreateSerializer(serializers.Serializer):
     bot_id = serializers.UUIDField()

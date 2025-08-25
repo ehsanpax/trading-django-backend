@@ -1,4 +1,4 @@
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from trading.models import Trade, Order
 from asgiref.sync import sync_to_async
 
@@ -12,15 +12,33 @@ class PositionUpdateListener:
         """
         try:
             trade = Trade.objects.get(id=trade_id)
-            current_pnl = Decimal(current_pnl)
+            # Safely coerce current_pnl to Decimal, treating None or invalid as 0
+            pnl_dec: Decimal
+            val = current_pnl
+            if isinstance(val, Decimal):
+                pnl_dec = val
+            elif val is None:
+                pnl_dec = Decimal("0")
+            elif isinstance(val, (int, float)):
+                pnl_dec = Decimal(str(val))
+            elif isinstance(val, str):
+                try:
+                    pnl_dec = Decimal(val)
+                except (InvalidOperation, ValueError, TypeError):
+                    pnl_dec = Decimal("0")
+            else:
+                try:
+                    pnl_dec = Decimal(str(val))
+                except (InvalidOperation, ValueError, TypeError):
+                    pnl_dec = Decimal("0")
 
             # Update max_runup
-            if trade.max_runup is None or current_pnl > trade.max_runup:
-                trade.max_runup = current_pnl
+            if trade.max_runup is None or pnl_dec > trade.max_runup:
+                trade.max_runup = pnl_dec
 
             # Update max_drawdown
-            if trade.max_drawdown is None or current_pnl < trade.max_drawdown:
-                trade.max_drawdown = current_pnl
+            if trade.max_drawdown is None or pnl_dec < trade.max_drawdown:
+                trade.max_drawdown = pnl_dec
 
             trade.save(update_fields=['max_runup', 'max_drawdown'])
 

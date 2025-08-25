@@ -74,6 +74,16 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         """
         Handles a new WebSocket connection.
         """
+        # Debug logging for handshake
+        try:
+            logger.info(
+                "Account WS connect attempt path=%s qs=%s",
+                self.scope.get("path"),
+                (self.scope.get("query_string") or b"").decode("utf-8", errors="ignore"),
+            )
+        except Exception:
+            pass
+
         self.user = self.scope["user"]
         if not self.user or not self.user.is_authenticated:
             await self.close(code=4001)
@@ -82,84 +92,169 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         self.account_id = self.scope["url_route"]["kwargs"]["account_id"]
         
         try:
-            account = await sync_to_async(Account.objects.select_related('mt5_account').get)(id=self.account_id, user=self.user)
-            if account.platform != "MT5":
-                logger.warning(f"Attempted WebSocket connection for non-MT5 account {self.account_id}.")
-                await self.close(code=4004, reason="Real-time updates are only supported for MT5 accounts.")
-                return
-            mt5_account = account.mt5_account
-        except (Account.DoesNotExist, MT5Account.DoesNotExist):
+            # Important: don’t join to mt5_account here; it can exclude non-MT5 accounts (e.g., cTrader) from the result
+            account = await sync_to_async(Account.objects.get)(id=self.account_id, user=self.user)
+        except Account.DoesNotExist:
             await self.close(code=4003, reason="Account not found.")
             return
 
-        await self.accept()
-        self.is_active = True
-        logger.info(f"Account WebSocket connected for account {self.account_id}")
+        # --- Platform-specific initialization ---
+        if account.platform == "MT5":
+            ts_only = bool(getattr(settings, "REALTIME_TS_ONLY", False))  # Feature flag: TradingService-only realtime for MT5
 
-        monitoring_service.register_connection(
-            self.channel_name,
-            self.user,
-            self.account_id,
-            "account",
-            {}
-        )
+            await self.accept()
+            self.is_active = True
+            logger.info(f"Account WebSocket connected for account {self.account_id} (ts_only={ts_only})")
 
-        self.mt5_client = await connection_manager.get_client(
-            base_url=settings.MT5_API_BASE_URL,
-            account_id=mt5_account.account_number,
-            password=mt5_account.encrypted_password,
-            broker_server=mt5_account.broker_server,
-            internal_account_id=str(account.id)
-        )
+            monitoring_service.register_connection(
+                self.channel_name,
+                self.user,
+                self.account_id,
+                "account",
+                {}
+            )
 
-        # Wait briefly for initial data from MT5 WS (account_info), but don't hard fail
-        try:
-            await asyncio.wait_for(self.mt5_client.initial_data_received.wait(), timeout=5)
-            logger.info(f"MT5 client initial data received for account {self.account_id}")
-        except asyncio.TimeoutError:
-            logger.warning(f"Timeout waiting for MT5 initial data for account {self.account_id}; proceeding with cache if any")
+            if not ts_only:
+                # Establish MT5 WS client only when flag disabled
+                mt5_account = account.mt5_account
+                self.mt5_client = await connection_manager.get_client(
+                    base_url=settings.MT5_API_BASE_URL,
+                    account_id=mt5_account.account_number,
+                    password=mt5_account.encrypted_password,
+                    broker_server=mt5_account.broker_server,
+                    internal_account_id=str(account.id)
+                )
 
-        # Register listeners
-        self.mt5_client.register_account_info_listener(self.send_account_update)
-        self.mt5_client.register_open_positions_listener(self.send_positions_update)
+                # Wait briefly for initial data from MT5 WS (account_info), but don't hard fail
+                try:
+                    await asyncio.wait_for(self.mt5_client.initial_data_received.wait(), timeout=5)
+                    logger.info(f"MT5 client initial data received for account {self.account_id}")
+                except asyncio.TimeoutError:
+                    logger.warning(f"Timeout waiting for MT5 initial data for account {self.account_id}; proceeding with cache if any")
 
-        # Send initial state immediately using MT5 client cache or REST fallback
-        logger.info(f"Populating initial UUID maps and sending initial data for account {self.account_id}")
-        await self._populate_trade_uuid_map()
-        await self._populate_order_uuid_map()
+                # Register listeners (only when WS client is active)
+                self.mt5_client.register_account_info_listener(self.send_account_update)
+                self.mt5_client.register_open_positions_listener(self.send_positions_update)
+            else:
+                # Ensure no WS client is used in TS-only mode
+                self.mt5_client = None
 
-        initial_info = self.mt5_client.get_account_info() or {}
-        initial_positions = self.mt5_client.get_open_positions().get("open_positions", [])
+            # Send initial state using platform-agnostic TradingService with safe fallback
+            logger.info(f"Populating initial UUID maps and sending initial data for account {self.account_id}")
+            await self._populate_trade_uuid_map()
+            await self._populate_order_uuid_map()
 
-        if not initial_info or (initial_info.get("balance") is None and initial_info.get("equity") is None):
-            # Fallback to REST to avoid waiting for the next RabbitMQ snapshot
+            # Try TradingService first (TS-only safe)
+            initial_info = {}
+            initial_positions = []
+            try:
+                from connectors.trading_service import TradingService
+                ts = TradingService(account)
+                acc = await ts.get_account_info()
+                pos_list = await ts.get_open_positions()
+
+                # Map DTOs to existing payload shape
+                initial_info = {
+                    "balance": acc.balance,
+                    "equity": acc.equity,
+                    "margin": acc.margin,
+                }
+                initial_positions = [
+                    {
+                        "ticket": p.position_id,
+                        "symbol": p.symbol,
+                        "direction": p.direction,
+                        "volume": p.volume,
+                        "open_price": p.open_price,
+                        "current_price": p.current_price,
+                        "stop_loss": p.stop_loss,
+                        "take_profit": p.take_profit,
+                        "profit": p.profit,
+                        "swap": p.swap,
+                        "commission": p.commission,
+                    }
+                    for p in pos_list
+                ]
+                logger.info(f"Initial account data populated via TradingService for account {self.account_id}")
+            except Exception as e:
+                logger.debug(f"TradingService snapshot failed for account {self.account_id}: {e}.")
+                # Optional fallback paths: WS cache (if enabled) -> REST
+                if self.mt5_client is not None:
+                    initial_info = self.mt5_client.get_account_info() or {}
+                    initial_positions = self.mt5_client.get_open_positions().get("open_positions", [])
+                if not initial_info or (initial_info.get("balance") is None and initial_info.get("equity") is None):
+                    try:
+                        rest_data = await sync_to_async(get_account_details_service)(self.account_id, self.user)
+                        if isinstance(rest_data, dict) and "error" not in rest_data:
+                            initial_info = {
+                                "balance": rest_data.get("balance"),
+                                "equity": rest_data.get("equity"),
+                                "margin": rest_data.get("margin"),
+                            }
+                            initial_positions = rest_data.get("open_positions", [])
+                            logger.info(f"Initial account data populated via REST fallback for account {self.account_id}")
+                        else:
+                            logger.debug(f"REST fallback returned error or invalid data for account {self.account_id}: {rest_data}")
+                    except Exception as e2:
+                        logger.debug(f"REST fallback failed for account {self.account_id}: {e2}")
+
+            self.account_info = initial_info
+            all_positions = initial_positions
+            pending_orders = [p for p in all_positions if isinstance(p, dict) and p.get('type') == 'pending_order']
+            self.open_positions = [p for p in all_positions if isinstance(p, dict) and p.get('type') != 'pending_order']
+            await self.send_combined_update(pending_orders=pending_orders)
+
+            # Subscribe to backend fanout group for this account
+            self._account_group = f"account_{self.account_id}"
+            channel_layer = get_channel_layer()
+            if channel_layer:
+                await channel_layer.group_add(self._account_group, self.channel_name)
+                #logger.info(f"Joined account group: {self._account_group}")
+        elif account.platform == "cTrader":
+            # cTrader path: accept connection, no MT5 client; rely on AMQP fanout + REST fallback for initial state
+            await self.accept()
+            self.is_active = True
+            logger.info(f"Account WebSocket connected (cTrader) for account {self.account_id}")
+
+            monitoring_service.register_connection(
+                self.channel_name,
+                self.user,
+                self.account_id,
+                "account",
+                {}
+            )
+
+            # Initialize UUID maps
+            await self._populate_trade_uuid_map()
+            await self._populate_order_uuid_map()
+
+            # Initial data via REST to microservice
             try:
                 rest_data = await sync_to_async(get_account_details_service)(self.account_id, self.user)
                 if isinstance(rest_data, dict) and "error" not in rest_data:
-                    initial_info = {
+                    self.account_info = {
                         "balance": rest_data.get("balance"),
                         "equity": rest_data.get("equity"),
                         "margin": rest_data.get("margin"),
                     }
-                    initial_positions = rest_data.get("open_positions", [])
-                    logger.info(f"Initial account data populated via REST fallback for account {self.account_id}")
+                    # cTrader REST fallback may not return positions; start empty and wait for AMQP snapshot
+                    self.open_positions = rest_data.get("open_positions", []) or []
                 else:
-                    logger.debug(f"REST fallback returned error or invalid data for account {self.account_id}: {rest_data}")
+                    logger.debug(f"cTrader REST fallback returned error or invalid data for account {self.account_id}: {rest_data}")
             except Exception as e:
-                logger.debug(f"REST fallback failed for account {self.account_id}: {e}")
+                logger.debug(f"cTrader REST fallback failed for account {self.account_id}: {e}")
 
-        self.account_info = initial_info
-        all_positions = initial_positions
-        pending_orders = [p for p in all_positions if isinstance(p, dict) and p.get('type') == 'pending_order']
-        self.open_positions = [p for p in all_positions if isinstance(p, dict) and p.get('type') != 'pending_order']
-        await self.send_combined_update(pending_orders=pending_orders)
+            await self.send_combined_update(pending_orders=[])
 
-        # Subscribe to backend fanout group for this account
-        self._account_group = f"account_{self.account_id}"
-        channel_layer = get_channel_layer()
-        if channel_layer:
-            await channel_layer.group_add(self._account_group, self.channel_name)
-            #logger.info(f"Joined account group: {self._account_group}")
+            # Subscribe to backend fanout group for this account (AMQP -> Channels)
+            self._account_group = f"account_{self.account_id}"
+            channel_layer = get_channel_layer()
+            if channel_layer:
+                await channel_layer.group_add(self._account_group, self.channel_name)
+        else:
+            logger.warning(f"Attempted WebSocket connection for unsupported platform {account.platform} (account {self.account_id}).")
+            await self.close(code=4004, reason="Real-time updates are not supported for this account.")
+            return
 
     async def disconnect(self, close_code):
         """
@@ -305,7 +400,14 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
             }
         }
         #logger.info(f"Sending account_update to client account={self.account_id} positions={len(processed_positions)} pending={len(processed_pending_orders)}")
-        await self.send_json(payload)
+        # Avoid sending after socket is closed
+        try:
+            if getattr(self, "close_code", None) is not None or not self.is_active:
+                return
+            await self.send_json(payload)
+        except RuntimeError:
+            # Socket likely closed; ignore
+            return
         monitoring_service.update_server_message(self.channel_name, payload)
 
     # Handlers for Channels group messages
@@ -319,4 +421,23 @@ class AccountConsumer(AsyncJsonWebsocketConsumer):
         # event: {"type": "open_positions_update", "open_positions": [...]} 
         #logger.info(f"Channels open_positions_update received for account={self.account_id}")
         positions = event.get("open_positions", [])
-        await self.send_positions_update(positions)
+        # Normalize to include 'ticket' if only 'id' exists (cTrader positions)
+        normalized = []
+        for p in positions:
+            if isinstance(p, dict) and "ticket" not in p and "id" in p:
+                normalized.append({**p, "ticket": p.get("id")})
+            else:
+                normalized.append(p)
+        await self.send_positions_update(normalized)
+
+    async def pending_orders_update(self, event):
+        # event: {"type": "pending_orders_update", "pending_orders": [...]} 
+        pending = event.get("pending_orders", [])
+        # Normalize to include 'ticket' for downstream mapping if only 'id' exists
+        normalized = []
+        for o in pending:
+            if isinstance(o, dict) and "ticket" not in o and "id" in o:
+                normalized.append({**o, "ticket": o.get("id")})
+            else:
+                normalized.append(o)
+        await self.send_combined_update(pending_orders=normalized)

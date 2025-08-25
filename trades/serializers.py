@@ -1,6 +1,6 @@
 # trades/serializers.py
 from rest_framework import serializers
-from trading.models import Trade, Order, Watchlist # Added Watchlist
+from trading.models import Trade, Order, Watchlist, WatchlistAccountLink # Added Watchlist + through model
 from decimal import Decimal
 
 class TradeSerializer(serializers.ModelSerializer):
@@ -77,6 +77,7 @@ class ExecuteTradeInputSerializer(serializers.Serializer):
     order_type           = serializers.ChoiceField(choices=["MARKET","LIMIT","STOP"], default="MARKET")
     limit_price          = serializers.DecimalField(max_digits=15, decimal_places=5, required=False)
     stop_loss_distance   = serializers.IntegerField()
+    tp_distance          = serializers.IntegerField(required=False, allow_null=True)
     take_profit          = serializers.DecimalField(max_digits=15, decimal_places=5)
     risk_percent         = serializers.DecimalField(max_digits=5, decimal_places=2)
     partial_profit       = serializers.BooleanField(default=False)
@@ -156,42 +157,152 @@ class PartialCloseTradeInputSerializer(serializers.Serializer):
     )
 
 class WatchlistSerializer(serializers.ModelSerializer):
-    user = serializers.PrimaryKeyRelatedField(read_only=True) # Or StringRelatedField for username
+    def __init__(self, *args, **kwargs):
+        # Guard against accidental 'fields' kwarg or attribute which can shadow DRF's fields property
+        kwargs.pop('fields', None)
+        # Remove instance attribute 'fields' if set prior to init
+        try:
+            if isinstance(getattr(self, 'fields', None), list):
+                delattr(self, 'fields')
+        except Exception:
+            pass
+        super().__init__(*args, **kwargs)
+        # Remove instance attribute 'fields' if set by any mixin after init
+        try:
+            if isinstance(getattr(self, 'fields', None), list):
+                delattr(self, 'fields')
+        except Exception:
+            pass
+    user = serializers.PrimaryKeyRelatedField(read_only=True)
+    # New: allow linking to multiple accounts
+    account_ids = serializers.ListField(
+        child=serializers.UUIDField(), required=False, allow_empty=True, write_only=True
+    )
+    accounts = serializers.PrimaryKeyRelatedField(many=True, read_only=True)
+    # New: convenience to link to all user's accounts in one call
+    link_all_accounts = serializers.BooleanField(required=False, default=False, write_only=True)
 
     class Meta:
         model = Watchlist
-        fields = ['id', 'user', 'instrument', 'exchange', 'is_global', 'created_at']
-        read_only_fields = ['user', 'created_at'] # User is set in the view
+        fields = [
+            'id',
+            'user',
+            'instrument',
+            'exchange',
+            'is_global',
+            'created_at',
+            'accounts',
+            'account_ids',
+            'link_all_accounts',
+        ]
+        read_only_fields = ['user', 'created_at', 'accounts']
+        extra_kwargs = {
+            'exchange': {
+                'required': False,
+                'allow_null': True,
+                'allow_blank': True,
+                'default': None,
+            }
+        }
+
+    def validate(self, attrs):
+        # Basic global rules
+        # Normalize blank exchange to None for consistent uniqueness behavior
+        if attrs.get('exchange', None) == "":
+            attrs['exchange'] = None
+        is_global = attrs.get('is_global', False)
+        account_ids = attrs.get('account_ids', None)
+        link_all = attrs.get('link_all_accounts', False)
+        if is_global and (account_ids or link_all):
+            raise serializers.ValidationError({"account_ids": "Global items cannot be linked to accounts."})
+        if account_ids and link_all:
+            raise serializers.ValidationError({"account_ids": "Provide either account_ids or link_all_accounts, not both."})
+        return attrs
+
+    def _validate_and_get_accounts(self, user, account_ids):
+        if not account_ids:
+            return []
+        # Ensure accounts belong to the user
+        from accounts.models import Account
+        accounts = list(Account.objects.filter(id__in=account_ids, user=user))
+        if len(accounts) != len(set(account_ids)):
+            raise serializers.ValidationError({"account_ids": "One or more accounts not found or not owned by the user."})
+        return accounts
 
     def create(self, validated_data):
-        # User will be added in the view based on request.user
-        # For admin creating global watchlist, user can be None
         user = self.context['request'].user
+        account_ids = validated_data.pop('account_ids', [])
+        link_all = validated_data.pop('link_all_accounts', False)
+
         if validated_data.get('is_global', False):
-            # Admin can create global watchlists
-            if not user.is_staff: # or some other permission check
+            if not user.is_staff:
                 raise serializers.ValidationError("Only admins can create global watchlist items.")
-            validated_data['user'] = None # Global items are not tied to a specific user
+            validated_data['user'] = None
         else:
-            # Regular users create for themselves
             validated_data['user'] = user
-        
-        # Prevent duplicates based on constraints
-        # UniqueConstraint(fields=['user', 'instrument', 'exchange'], name='unique_user_instrument_exchange_watchlist')
-        # UniqueConstraint(fields=['instrument', 'exchange'], condition=models.Q(is_global=True), name='unique_global_instrument_exchange_watchlist')
-        
+
         instrument = validated_data.get('instrument')
         exchange = validated_data.get('exchange')
 
+        # Uniqueness checks for base Watchlist row
         if validated_data.get('is_global', False):
             if Watchlist.objects.filter(instrument=instrument, exchange=exchange, is_global=True).exists():
-                raise serializers.ValidationError(
-                    {"detail": "This global instrument/exchange combination already exists in the watchlist."}
-                )
-        elif user: # Check for user-specific duplicates only if user is present
+                raise serializers.ValidationError({"detail": "This global instrument/exchange combination already exists."})
+        else:
             if Watchlist.objects.filter(user=user, instrument=instrument, exchange=exchange, is_global=False).exists():
-                raise serializers.ValidationError(
-                    {"detail": "This instrument/exchange combination already exists in your watchlist."}
-                )
-        
-        return Watchlist.objects.create(**validated_data)
+                # We allow account links on the same base item; client should then PATCH accounts on existing item
+                raise serializers.ValidationError({"detail": "This instrument/exchange already exists in your watchlist. Consider updating its account links."})
+
+        # Create the base item
+        watch = Watchlist.objects.create(**validated_data)
+
+        # Create account links if provided
+        accounts = []
+        if link_all:
+            from accounts.models import Account
+            accounts = list(Account.objects.filter(user=user))
+        else:
+            accounts = self._validate_and_get_accounts(user, account_ids)
+        for acc in accounts:
+            WatchlistAccountLink.objects.get_or_create(watchlist=watch, account=acc)
+
+        return watch
+
+    def update(self, instance, validated_data):
+        user = self.context['request'].user
+        account_ids = validated_data.pop('account_ids', None)
+        link_all = validated_data.pop('link_all_accounts', False)
+
+        # Globalization rules
+        if 'is_global' in validated_data and validated_data['is_global']:
+            if not user.is_staff:
+                raise serializers.ValidationError("Only admins can make watchlist items global.")
+            validated_data['user'] = None
+            # Remove any account links on global items
+            instance.accounts.clear()
+
+        # Update instance fields (exclude non-model fields already popped)
+        for k, v in list(validated_data.items()):
+            setattr(instance, k, v)
+        instance.save()
+
+        # Manage account links if provided
+        if account_ids is not None or link_all:
+            if link_all and account_ids:
+                raise serializers.ValidationError({"account_ids": "Provide either account_ids or link_all_accounts, not both."})
+            if link_all:
+                from accounts.models import Account
+                accounts = list(Account.objects.filter(user=user))
+            else:
+                accounts = self._validate_and_get_accounts(user, account_ids)
+            # Replace links with provided set
+            current_ids = set(instance.accounts.values_list('id', flat=True))
+            target_ids = set(a.id for a in accounts)
+            # Remove
+            for acc_id in current_ids - target_ids:
+                WatchlistAccountLink.objects.filter(watchlist=instance, account_id=acc_id).delete()
+            # Add
+            for acc in accounts:
+                WatchlistAccountLink.objects.get_or_create(watchlist=instance, account=acc)
+
+        return instance

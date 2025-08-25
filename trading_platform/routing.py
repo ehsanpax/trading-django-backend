@@ -11,8 +11,8 @@ application = ProtocolTypeRouter({
     "http": get_asgi_application(),
     "websocket": TokenAuthMiddlewareStack(
         URLRouter([
-            # Accounts
-            re_path(r'^ws/accounts/(?P<account_id>[0-9a-f-]+)/$', AccountConsumer.as_asgi()),
+            # Accounts (accept optional trailing slash and uppercase hex)
+            re_path(r'^ws/accounts/(?P<account_id>[0-9A-Fa-f-]+)/?$', AccountConsumer.as_asgi()),
             # Bots
             re_path(r'^ws/backtest/(?P<backtest_run_id>[0-9a-f-]+)/$', BacktestConsumer.as_asgi()),
             # Prices
