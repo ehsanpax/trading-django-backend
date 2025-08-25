@@ -22,6 +22,7 @@ app.conf.beat_schedule = {
     "process-one-time-schedules": {
         "task": "AI.tasks.process_one_time_schedules",
         "schedule": crontab(minute="*/1"),
+        "options": {"queue": "default"},
     },
     "scan-profit-targets": {
         "task": "trades.tasks.scan_profit_targets",

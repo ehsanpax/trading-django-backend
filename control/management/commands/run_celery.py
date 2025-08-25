@@ -3,6 +3,7 @@ import uuid
 import subprocess
 from django.core.management.base import BaseCommand
 
+
 class Command(BaseCommand):
     help = "Starts the Celery worker"
 
@@ -37,9 +38,9 @@ class Command(BaseCommand):
             "--loglevel=info",
             f"--concurrency={concurrency}",
             "-P",
-            "gevent",
+            "threads",
             f"--hostname={hostname}",
-            "--logfile=logs/celery_backtest_ge.log"
+            "--logfile=logs/celery_backtest_ge.log",
         ]
 
         # Log the command for debugging purposes (optional)

@@ -302,6 +302,13 @@ CELERY_BROKER_URL = env("CELERY_BROKER_URL")
 # CELERY_BEAT_SCHEDULE is now defined in trading_platform/celery_app.py
 # Ensure django-celery-beat is not also scheduling this task via the admin if it's installed.
 
+# Make Celery align with Django timezone (UTC) and use DB scheduler by default
+CELERY_TIMEZONE = "UTC"
+CELERY_ENABLE_UTC = True
+CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
+# Keep beat loop responsive for sub-minute intervals
+CELERY_BEAT_MAX_LOOP_INTERVAL = int(os.getenv("CELERY_BEAT_MAX_LOOP_INTERVAL", "5"))
+
 # Celery Worker Soft/Hard Limits to prevent memory leaks and crashes
 CELERYD_MAX_TASKS_PER_CHILD = 100  # Restart worker process after 100 tasks
 CELERYD_MAX_MEMORY_PER_CHILD = (
@@ -330,10 +337,15 @@ CELERY_RESULT_BACKEND = "django-db"
 # If REDIS_URL not provided, the utils will fallback to CELERY_BROKER_URL or no-op.
 REDIS_URL = env.str("REDIS_URL", default=os.getenv("REDIS_URL", ""))
 EXEC_LOCK_TTL_MS = env.int("EXEC_LOCK_TTL_MS", default=5000)  # 5s default
-MIN_ENTRY_COOLDOWN_SEC = env.int("MIN_ENTRY_COOLDOWN_SEC", default=0)  # per-run default; strategy may override
+MIN_ENTRY_COOLDOWN_SEC = env.int(
+    "MIN_ENTRY_COOLDOWN_SEC", default=0
+)  # per-run default; strategy may override
 
 # --- AI Strategy Generation Service settings ---
-AI_STRATEGY_API_URL = env.str("AI_STRATEGY_API_URL", default="https://endlessly-central-gelding.ngrok-free.app/webhook/6b891469-8e13-40be-80ed-767932094cff")
+AI_STRATEGY_API_URL = env.str(
+    "AI_STRATEGY_API_URL",
+    default="https://endlessly-central-gelding.ngrok-free.app/webhook/6b891469-8e13-40be-80ed-767932094cff",
+)
 AI_STRATEGY_API_KEY = env.str("AI_STRATEGY_API_KEY", default="")
 AI_STRATEGY_TIMEOUT_SEC = env.int("AI_STRATEGY_TIMEOUT_SEC", default=15)
 AI_STRATEGY_MAX_PROMPT_CHARS = env.int("AI_STRATEGY_MAX_PROMPT_CHARS", default=4000)
@@ -354,10 +366,13 @@ BOTS_TRACE_MAX_ROWS = env.int("BOTS_TRACE_MAX_ROWS", default=250_000)
 BOTS_TRACE_BATCH_SIZE = env.int("BOTS_TRACE_BATCH_SIZE", default=1000)
 BOTS_TRACE_SAMPLING = env.int("BOTS_TRACE_SAMPLING", default=1)
 
-INTERNAL_SHARED_SECRET = env.str("INTERNAL_SHARED_SECRET", default=os.getenv("APP_INTERNAL_SHARED_SECRET", ""))
+INTERNAL_SHARED_SECRET = env.str(
+    "INTERNAL_SHARED_SECRET", default=os.getenv("APP_INTERNAL_SHARED_SECRET", "")
+)
 if not INTERNAL_SHARED_SECRET:
     # Generate a stable-on-boot random secret if none provided (dev only). For prod, set env var.
     import secrets
+
     INTERNAL_SHARED_SECRET = secrets.token_urlsafe(32)
 
 # Feature flags
