@@ -19,6 +19,9 @@ import uuid
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
+from django.db import IntegrityError
+from django.db.models.deletion import ProtectedError
 
 
 class StandardResultsSetPagination(PageNumberPagination):
@@ -149,6 +152,25 @@ class SessionScheduleViewset(ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
     authentication_classes = [TokenAuthentication, JWTAuthentication]
     queryset = SessionSchedule.objects.all()
+
+    def perform_create(self, serializer):
+        try:
+            serializer.save()
+        except (IntegrityError, ProtectedError) as exc:
+            # Return a client error for constraint violations
+            raise ValidationError({"detail": str(exc)})
+
+    def perform_update(self, serializer):
+        try:
+            serializer.save()
+        except (IntegrityError, ProtectedError) as exc:
+            raise ValidationError({"detail": str(exc)})
+
+    def perform_destroy(self, instance):
+        try:
+            instance.delete()
+        except (IntegrityError, ProtectedError) as exc:
+            raise ValidationError({"detail": str(exc)})
 
     def get_queryset(self):
         queryset = (
