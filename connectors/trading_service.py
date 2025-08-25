@@ -81,6 +81,48 @@ class TradingService:
                 loop.close()
                 asyncio.set_event_loop(None)
 
+    @staticmethod
+    def _normalize_symbol_info(symbol: str, info: Dict[str, Any]) -> Dict[str, Any]:
+        """Ensure symbol info contains consistent keys like pip_size and decimals.
+        - If pip_size missing but digits present, derive pip_size = 10^-digits for FX-like symbols.
+        - If decimals missing, derive from pip_size when possible.
+        - Always uppercase the returned symbol field if present.
+        """
+        out = dict(info or {})
+        try:
+            if symbol and not out.get('symbol'):
+                out['symbol'] = symbol
+            if isinstance(out.get('symbol'), str):
+                out['symbol'] = out['symbol'].upper()
+            # pip size derivation
+            pip = out.get('pip_size') or out.get('pipSize') or out.get('point') or out.get('tick_size') or out.get('tickSize')
+            digits = out.get('digits')
+            if not pip and isinstance(digits, (int, float)):
+                try:
+                    d = int(digits)
+                    if d >= 0:
+                        pip = 10 ** (-d)
+                except Exception:
+                    pass
+            if pip is not None:
+                try:
+                    pip_f = float(pip)
+                    if pip_f > 0:
+                        out['pip_size'] = pip_f
+                except Exception:
+                    pass
+            # decimals from pip_size
+            if 'decimals' not in out and isinstance(out.get('pip_size'), (int, float)):
+                from decimal import Decimal as _D
+                try:
+                    d = _D(str(out['pip_size']))
+                    out['decimals'] = -d.as_tuple().exponent
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return out
+
     def get_account_info_sync(self) -> AccountInfo:
         try:
             connector = self._get_connector_sync()
@@ -535,7 +577,7 @@ class TradingService:
         # Cache first (per-account)
         cached = cache_get_symbol_info(str(self.account.id), symbol)
         if cached:
-            return cached
+            return self._normalize_symbol_info(symbol, cached)
         try:
             connector = await self._get_connector()
             info = await connector.get_symbol_info(symbol)
@@ -543,7 +585,7 @@ class TradingService:
                 cache_set_symbol_info(str(self.account.id), symbol, info)
             except Exception:
                 pass
-            return info
+            return self._normalize_symbol_info(symbol, info)
         except ConnectorError as e:
             logger.error(f"Failed to get symbol info: {e}")
             raise BrokerAPIError(f"Trading platform error: {e}")
@@ -552,7 +594,7 @@ class TradingService:
         """Sync wrapper to fetch symbol info via the connector with per-account cache."""
         cached = cache_get_symbol_info(str(self.account.id), symbol)
         if cached:
-            return cached
+            return self._normalize_symbol_info(symbol, cached)
         try:
             connector = self._get_connector_sync()
             info = self._run_sync(connector.get_symbol_info(symbol))
@@ -560,7 +602,7 @@ class TradingService:
                 cache_set_symbol_info(str(self.account.id), symbol, info)
             except Exception:
                 pass
-            return info
+            return self._normalize_symbol_info(symbol, info)
         except ConnectorError as e:
             logger.error(f"Failed to get symbol info (sync): {e}")
             raise BrokerAPIError(f"Trading platform error: {e}")

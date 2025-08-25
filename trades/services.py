@@ -365,9 +365,21 @@ class TradeService:
         """
         Save the Order and, if filled, the Trade and any ProfitTarget legs.
         """
-        # Fail-fast on broker error or missing order id
-        if not resp or resp.get("status") == "failed" or "order_id" not in resp:
+        # Fail-fast on broker error or missing/None order id
+        if (
+            not resp
+            or resp.get("status") == "failed"
+            or ("order_id" not in resp)
+            or (resp.get("order_id") in (None, "", 0))
+        ):
             err = (resp or {}).get("error") if isinstance(resp, dict) else None
+            # Fallback to server_response description when available
+            try:
+                if not err:
+                    sr = (resp or {}).get("server_response") or {}
+                    err = sr.get("description") or sr.get("error") or err
+            except Exception:
+                pass
             logger.error(f"Broker execution failed or returned invalid payload: {resp}")
             raise APIException(f"Broker execution failed: {err or 'unknown error'}")
 

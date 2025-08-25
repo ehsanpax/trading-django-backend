@@ -77,7 +77,7 @@ class ExecuteTradeInputSerializer(serializers.Serializer):
     order_type           = serializers.ChoiceField(choices=["MARKET","LIMIT","STOP"], default="MARKET")
     limit_price          = serializers.DecimalField(max_digits=15, decimal_places=5, required=False)
     stop_loss_distance   = serializers.IntegerField()
-    tp_distance          = serializers.IntegerField(required=False)
+    tp_distance          = serializers.IntegerField(required=False, allow_null=True)
     take_profit          = serializers.DecimalField(max_digits=15, decimal_places=5)
     risk_percent         = serializers.DecimalField(max_digits=5, decimal_places=2)
     partial_profit       = serializers.BooleanField(default=False)
@@ -184,11 +184,32 @@ class WatchlistSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Watchlist
-    fields = ['id', 'user', 'instrument', 'exchange', 'is_global', 'created_at', 'accounts', 'account_ids', 'link_all_accounts']
-    read_only_fields = ['user', 'created_at', 'accounts']
+        fields = [
+            'id',
+            'user',
+            'instrument',
+            'exchange',
+            'is_global',
+            'created_at',
+            'accounts',
+            'account_ids',
+            'link_all_accounts',
+        ]
+        read_only_fields = ['user', 'created_at', 'accounts']
+        extra_kwargs = {
+            'exchange': {
+                'required': False,
+                'allow_null': True,
+                'allow_blank': True,
+                'default': None,
+            }
+        }
 
     def validate(self, attrs):
         # Basic global rules
+        # Normalize blank exchange to None for consistent uniqueness behavior
+        if attrs.get('exchange', None) == "":
+            attrs['exchange'] = None
         is_global = attrs.get('is_global', False)
         account_ids = attrs.get('account_ids', None)
         link_all = attrs.get('link_all_accounts', False)

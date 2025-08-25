@@ -259,6 +259,17 @@ class CTraderHTTPConnector(TradingPlatformConnector):
                     body["tp"] = trade_request.take_profit
 
             headers = self._write_headers("trade.place", body)
+            # Explicit volume unit trace for observability (we send lots)
+            try:
+                logger.info(
+                    "ctrader.place_trade volume trace: unit=lots lot_size=%s symbol=%s account=%s order_type=%s",
+                    str(trade_request.lot_size),
+                    trade_request.symbol,
+                    self.internal_account_id,
+                    str(trade_request.order_type),
+                )
+            except Exception:
+                pass
             # Log request payload (no auth headers logged)
             try:
                 rid = headers.get("X-Request-ID")
@@ -311,6 +322,29 @@ class CTraderHTTPConnector(TradingPlatformConnector):
             if not resp.content:
                 return {"status": resp.status_code}
             data = resp.json()
+            # If microservice embeds an error in server_response, propagate as a failure
+            try:
+                srv = data.get("server_response") or {}
+                err_code = srv.get("errorCode")
+                if err_code and str(err_code).upper() not in {"OK", "SUCCESS", "NONE"}:
+                    desc = srv.get("description") or str(err_code)
+                    try:
+                        logger.error(
+                            "ctrader.place_trade server_error",
+                            extra={
+                                "event": "ctrader.place_trade.error",
+                                "internal_account_id": self.internal_account_id,
+                                "account_id": self.account_id,
+                                "symbol": trade_request.symbol,
+                                "error_code": str(err_code),
+                                "description": desc,
+                            },
+                        )
+                    except Exception:
+                        pass
+                    return {"status": "failed", "error": f"{err_code}: {desc}", "server_response": srv}
+            except Exception:
+                pass
             # cTrader quirk: volume in tradeData may be reported in cent-units; scale down by 1/100 for downstream lot conversion
             try:
                 sr = data.get("server_response") or {}

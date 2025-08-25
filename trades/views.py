@@ -738,7 +738,7 @@ class WatchlistViewSet(viewsets.ModelViewSet):
         except Exception:
             pass
         try:
-            serializer.is_valid(raise_exception=True)
+            valid = serializer.is_valid()
         except AttributeError as e:
             if "has no attribute 'values'" in str(e):
                 return Response({
@@ -746,6 +746,12 @@ class WatchlistViewSet(viewsets.ModelViewSet):
                     "hint": "If sending a list, wrap as {\"items\": [...]} or send an array body."
                 }, status=status.HTTP_400_BAD_REQUEST)
             raise
+        if not valid:
+            try:
+                logger.info("Watchlist create validation errors: %s", serializer.errors)
+            except Exception:
+                pass
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         self.perform_create(serializer)
         headers = self.get_success_headers(serializer.data)
         return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
