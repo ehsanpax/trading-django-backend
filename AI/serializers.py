@@ -17,6 +17,8 @@ from .choices import (
 from django.utils import timezone
 from django_celery_beat.models import IntervalSchedule
 from typing import Any, Mapping, cast
+
+# pylint: disable=no-member  # Django model managers are dynamic
 from datetime import timezone as dt_timezone
 
 
@@ -31,7 +33,9 @@ class PromptSerializer(serializers.ModelSerializer):
         user = self.context["request"].user
         name = validated_data.pop("name")
         prompt, _ = Prompt.objects.update_or_create(
-            user=user, name=name, defaults=validated_data
+            user=user,
+            name=name,
+            defaults=validated_data,
         )
         return prompt
 
@@ -139,7 +143,7 @@ class SessionScheduleSerializer(serializers.ModelSerializer):
         queryset=ChatSession.objects.all(),  # type: ignore[attr-defined]
         allow_null=True,
         required=False,
-    )
+    )  # pylint: disable=no-member
     external_session_id = serializers.CharField(
         source="session.external_session_id", read_only=True
     )
@@ -239,3 +243,57 @@ class SessionScheduleSerializer(serializers.ModelSerializer):
             defaults=validated_data,
         )
         return schedule
+
+    def update(self, instance, validated_data):
+        """Update with external session mapping and timezone normalization.
+
+        - Map `session_id` (external id) to a ChatSession, creating if needed.
+        - Ignore direct `session` writes to avoid invalid FK values.
+        - Normalize `start_at`/`end_at` to UTC-aware datetimes.
+        """
+        # Resolve external session id, if provided
+        new_session = None
+        session_ext_id = validated_data.pop("session_id", None)
+        if session_ext_id:
+            # type: ignore[attr-defined]  # pylint: disable=no-member
+            new_session = ChatSession.objects.filter(
+                external_session_id=session_ext_id
+            ).first()
+            if not new_session:
+                # Create a minimal ChatSession if it doesn't exist
+                new_session = ChatSession.objects.create(
+                    external_session_id=session_ext_id,
+                    user=self.context["request"].user,
+                    session_type=ChatSessionTypeChoices.CHAT.value,
+                    user_first_message=(
+                        f"Schedule {validated_data.get('name', instance.name)}"
+                    ),
+                    session_data={},
+                )
+
+        # Prevent raw FK assignment from payload
+        validated_data.pop("session", None)
+
+        # Normalize datetimes to UTC
+        if validated_data.get("start_at"):
+            dt = validated_data["start_at"]
+            if timezone.is_naive(dt):
+                validated_data["start_at"] = timezone.make_aware(dt, dt_timezone.utc)
+            else:
+                validated_data["start_at"] = dt.astimezone(dt_timezone.utc)
+        if validated_data.get("end_at"):
+            dt = validated_data["end_at"]
+            if timezone.is_naive(dt):
+                validated_data["end_at"] = timezone.make_aware(dt, dt_timezone.utc)
+            else:
+                validated_data["end_at"] = dt.astimezone(dt_timezone.utc)
+
+        # Apply remaining fields
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+
+        if new_session:
+            instance.session = new_session
+
+        instance.save()
+        return instance
