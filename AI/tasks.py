@@ -6,6 +6,7 @@ from django.conf import settings
 import requests
 from django_celery_beat.models import PeriodicTask
 from django.db.models import Q
+from datetime import time as dtime
 
 
 @shared_task
@@ -55,6 +56,74 @@ def execute_session_schedule(self, schedule_id):
     task_record = None
     try:
         schedule = SessionSchedule.objects.get(id=schedule_id)
+        # Blackout handling for excluded days and time ranges
+        now_local = timezone.localtime(timezone.now())
+        current_day = now_local.strftime("%A").upper()
+
+        # If today is excluded, skip execution
+        excluded_days = list(schedule.excluded_days or [])
+        if excluded_days and current_day in excluded_days:
+            msg = f"Skipped schedule {schedule.name}: excluded day " f"{current_day}."
+            SessionScheduleTask.objects.create(
+                schedule=schedule,
+                task_id=self.request.id,
+                status=SessionScheduleTaskStatusChoices.SUCCESS.value,
+                result=msg,
+            )
+            return msg
+
+        # Excluded time ranges structure:
+        # [ {"start": "HH:MM"[, "end": "HH:MM"][, "days": ["MONDAY", ...]] },
+        #   ... ]
+        def _parse_time(val):
+            if not val:
+                return None
+            try:
+                parts = [int(p) for p in str(val).split(":")]
+                while len(parts) < 3:
+                    parts.append(0)
+                return dtime(parts[0], parts[1], parts[2])
+            except Exception:
+                return None
+
+        def _in_range(now_t, start_t, end_t):
+            # Handles overnight windows when start > end
+            if not start_t or not end_t:
+                return False
+            if start_t <= end_t:
+                return start_t <= now_t < end_t
+            return now_t >= start_t or now_t < end_t
+
+        now_t = now_local.time()
+        ranges = schedule.excluded_time_ranges or []
+        for rng in ranges:
+            try:
+                days = rng.get("days") or rng.get("weekdays")
+                if days:
+                    days = [str(d).upper() for d in days]
+                    if current_day not in days:
+                        continue
+                start_t = _parse_time(
+                    rng.get("start") or rng.get("from") or rng.get("start_time")
+                )
+                end_t = _parse_time(
+                    rng.get("end") or rng.get("to") or rng.get("end_time")
+                )
+                if _in_range(now_t, start_t, end_t):
+                    msg = (
+                        f"Skipped schedule {schedule.name}: excluded time "
+                        f"range {start_t}-{end_t} on {current_day}."
+                    )
+                    SessionScheduleTask.objects.create(
+                        schedule=schedule,
+                        task_id=self.request.id,
+                        status=SessionScheduleTaskStatusChoices.SUCCESS.value,
+                        result=msg,
+                    )
+                    return msg
+            except Exception:
+                # Ignore malformed range entries
+                continue
         # Here you would add the logic that needs to be executed.
         # For now, we'll just simulate a successful execution.
         result_message = f"Successfully executed schedule {schedule.name}"
