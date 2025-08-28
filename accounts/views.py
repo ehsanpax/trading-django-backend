@@ -191,6 +191,8 @@ class UserRegistrationView(generics.CreateAPIView):
 from rest_framework import viewsets
 from accounts.models import ProfitTakingProfile
 from .serializers import ProfitTakingProfileSerializer, UserSerializer # Added UserSerializer
+from .serializers import ProfileSerializer
+from .models import Profile
 from rest_framework.exceptions import PermissionDenied
 
 class MeView(APIView):
@@ -214,6 +216,42 @@ class ProfitTakingProfileViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         # HiddenField already ensures `user=request.user`, so just save
         serializer.save()
+
+
+class MyProfileView(APIView):
+    """Retrieve and update the authenticated user's profile.
+    GET -> current profile
+    PUT/PATCH -> update fields (including email/name/surname via nested User)
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        profile, _ = Profile.objects.get_or_create(user=request.user)
+        data = ProfileSerializer(profile).data
+        return Response(data, status=status.HTTP_200_OK)
+
+    def put(self, request):
+        profile, _ = Profile.objects.get_or_create(user=request.user)
+        serializer = ProfileSerializer(
+            profile,
+            data=request.data,
+            context={'request': request}
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def patch(self, request):
+        profile, _ = Profile.objects.get_or_create(user=request.user)
+        serializer = ProfileSerializer(
+            profile,
+            data=request.data,
+            partial=True,
+            context={'request': request}
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 # --- Internal endpoints for cTrader token management ---
 class InternalCTraderTokensView(APIView):

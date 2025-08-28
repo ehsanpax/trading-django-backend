@@ -94,9 +94,78 @@ from django.db.models.signals import post_save
 from django.dispatch import receiver
 
 
+def default_notification_prefs():
+    """Default notification preferences for new profiles."""
+    return {
+        "email": True,
+        "sms": False,
+        "push": True,
+    }
+
+
 class Profile(models.Model):
-    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='profile')
-    is_approved = models.BooleanField(default=False, help_text="Designates whether the user has been approved by an admin.")
+    """Extended profile for each user."""
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='profile'
+    )
+    is_approved = models.BooleanField(
+        default=False,
+        help_text="Designates whether the user has been approved by an admin."
+    )
+
+    # Contact
+    phone = models.CharField(max_length=32, blank=True)
+
+    # Location
+    country = models.CharField(max_length=100, blank=True)
+    state = models.CharField(max_length=100, blank=True)
+    address = models.TextField(blank=True)
+
+    # Preferences
+    TIMEZONE_MAX_LENGTH = 64
+    timezone = models.CharField(max_length=TIMEZONE_MAX_LENGTH, default='UTC')
+    profile_currency = models.CharField(
+        max_length=3,
+        blank=True,
+        help_text="ISO 4217 currency code (e.g. USD, EUR)"
+    )
+
+    # Trading experience
+    BEGINNER = 'BEGINNER'
+    INTERMEDIATE = 'INTERMEDIATE'
+    ADVANCED = 'ADVANCED'
+    PROFESSIONAL = 'PROFESSIONAL'
+    EXPERIENCE_LEVEL_CHOICES = [
+        (BEGINNER, 'Beginner'),
+        (INTERMEDIATE, 'Intermediate'),
+        (ADVANCED, 'Advanced'),
+        (PROFESSIONAL, 'Professional'),
+    ]
+    trading_experience = models.CharField(
+        max_length=20,
+        choices=EXPERIENCE_LEVEL_CHOICES,
+        default=BEGINNER,
+    )
+
+    # Additional optional fields
+    locale = models.CharField(max_length=20, blank=True, help_text="Language/locale, e.g., en-US")
+    city = models.CharField(max_length=100, blank=True)
+    postal_code = models.CharField(max_length=20, blank=True)
+    date_of_birth = models.DateField(null=True, blank=True)
+
+    # Notification preferences (flexible JSON)
+    notification_prefs = models.JSONField(default=default_notification_prefs, blank=True)
+
+    # Default account (must belong to same user). Use SET_NULL to avoid cascade issues on account deletion.
+    default_account = models.ForeignKey(
+        'accounts.Account',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='as_default_for_profiles'
+    )
 
     def __str__(self):
         return f"{self.user.username}'s Profile"

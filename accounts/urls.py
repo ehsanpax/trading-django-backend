@@ -8,6 +8,7 @@ from .views import DeleteAccountView
 from .views import FetchAccountDetailsView
 from .views import ProfitTakingProfileViewSet
 from .views import MeView, UserRegistrationView # Added MeView import
+from .views import MyProfileView
 from .views import InternalCTraderTokensView # Added InternalCTraderTokensView import
 
 # bind the viewset actions to view functions
@@ -26,12 +27,15 @@ urlpatterns = [
     path("register/", UserRegistrationView.as_view(), name="register"),
     path("create/", CreateAccountView.as_view(), name="create-account"),
     path("", ListAccountsView.as_view(), name="list-accounts"),
+    # REST-style alias: GET /api/accounts/<uuid>/ -> account details
+    path("<uuid:account_id>/", FetchAccountDetailsView.as_view(), name="account-detail"),
     path("update/<uuid:account_id>/", UpdateAccountView.as_view(), name="update-account"),
     path("delete/<uuid:account_id>/", DeleteAccountView.as_view(), name="delete-account"),
     path("details/<uuid:account_id>/", FetchAccountDetailsView.as_view(), name="fetch-account-details"),
     path('profit-profiles/', profit_profile_list, name='profit-profile-list'),
     path('profit-profiles/<int:pk>/', profit_profile_detail, name='profit-profile-detail'),
     path('me/', MeView.as_view(), name='me'), # Added 'me' endpoint
+    path('profile/', MyProfileView.as_view(), name='my-profile'),
     # Internal endpoints for microservice (accept int CTraderAccount.id or UUID Account.id)
     path("internal/brokers/ctrader/<str:ctrader_account_id>/tokens", InternalCTraderTokensView.as_view(), name="internal-ctrader-tokens"),
     
